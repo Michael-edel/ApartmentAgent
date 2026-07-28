@@ -7,6 +7,10 @@ from xml.etree import ElementTree
 
 import httpx
 
+from app.config import get_settings
+
+settings = get_settings()
+
 
 @dataclass(slots=True)
 class SearchItem:
@@ -23,10 +27,9 @@ def is_allowed_listing_url(url: str) -> bool:
 
 def normalize_listing_url(url: str) -> str:
     parsed = urlparse(url)
-    scheme = "https"
     host = (parsed.hostname or "krisha.kz").lower()
     path = parsed.path.rstrip("/")
-    return f"{scheme}://{host}{path}"
+    return f"https://{host}{path}"
 
 
 def _decode_bing_link(url: str) -> str:
@@ -60,15 +63,56 @@ def _parse_rss(xml_text: str) -> list[SearchItem]:
 async def search_bing_rss(query: str) -> list[SearchItem]:
     url = f"https://www.bing.com/search?format=rss&q={quote_plus(query)}"
     headers = {
-        "User-Agent": "ApartmentAgent/0.7 (+personal property search)",
+        "User-Agent": "ApartmentAgent/0.8 (+personal property search)",
         "Accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8",
     }
-    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True, headers=headers) as client:
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, headers=headers) as client:
         response = await client.get(url)
         response.raise_for_status()
     return _parse_rss(response.text)
 
 
+async def search_brave(query: str) -> list[SearchItem]:
+    if not settings.brave_search_api_key:
+        return []
+
+    headers = {
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip",
+        "X-Subscription-Token": settings.brave_search_api_key,
+        "User-Agent": "ApartmentAgent/0.8",
+    }
+    params = {
+        "q": query,
+        "count": 20,
+        "country": "KZ",
+        "search_lang": "ru",
+        "ui_lang": "ru-RU",
+        "safesearch": "moderate",
+        "freshness": settings.search_freshness,
+    }
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True, headers=headers) as client:
+        response = await client.get("https://api.search.brave.com/res/v1/web/search", params=params)
+        response.raise_for_status()
+        payload = response.json()
+
+    results = payload.get("web", {}).get("results", [])
+    items: list[SearchItem] = []
+    for result in results:
+        url = str(result.get("url") or "")
+        if not is_allowed_listing_url(url):
+            continue
+        items.append(
+            SearchItem(
+                title=unescape(str(result.get("title") or "Новое объявление Krisha")),
+                url=normalize_listing_url(url),
+                snippet=unescape(str(result.get("description") or "")) or None,
+            )
+        )
+    return items
+
+
 PROVIDERS = {
+    "brave": search_brave,
     "bing_rss": search_bing_rss,
 }
