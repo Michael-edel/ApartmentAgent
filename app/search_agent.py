@@ -62,6 +62,16 @@ def _matches_target(item: SearchItem) -> bool:
     )
 
 
+def _row_matches_target(row: SearchResult) -> bool:
+    return is_target_search_result(
+        row.title,
+        row.snippet,
+        max_price=settings.max_price_kzt,
+        min_area=settings.min_area_m2,
+        max_area=settings.max_area_m2,
+    )
+
+
 def _rotated_queries() -> list[str]:
     count = min(max(settings.search_queries_per_run, 1), len(SEARCH_QUERIES))
     slot = int(datetime.now(timezone.utc).timestamp() // (max(settings.search_interval_minutes, 15) * 60))
@@ -74,6 +84,13 @@ async def _save_items(provider_name: str, query: str, items: list[SearchItem]) -
     new_found = 0
     now = datetime.now(timezone.utc)
     async with SessionLocal() as session:
+        old_rows = (await session.scalars(select(SearchResult))).all()
+        removed_old = 0
+        for row in old_rows:
+            if not _row_matches_target(row):
+                await session.delete(row)
+                removed_old += 1
+
         for item in accepted_items:
             existing = await session.scalar(select(SearchResult).where(SearchResult.url == item.url))
             if existing:
@@ -100,7 +117,10 @@ async def _save_items(provider_name: str, query: str, items: list[SearchItem]) -
                 total_found=len(accepted_items),
                 new_found=new_found,
                 status="ok",
-                message=f"Отфильтровано: {len(items) - len(accepted_items)}; принято: {len(accepted_items)}",
+                message=(
+                    f"Отфильтровано в текущей выдаче: {len(items) - len(accepted_items)}; "
+                    f"принято: {len(accepted_items)}; удалено старых неподходящих: {removed_old}"
+                ),
             )
         )
         await session.commit()
