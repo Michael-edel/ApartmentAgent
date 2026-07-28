@@ -8,7 +8,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.krisha_search import KrishaSearchBlocked
 from app.models import SearchHistory, SearchResult
-from app.search_analysis import analyze_search_result
+from app.search_analysis import analyze_search_result, is_target_search_result
 from app.search_providers import PROVIDERS, SearchItem
 
 settings = get_settings()
@@ -52,6 +52,16 @@ def _priority(title: str, snippet: str | None) -> str:
     return "normal"
 
 
+def _matches_target(item: SearchItem) -> bool:
+    return is_target_search_result(
+        item.title,
+        item.snippet,
+        max_price=settings.max_price_kzt,
+        min_area=settings.min_area_m2,
+        max_area=settings.max_area_m2,
+    )
+
+
 def _rotated_queries() -> list[str]:
     count = min(max(settings.search_queries_per_run, 1), len(SEARCH_QUERIES))
     slot = int(datetime.now(timezone.utc).timestamp() // (max(settings.search_interval_minutes, 15) * 60))
@@ -59,11 +69,12 @@ def _rotated_queries() -> list[str]:
     return [SEARCH_QUERIES[(start + offset) % len(SEARCH_QUERIES)] for offset in range(count)]
 
 
-async def _save_items(provider_name: str, query: str, items: list[SearchItem]) -> int:
+async def _save_items(provider_name: str, query: str, items: list[SearchItem]) -> tuple[int, int]:
+    accepted_items = [item for item in items if _matches_target(item)]
     new_found = 0
     now = datetime.now(timezone.utc)
     async with SessionLocal() as session:
-        for item in items:
+        for item in accepted_items:
             existing = await session.scalar(select(SearchResult).where(SearchResult.url == item.url))
             if existing:
                 existing.last_seen = now
@@ -86,13 +97,14 @@ async def _save_items(provider_name: str, query: str, items: list[SearchItem]) -
             SearchHistory(
                 search_engine=provider_name,
                 query=query,
-                total_found=len(items),
+                total_found=len(accepted_items),
                 new_found=new_found,
                 status="ok",
+                message=f"Отфильтровано: {len(items) - len(accepted_items)}; принято: {len(accepted_items)}",
             )
         )
         await session.commit()
-    return new_found
+    return new_found, len(accepted_items)
 
 
 async def _save_provider_status(
@@ -165,16 +177,16 @@ async def run_search() -> SearchSummary:
 
         safe_items = items or []
         try:
-            new_found = await _save_items(provider_name, query, safe_items)
+            new_found, accepted_count = await _save_items(provider_name, query, safe_items)
         except Exception as exc:
             summary.errors += 1
             stats["errors"] += 1
             await _save_provider_status(provider_name, query, "error", str(exc))
             continue
 
-        summary.found += len(safe_items)
+        summary.found += accepted_count
         summary.new += new_found
-        stats["found"] += len(safe_items)
+        stats["found"] += accepted_count
         stats["new"] += new_found
 
     return summary
