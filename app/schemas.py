@@ -4,6 +4,10 @@ from typing import Literal
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 
+class ListingImportRequest(BaseModel):
+    source_url: HttpUrl
+
+
 class ListingCreate(BaseModel):
     source: str = Field(default="manual", max_length=50)
     source_url: HttpUrl
