@@ -20,7 +20,9 @@ class Settings(BaseSettings):
     search_enabled: bool = True
     search_interval_minutes: int = 15
     search_queries_per_run: int = 8
-    search_providers: list[str] = ["bing_rss"]
+    search_providers: list[str] = ["brave", "bing_rss"]
+    brave_search_api_key: str = ""
+    search_freshness: str = "pw"
 
     max_price_kzt: int = 30_000_000
     min_area_m2: float = 55.0
