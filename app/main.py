@@ -6,11 +6,12 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
+from app.importer import ListingImportError, import_krisha_listing
 from app.scoring import assess_listing
-from app.schemas import ListingCreate, ListingResponse
+from app.schemas import ListingCreate, ListingImportRequest, ListingResponse
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, version="0.2.0")
+app = FastAPI(title=settings.app_name, version="0.3.0")
 
 _static_dir = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=_static_dir), name="static")
@@ -44,12 +45,7 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "service": settings.app_name}
 
 
-@app.post(
-    "/api/v1/listings",
-    response_model=ListingResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def create_listing(payload: ListingCreate) -> ListingResponse:
+def _save_listing(payload: ListingCreate) -> ListingResponse:
     normalized_url = str(payload.source_url)
     if any(str(item.source_url) == normalized_url for item in _listings):
         raise HTTPException(
@@ -65,6 +61,28 @@ async def create_listing(payload: ListingCreate) -> ListingResponse:
     )
     _listings.append(listing)
     return listing
+
+
+@app.post(
+    "/api/v1/listings",
+    response_model=ListingResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_listing(payload: ListingCreate) -> ListingResponse:
+    return _save_listing(payload)
+
+
+@app.post(
+    "/api/v1/listings/import",
+    response_model=ListingResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def import_listing(payload: ListingImportRequest) -> ListingResponse:
+    try:
+        listing_data = await import_krisha_listing(str(payload.source_url))
+    except ListingImportError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return _save_listing(listing_data)
 
 
 @app.get("/api/v1/listings", response_model=list[ListingResponse])
