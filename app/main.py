@@ -1,15 +1,42 @@
 from datetime import UTC, datetime
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, status
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.scoring import assess_listing
 from app.schemas import ListingCreate, ListingResponse
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, version="0.1.0")
+app = FastAPI(title=settings.app_name, version="0.2.0")
+
+_static_dir = Path(__file__).resolve().parent / "static"
+app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 _listings: list[ListingResponse] = []
+
+
+@app.get("/", include_in_schema=False)
+async def web_app() -> FileResponse:
+    return FileResponse(_static_dir / "index.html")
+
+
+@app.get("/manifest.webmanifest", include_in_schema=False)
+async def manifest() -> FileResponse:
+    return FileResponse(
+        _static_dir / "manifest.webmanifest",
+        media_type="application/manifest+json",
+    )
+
+
+@app.get("/service-worker.js", include_in_schema=False)
+async def service_worker() -> FileResponse:
+    return FileResponse(
+        _static_dir / "service-worker.js",
+        media_type="application/javascript",
+    )
 
 
 @app.get("/health")
