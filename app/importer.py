@@ -8,7 +8,6 @@ import httpx
 
 from app.schemas import ListingCreate
 
-_ALLOWED_HOSTS = {"krisha.kz", "www.krisha.kz"}
 _PRICE_RE = re.compile(r"(?P<price>\d[\d\s\u00a0]{5,})\s*(?:₸|тг|тенге)", re.IGNORECASE)
 _AREA_RE = re.compile(r"(?P<area>\d{2,3}(?:[.,]\d+)?)\s*м(?:²|2)", re.IGNORECASE)
 _ROOMS_RE = re.compile(r"(?P<rooms>\d+)\s*[- ]?комнат", re.IGNORECASE)
@@ -23,6 +22,11 @@ _YEAR_RE = re.compile(
 
 class ListingImportError(ValueError):
     pass
+
+
+def _is_krisha_host(host: str) -> bool:
+    normalized = host.lower().rstrip(".")
+    return normalized == "krisha.kz" or normalized.endswith(".krisha.kz")
 
 
 def _clean_number(value: str) -> int:
@@ -117,7 +121,7 @@ def _embedded_number(html: str, keys: set[str], minimum: float, maximum: float) 
 async def import_krisha_listing(source_url: str) -> ListingCreate:
     parsed = urlparse(source_url)
     host = (parsed.hostname or "").lower()
-    if parsed.scheme not in {"http", "https"} or host not in _ALLOWED_HOSTS:
+    if parsed.scheme not in {"http", "https"} or not _is_krisha_host(host):
         raise ListingImportError("Разрешены только ссылки krisha.kz")
 
     headers = {
@@ -129,12 +133,17 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
     try:
         async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=headers) as client:
             response = await client.get(source_url)
+    except httpx.TooManyRedirects as exc:
+        raise ListingImportError("Источник создал слишком много перенаправлений") from exc
     except httpx.HTTPError as exc:
         raise ListingImportError("Не удалось загрузить объявление") from exc
 
     final_host = (response.url.host or "").lower()
-    if final_host not in _ALLOWED_HOSTS:
-        raise ListingImportError("Источник перенаправил запрос на посторонний сайт")
+    if not _is_krisha_host(final_host):
+        raise ListingImportError(
+            f"Krisha перенаправила запрос на внешний домен {final_host or 'неизвестен'}. "
+            "Откройте объявление в Safari, скопируйте конечный адрес и вставьте его снова"
+        )
     if response.status_code in {403, 429}:
         raise ListingImportError("Источник ограничил автоматический доступ. Введите данные вручную")
     if response.status_code != 200:
