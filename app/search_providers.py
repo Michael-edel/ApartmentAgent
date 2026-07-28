@@ -9,6 +9,7 @@ from xml.etree import ElementTree
 import httpx
 
 from app.config import get_settings
+from app.krisha_search import KrishaSearchError
 from app.krisha_search import search_krisha_direct as fetch_krisha_direct
 
 settings = get_settings()
@@ -63,24 +64,24 @@ def _parse_rss(xml_text: str) -> list[SearchItem]:
 
 
 def _clean_web_query(query: str) -> str:
-    cleaned = query.replace("site:krisha.kz/a/show/", "")
+    cleaned = re.sub(r"site:\S+", " ", query, flags=re.IGNORECASE)
     cleaned = cleaned.replace('"', " ")
     cleaned = re.sub(r"\b(?:55|60|65|70)\s*м(?:²|2)?\b", " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\b30\s*000\s*000\b", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned or "Астана купить 2-комнатную квартиру krisha.kz"
+    return cleaned or "krisha.kz астана 2-комнатная квартира"
 
 
 async def search_bing_rss(query: str) -> list[SearchItem]:
     clean_query = _clean_web_query(query)
-    url = f"https://www.bing.com/search?format=rss&q={quote_plus(clean_query)}"
+    url = f"https://www.bing.com/search?format=rss&q={quote_plus(clean_query)}&count=50"
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
         ),
         "Accept": "application/rss+xml, application/xml;q=0.9, text/html;q=0.8",
-        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.5",
+        "Accept-Language": "ru-RU,ru;q=0.9",
     }
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, headers=headers) as client:
         response = await client.get(url)
@@ -107,7 +108,7 @@ async def search_brave(query: str) -> list[SearchItem]:
         "search_lang": "ru",
         "ui_lang": "ru-RU",
         "safesearch": "moderate",
-        "freshness": settings.search_freshness or "pw",
+        "freshness": settings.search_freshness or "week",
     }
     async with httpx.AsyncClient(timeout=20.0, follow_redirects=True, headers=headers) as client:
         response = await client.get("https://api.search.brave.com/res/v1/web/search", params=params)
@@ -131,7 +132,10 @@ async def search_brave(query: str) -> list[SearchItem]:
 
 
 async def search_krisha_direct(_: str) -> list[SearchItem]:
-    items = await fetch_krisha_direct()
+    try:
+        items = await fetch_krisha_direct()
+    except KrishaSearchError:
+        return []
     return [SearchItem(title=item.title, url=item.url, snippet=item.snippet) for item in items]
 
 
