@@ -97,3 +97,37 @@ def analyze_search_result(title: str, snippet: str | None, *, max_price: int, mi
         "price_per_m2": price_per_m2,
         "reasons": reasons,
     }
+
+
+def is_target_search_result(
+    title: str,
+    snippet: str | None,
+    *,
+    max_price: int,
+    min_area: float,
+    max_area: float,
+) -> bool:
+    """Пропускает только явно распознанные двухкомнатные квартиры в заданном диапазоне."""
+    analysis = analyze_search_result(
+        title,
+        snippet,
+        max_price=max_price,
+        min_area=min_area,
+        max_area=max_area,
+    )
+
+    text = f"{title} {snippet or ''}".lower()
+    rooms = analysis["rooms"]
+    is_two_room = rooms == 2 or "двухкомнат" in text or "2-комнат" in text
+    if not is_two_room:
+        return False
+
+    area = analysis["area_m2"]
+    if area is None or not (min_area <= area <= max_area):
+        return False
+
+    price = analysis["price_kzt"]
+    if price is not None and price > max_price:
+        return False
+
+    return True
