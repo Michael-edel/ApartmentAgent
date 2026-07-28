@@ -35,10 +35,22 @@ class Settings(BaseSettings):
 
     @field_validator("search_providers", mode="before")
     @classmethod
-    def parse_search_providers(cls, value: object) -> object:
+    def parse_search_providers(cls, value: object) -> list[str]:
         if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
-        return value
+            requested = [item.strip().lower() for item in value.split(",") if item.strip()]
+        elif isinstance(value, (list, tuple, set)):
+            requested = [str(item).strip().lower() for item in value if str(item).strip()]
+        else:
+            requested = []
+
+        # Прямой поиск Krisha является обязательным основным источником.
+        # Старый локальный .env с SEARCH_PROVIDERS=bing_rss больше не отключает его.
+        allowed = {"krisha_direct", "brave", "bing_rss"}
+        providers = ["krisha_direct"]
+        for provider in requested or ["brave", "bing_rss"]:
+            if provider in allowed and provider not in providers:
+                providers.append(provider)
+        return providers
 
 
 @lru_cache
