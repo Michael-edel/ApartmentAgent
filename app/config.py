@@ -20,9 +20,13 @@ class Settings(BaseSettings):
     search_enabled: bool = True
     search_interval_minutes: int = 15
     search_queries_per_run: int = 8
-    search_providers: list[str] = ["brave", "bing_rss"]
+    search_providers: list[str] = ["krisha_direct", "brave", "bing_rss"]
     brave_search_api_key: str = ""
     search_freshness: str = "pw"
+
+    krisha_search_pages: int = 3
+    krisha_search_timeout_seconds: float = 20.0
+    krisha_search_delay_seconds: float = 2.0
 
     max_price_kzt: int = 30_000_000
     min_area_m2: float = 55.0
