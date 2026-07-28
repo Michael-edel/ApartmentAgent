@@ -16,6 +16,7 @@ const searchMessage = document.querySelector('#searchMessage');
 const searchMeta = document.querySelector('#searchMeta');
 const searchResults = document.querySelector('#searchResults');
 const reloadSearchResults = document.querySelector('#refreshSearchButton');
+let savedUrls = new Set();
 
 function escapeHtml(value='') {
   return String(value).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#039;','"':'&quot;'}[ch]));
@@ -26,6 +27,18 @@ async function readJson(response) {
   if (!text.trim()) throw new Error(`Сервер не вернул ответ (HTTP ${response.status}). Повторите попытку.`);
   try { return JSON.parse(text); }
   catch { throw new Error(response.ok ? 'Сервер вернул некорректный ответ' : `Ошибка сервера HTTP ${response.status}`); }
+}
+
+function normalizeUrl(value='') {
+  try { const u = new URL(value, location.origin); return `${u.origin}${u.pathname.replace(/\/$/, '')}`; }
+  catch { return String(value).replace(/\/$/, ''); }
+}
+
+function cleanSearchTitle(title='') {
+  let value = String(title).replace(/\s+/g, ' ').trim();
+  value = value.replace(/\s*[·|,-]\s*\d{2,3}(?:[.,]\d+)?\s*м(?:²|2).*$/i, '');
+  value = value.replace(/\s*\d{1,2}\s*\/\s*\d{1,2}\s*этаж.*$/i, '');
+  return value || '2-комнатная квартира';
 }
 
 function priorityLabel(priority) {
@@ -41,6 +54,7 @@ function priorityClass(priority) {
 }
 
 function render(listings) {
+  savedUrls = new Set(listings.map(item => normalizeUrl(item.source_url)));
   const minScore = Number(filter?.value || 0);
   const visible = listings.filter(item => item.assessment.score >= minScore);
   const strong = listings.filter(item => item.assessment.score >= 85);
@@ -81,7 +95,6 @@ async function loadListings() {
 async function markSeen(id) { await fetch(`/api/v1/search/results/${id}/seen`, {method:'POST'}); }
 
 async function importSearchResult(url, button) {
-  const original = button.textContent;
   button.disabled = true;
   button.textContent = 'Загружаю данные…';
   try {
@@ -92,12 +105,14 @@ async function importSearchResult(url, button) {
     });
     const body = await readJson(response);
     if (!response.ok && response.status !== 409) throw new Error(body.detail || 'Не удалось загрузить данные');
+    savedUrls.add(normalizeUrl(url));
     button.textContent = response.status === 409 ? 'Уже сохранено' : `Сохранено · ${body.assessment?.score || '—'}/100`;
+    button.classList.add('saved');
     await loadListings();
   } catch (error) {
     button.textContent = error.message;
-  } finally {
-    setTimeout(() => { button.disabled = false; button.textContent = original; }, 3500);
+    button.classList.add('button-error');
+    setTimeout(() => { button.textContent = 'Повторить сохранение'; button.disabled = false; button.classList.remove('button-error'); }, 3500);
   }
 }
 
@@ -113,29 +128,30 @@ async function loadSearchResults() {
     }
     searchResults.innerHTML = items.map(item => {
       const a = item.analysis || {};
-      const details = [
+      const facts = [
         a.price_kzt ? money.format(a.price_kzt) : null,
         a.area_m2 ? `${number.format(a.area_m2)} м²` : null,
         a.price_per_m2 ? `${money.format(a.price_per_m2)}/м²` : null,
         a.floor ? `${a.floor}/${a.floors_total || '—'} этаж` : null
-      ].filter(Boolean).join(' · ');
+      ].filter(Boolean);
       const reasons = (a.reasons || []).slice(0, 3).map(reason => `<li>✓ ${escapeHtml(reason)}</li>`).join('');
+      const isSaved = savedUrls.has(normalizeUrl(item.url));
       return `<article class="listing card ${priorityClass(item.priority)}">
         <div class="listing-top">
-          <div><span class="verdict">${priorityLabel(item.priority)}</span><h3>${escapeHtml(item.title || 'Новое объявление Krisha')}</h3></div>
+          <div><span class="verdict">${priorityLabel(item.priority)}</span><h3>${escapeHtml(cleanSearchTitle(item.title))}</h3></div>
           <div class="rating ${a.score < 85 ? 'medium' : ''}">${a.score ?? '—'}</div>
         </div>
-        ${details ? `<div class="price">${escapeHtml(details)}</div>` : ''}
-        ${reasons ? `<ul class="meta">${reasons}</ul>` : `<p class="meta">${escapeHtml(item.snippet || 'Откройте объявление для проверки параметров.')}</p>`}
-        <div class="meta">Источник: ${escapeHtml(item.search_engine)} · обнаружено ${dateTime.format(new Date(item.first_seen))}</div>
+        ${facts.length ? `<div class="search-facts">${facts.map(value => `<span>${escapeHtml(value)}</span>`).join('')}</div>` : ''}
+        ${reasons ? `<ul class="reason-list">${reasons}</ul>` : `<p class="meta">${escapeHtml(item.snippet || 'Откройте объявление для проверки параметров.')}</p>`}
+        <div class="meta source-meta">Источник: ${escapeHtml(item.search_engine)} · обнаружено ${dateTime.format(new Date(item.first_seen))}</div>
         <div class="card-actions">
-          <button class="enrich-result" data-url="${escapeHtml(item.url)}" type="button">Сохранить и оценить</button>
+          <button class="enrich-result primary secondary-action ${isSaved ? 'saved' : ''}" data-url="${escapeHtml(item.url)}" type="button" ${isSaved ? 'disabled' : ''}>${isSaved ? 'Уже сохранено' : 'Сохранить и оценить'}</button>
           <a class="search-open" data-result-id="${item.id}" href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Открыть объявление →</a>
         </div>
       </article>`;
     }).join('');
     searchResults.querySelectorAll('.search-open').forEach(link => link.addEventListener('click', () => markSeen(link.dataset.resultId)));
-    searchResults.querySelectorAll('.enrich-result').forEach(button => button.addEventListener('click', () => importSearchResult(button.dataset.url, button)));
+    searchResults.querySelectorAll('.enrich-result:not(.saved)').forEach(button => button.addEventListener('click', () => importSearchResult(button.dataset.url, button)));
   } catch (error) {
     if (searchMessage) searchMessage.textContent = error.message;
   }
@@ -166,7 +182,8 @@ runSearchButton?.addEventListener('click', async () => {
     const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось выполнить поиск');
     if (searchMessage) searchMessage.textContent = `Запросов: ${body.queries}. Найдено ссылок: ${body.found}. Новых: ${body.new}. Ошибок: ${body.errors}.`;
-    await Promise.all([loadSearchStatus(), loadSearchResults()]);
+    await Promise.all([loadListings(), loadSearchStatus()]);
+    await loadSearchResults();
   } catch (error) {
     if (searchMessage) searchMessage.textContent = error.message;
   } finally { runSearchButton.disabled = false; }
@@ -174,6 +191,7 @@ runSearchButton?.addEventListener('click', async () => {
 
 reloadSearchResults?.addEventListener('click', async () => {
   reloadSearchResults.disabled = true;
+  await loadListings();
   await Promise.all([loadSearchStatus(), loadSearchResults()]);
   reloadSearchResults.disabled = false;
 });
@@ -206,6 +224,7 @@ importForm?.addEventListener('submit', async event => {
     importForm.reset();
     if (filter) filter.value = '0';
     await loadListings();
+    await loadSearchResults();
   } catch (error) {
     if (importMessage) importMessage.textContent = error.message;
   } finally { button.disabled = false; }
@@ -229,12 +248,13 @@ form?.addEventListener('submit', async event => {
     if (!response.ok) throw new Error(body.detail || 'Не удалось сохранить квартиру');
     if (message) message.textContent = `Сохранено. Рейтинг ${body.assessment.score}/100 — ${body.assessment.verdict}`;
     await loadListings();
+    await loadSearchResults();
   } catch (error) {
     if (message) message.textContent = error.message;
   }
 });
 
 filter?.addEventListener('change', loadListings);
-refreshButton?.addEventListener('click', async () => Promise.all([loadListings(), loadSearchStatus(), loadSearchResults()]));
+refreshButton?.addEventListener('click', async () => { await loadListings(); await Promise.all([loadSearchStatus(), loadSearchResults()]); });
 if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/service-worker.js'));
-Promise.all([loadListings(), loadSearchStatus(), loadSearchResults()]);
+(async () => { await loadListings(); await Promise.all([loadSearchStatus(), loadSearchResults()]); })();
