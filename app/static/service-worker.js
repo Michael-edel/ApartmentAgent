@@ -1,4 +1,4 @@
-const CACHE = 'apartment-agent-v5';
+const CACHE = 'apartment-agent-v6';
 const ASSETS = ['/', '/static/styles.css', '/static/app.js', '/static/icon.svg', '/manifest.webmanifest'];
 
 self.addEventListener('install', event => {
