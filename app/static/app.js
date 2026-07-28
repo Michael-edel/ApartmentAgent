@@ -23,6 +23,18 @@ function escapeHtml(value='') {
   return String(value).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#039;','"':'&quot;'}[ch]));
 }
 
+async function readJson(response) {
+  const text = await response.text();
+  if (!text.trim()) {
+    throw new Error(`Сервер не вернул ответ (HTTP ${response.status}). Повторите попытку.`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(response.ok ? 'Сервер вернул некорректный ответ' : `Ошибка сервера HTTP ${response.status}`);
+  }
+}
+
 function priorityLabel(priority) {
   if (priority === 'urgent') return 'Срочно посмотреть';
   if (priority === 'good') return 'Хороший вариант';
@@ -66,7 +78,7 @@ async function loadListings() {
   try {
     const response = await fetch('/api/v1/listings');
     if (!response.ok) throw new Error('Не удалось загрузить квартиры');
-    render(await response.json());
+    render(await readJson(response));
   } catch (error) {
     message.textContent = error.message;
   } finally {
@@ -82,7 +94,7 @@ async function loadSearchResults() {
   try {
     const response = await fetch('/api/v1/search/results?limit=30&only_new=true');
     if (!response.ok) throw new Error('Не удалось загрузить найденные ссылки');
-    const items = await response.json();
+    const items = await readJson(response);
     searchEmpty.hidden = items.length > 0;
     searchResults.innerHTML = items.map(item => `<article class="listing card ${priorityClass(item.priority)}">
       <div class="listing-top">
@@ -109,7 +121,7 @@ async function loadSearchStatus() {
   try {
     const response = await fetch('/api/v1/search/status');
     if (!response.ok) throw new Error('Не удалось получить статус поиска');
-    const status = await response.json();
+    const status = await readJson(response);
     document.querySelector('#newSearchCount').textContent = status.new_results || 0;
     document.querySelector('#foundHour').textContent = status.found_last_hour || 0;
     document.querySelector('#foundToday').textContent = status.found_today || 0;
@@ -127,7 +139,7 @@ runSearchButton.addEventListener('click', async () => {
   searchMessage.textContent = 'Проверяю поисковую выдачу…';
   try {
     const response = await fetch('/api/v1/search/run', {method:'POST'});
-    const body = await response.json();
+    const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось выполнить поиск');
     searchMessage.textContent = `Запросов: ${body.queries}. Найдено ссылок: ${body.found}. Новых: ${body.new}. Ошибок: ${body.errors}.`;
     await Promise.all([loadSearchStatus(), loadSearchResults()]);
@@ -149,7 +161,7 @@ runChecksButton.addEventListener('click', async () => {
   checkMessage.textContent = 'Проверяю сохранённые объявления…';
   try {
     const response = await fetch('/api/v1/checks/run', {method:'POST'});
-    const body = await response.json();
+    const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось выполнить проверку');
     checkMessage.textContent = `Проверено: ${body.checked}. Изменений цены: ${body.updated}. Блокировок источника: ${body.blocked}. Ошибок: ${body.errors}.`;
     await loadListings();
@@ -172,7 +184,7 @@ importForm.addEventListener('submit', async event => {
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({source_url: data.get('source_url')})
     });
-    const body = await response.json();
+    const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось импортировать объявление');
     importMessage.textContent = `Готово: ${money.format(body.price_kzt)}, ${number.format(body.area_m2)} м², рейтинг ${body.assessment.score}/100.`;
     importForm.reset();
@@ -211,7 +223,7 @@ form.addEventListener('submit', async event => {
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify(payload)
     });
-    const body = await response.json();
+    const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось сохранить квартиру');
     message.textContent = `Сохранено. Рейтинг ${body.assessment.score}/100 — ${body.assessment.verdict}`;
     await loadListings();
