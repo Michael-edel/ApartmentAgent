@@ -8,6 +8,7 @@ from xml.etree import ElementTree
 import httpx
 
 from app.config import get_settings
+from app.krisha_search import search_krisha_direct as fetch_krisha_direct
 
 settings = get_settings()
 
@@ -63,7 +64,7 @@ def _parse_rss(xml_text: str) -> list[SearchItem]:
 async def search_bing_rss(query: str) -> list[SearchItem]:
     url = f"https://www.bing.com/search?format=rss&q={quote_plus(query)}"
     headers = {
-        "User-Agent": "ApartmentAgent/0.8 (+personal property search)",
+        "User-Agent": "ApartmentAgent/0.9 (+personal property search)",
         "Accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8",
     }
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, headers=headers) as client:
@@ -80,7 +81,7 @@ async def search_brave(query: str) -> list[SearchItem]:
         "Accept": "application/json",
         "Accept-Encoding": "gzip",
         "X-Subscription-Token": settings.brave_search_api_key,
-        "User-Agent": "ApartmentAgent/0.8",
+        "User-Agent": "ApartmentAgent/0.9",
     }
     params = {
         "q": query,
@@ -112,7 +113,13 @@ async def search_brave(query: str) -> list[SearchItem]:
     return items
 
 
+async def search_krisha_direct(_: str) -> list[SearchItem]:
+    items = await fetch_krisha_direct()
+    return [SearchItem(title=item.title, url=item.url, snippet=item.snippet) for item in items]
+
+
 PROVIDERS = {
+    "krisha_direct": search_krisha_direct,
     "brave": search_brave,
     "bing_rss": search_bing_rss,
 }
