@@ -37,6 +37,17 @@
       <article class="stat card"><span>Средняя цена</span><strong id="averagePrice">—</strong></article>
     </section>
 
+    <section class="form-card card">
+      <p class="muted">Быстрое добавление</p>
+      <h2>Вставьте ссылку Krisha</h2>
+      <form id="importForm">
+        <label>Ссылка на объявление<input name="source_url" type="url" required placeholder="https://krisha.kz/a/show/..."></label>
+        <button class="primary" type="submit">Загрузить и оценить</button>
+        <p class="muted">Агент попробует определить цену, площадь, комнаты, этаж и год дома. При ограничении доступа используйте ручную форму ниже.</p>
+        <p id="importMessage" class="message" role="status"></p>
+      </form>
+    </section>
+
     <section class="section-heading">
       <div><p class="muted">Мониторинг</p><h2>Квартиры</h2></div>
       <select id="scoreFilter" aria-label="Минимальный рейтинг">
@@ -50,13 +61,13 @@
     <div id="emptyState" class="empty card">
       <div class="house">⌂</div>
       <h3>Пока нет квартир</h3>
-      <p>Добавьте ссылку через форму ниже. Агент рассчитает цену за м² и рейтинг.</p>
+      <p>Вставьте ссылку Krisha выше или заполните данные вручную.</p>
     </div>
     <section id="listingGrid" class="listing-grid"></section>
 
     <section class="form-card card">
-      <p class="muted">Добавить вручную</p>
-      <h2>Новая квартира</h2>
+      <p class="muted">Резервный способ</p>
+      <h2>Добавить вручную</h2>
       <form id="listingForm">
         <label>Ссылка на объявление<input name="source_url" type="url" required placeholder="https://krisha.kz/a/show/..."></label>
         <div class="two-cols">
@@ -89,7 +100,7 @@
   <nav class="bottom-nav">
     <a href="#top" class="active"><span>⌂</span>Обзор</a>
     <a href="#listingGrid"><span>★</span>Лучшие</a>
-    <a href="#listingForm"><span>＋</span>Добавить</a>
+    <a href="#importForm"><span>＋</span>Добавить</a>
   </nav>
 
   <script src="/static/app.js" defer></script>
