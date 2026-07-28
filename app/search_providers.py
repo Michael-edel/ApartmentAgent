@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from html import unescape
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
@@ -61,11 +62,25 @@ def _parse_rss(xml_text: str) -> list[SearchItem]:
     return items
 
 
+def _clean_web_query(query: str) -> str:
+    cleaned = query.replace("site:krisha.kz/a/show/", "")
+    cleaned = cleaned.replace('"', " ")
+    cleaned = re.sub(r"\b(?:55|60|65|70)\s*м(?:²|2)?\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b30\s*000\s*000\b", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or "Астана купить 2-комнатную квартиру krisha.kz"
+
+
 async def search_bing_rss(query: str) -> list[SearchItem]:
-    url = f"https://www.bing.com/search?format=rss&q={quote_plus(query)}"
+    clean_query = _clean_web_query(query)
+    url = f"https://www.bing.com/search?format=rss&q={quote_plus(clean_query)}"
     headers = {
-        "User-Agent": "ApartmentAgent/0.9 (+personal property search)",
-        "Accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/rss+xml, application/xml;q=0.9, text/html;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.5",
     }
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, headers=headers) as client:
         response = await client.get(url)
@@ -77,20 +92,22 @@ async def search_brave(query: str) -> list[SearchItem]:
     if not settings.brave_search_api_key:
         return []
 
+    clean_query = _clean_web_query(query)
     headers = {
         "Accept": "application/json",
         "Accept-Encoding": "gzip",
         "X-Subscription-Token": settings.brave_search_api_key,
-        "User-Agent": "ApartmentAgent/0.9",
+        "User-Agent": "ApartmentAgent/0.10",
     }
     params = {
-        "q": query,
-        "count": 20,
+        "q": clean_query,
+        "count": 50,
+        "offset": 0,
         "country": "KZ",
         "search_lang": "ru",
         "ui_lang": "ru-RU",
         "safesearch": "moderate",
-        "freshness": settings.search_freshness,
+        "freshness": settings.search_freshness or "pw",
     }
     async with httpx.AsyncClient(timeout=20.0, follow_redirects=True, headers=headers) as client:
         response = await client.get("https://api.search.brave.com/res/v1/web/search", params=params)
