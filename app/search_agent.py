@@ -47,7 +47,7 @@ class SearchSummary:
 
 def _priority(title: str, snippet: str | None) -> str:
     text = f"{title} {snippet or ''}".lower().replace("\xa0", " ")
-    strong_signals = ("55 м", "56 м", "57 м", "58 м", "59 м", "60 м", "61 м", "62 м", "63 м", "64 м", "65 м", "66 м", "67 м", "68 м", "69 м", "70 м")
+    strong_signals = tuple(f"{size} м" for size in range(55, 71))
     if "2-комнат" in text and any(signal in text for signal in strong_signals):
         return "urgent"
     if "2-комнат" in text or "двухкомнат" in text:
@@ -85,6 +85,7 @@ async def _save_items(provider_name: str, query: str, items: list[SearchItem]) -
                     status=f"new:{priority}",
                 )
             )
+            await session.flush()
             new_found += 1
 
         session.add(
@@ -115,6 +116,15 @@ async def _save_error(provider_name: str, query: str, exc: Exception) -> None:
         await session.commit()
 
 
+async def _fetch_one(provider_name: str, query: str) -> tuple[str, str, list[SearchItem] | None, Exception | None]:
+    provider = PROVIDERS[provider_name]
+    try:
+        items = await asyncio.wait_for(provider(query), timeout=15.0)
+        return provider_name, query, items, None
+    except Exception as exc:
+        return provider_name, query, None, exc
+
+
 async def run_search() -> SearchSummary:
     summary = SearchSummary()
     if not settings.search_enabled:
@@ -122,27 +132,39 @@ async def run_search() -> SearchSummary:
 
     queries = _rotated_queries()
     enabled_providers = [name for name in settings.search_providers if name in PROVIDERS]
+    jobs = [(provider_name, query) for provider_name in enabled_providers for query in queries]
+    summary.queries = len(jobs)
 
     for provider_name in enabled_providers:
-        provider = PROVIDERS[provider_name]
-        provider_stats = summary.providers.setdefault(provider_name, {"queries": 0, "found": 0, "new": 0, "errors": 0})
-        for query in queries:
-            summary.queries += 1
-            provider_stats["queries"] += 1
-            try:
-                items = await provider(query)
-                new_found = await _save_items(provider_name, query, items)
-            except Exception as exc:
-                summary.errors += 1
-                provider_stats["errors"] += 1
-                await _save_error(provider_name, query, exc)
-                continue
+        summary.providers[provider_name] = {"queries": len(queries), "found": 0, "new": 0, "errors": 0}
 
-            summary.found += len(items)
-            summary.new += new_found
-            provider_stats["found"] += len(items)
-            provider_stats["new"] += new_found
-            await asyncio.sleep(0.8)
+    # Все поисковые запросы выполняются параллельно, чтобы HTTP-запрос из интерфейса
+    # не обрывался по таймауту Codespaces после последовательного ожидания 8 запросов.
+    results = await asyncio.gather(*(_fetch_one(provider_name, query) for provider_name, query in jobs))
+
+    # Запись выполняется последовательно: так одинаковые URL из разных запросов
+    # не конфликтуют по уникальному индексу search_results.url.
+    for provider_name, query, items, error in results:
+        provider_stats = summary.providers[provider_name]
+        if error is not None:
+            summary.errors += 1
+            provider_stats["errors"] += 1
+            await _save_error(provider_name, query, error)
+            continue
+
+        safe_items = items or []
+        try:
+            new_found = await _save_items(provider_name, query, safe_items)
+        except Exception as exc:
+            summary.errors += 1
+            provider_stats["errors"] += 1
+            await _save_error(provider_name, query, exc)
+            continue
+
+        summary.found += len(safe_items)
+        summary.new += new_found
+        provider_stats["found"] += len(safe_items)
+        provider_stats["new"] += new_found
 
     return summary
 
