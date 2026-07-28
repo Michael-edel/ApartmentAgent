@@ -1,0 +1,19 @@
+{
+  "name": "ApartmentAgent — квартиры Астаны",
+  "short_name": "Квартиры",
+  "description": "Мониторинг, рейтинг и финансовая оценка квартир в Астане",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#eef3f8",
+  "theme_color": "#17365d",
+  "lang": "ru-KZ",
+  "icons": [
+    {
+      "src": "/static/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
