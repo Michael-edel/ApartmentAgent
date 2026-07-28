@@ -34,7 +34,7 @@ async def lifespan(_: FastAPI):
     await engine.dispose()
 
 
-app = FastAPI(title=settings.app_name, version="0.6.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.7.0", lifespan=lifespan)
 _static_dir = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
@@ -46,29 +46,25 @@ async def web_app() -> FileResponse:
 
 @app.get("/manifest.webmanifest", include_in_schema=False)
 async def manifest() -> FileResponse:
-    return FileResponse(
-        _static_dir / "manifest.webmanifest",
-        media_type="application/manifest+json",
-    )
+    return FileResponse(_static_dir / "manifest.webmanifest", media_type="application/manifest+json")
 
 
 @app.get("/service-worker.js", include_in_schema=False)
 async def service_worker() -> FileResponse:
-    return FileResponse(
-        _static_dir / "service-worker.js",
-        media_type="application/javascript",
-    )
+    return FileResponse(_static_dir / "service-worker.js", media_type="application/javascript")
 
 
 @app.get("/health")
-async def health() -> dict[str, str | int | bool]:
+async def health() -> dict[str, object]:
     return {
         "status": "ok",
         "service": settings.app_name,
+        "version": "0.7.0",
         "storage": "postgresql",
         "automatic_check_minutes": max(settings.check_interval_minutes, 15),
         "search_enabled": settings.search_enabled,
         "search_interval_minutes": max(settings.search_interval_minutes, 15),
+        "search_providers": settings.search_providers,
     }
 
 
@@ -119,11 +115,7 @@ async def _save_listing(payload: ListingCreate) -> ListingResponse:
     return _to_response(row)
 
 
-@app.post(
-    "/api/v1/listings",
-    response_model=ListingResponse,
-    status_code=status.HTTP_201_CREATED,
-)
+@app.post("/api/v1/listings", response_model=ListingResponse, status_code=status.HTTP_201_CREATED)
 async def create_listing(payload: ListingCreate) -> ListingResponse:
     return await _save_listing(payload)
 
@@ -172,13 +164,14 @@ async def latest_checks() -> list[dict[str, object]]:
 
 
 @app.post("/api/v1/search/run")
-async def run_search_now() -> dict[str, int]:
+async def run_search_now() -> dict[str, object]:
     summary = await run_search()
     return {
         "queries": summary.queries,
         "found": summary.found,
         "new": summary.new,
         "errors": summary.errors,
+        "providers": summary.providers,
     }
 
 
@@ -193,7 +186,7 @@ async def search_results(limit: int = 50, only_new: bool = False) -> list[dict[s
     async with SessionLocal() as session:
         query = select(SearchResult).order_by(SearchResult.first_seen.desc()).limit(safe_limit)
         if only_new:
-            query = query.where(SearchResult.status == "new")
+            query = query.where(SearchResult.status.like("new:%"))
         rows = (await session.scalars(query)).all()
     return [
         {
@@ -203,7 +196,8 @@ async def search_results(limit: int = 50, only_new: bool = False) -> list[dict[s
             "query": row.query,
             "title": row.title,
             "snippet": row.snippet,
-            "status": row.status,
+            "status": row.status.split(":", 1)[0],
+            "priority": row.status.split(":", 1)[1] if ":" in row.status else "normal",
             "first_seen": row.first_seen,
             "last_seen": row.last_seen,
         }
@@ -217,9 +211,10 @@ async def mark_search_result_seen(result_id: int) -> dict[str, object]:
         row = await session.get(SearchResult, result_id)
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Search result not found")
-        row.status = "seen"
+        priority = row.status.split(":", 1)[1] if ":" in row.status else "normal"
+        row.status = f"seen:{priority}"
         await session.commit()
-    return {"id": result_id, "status": "seen"}
+    return {"id": result_id, "status": "seen", "priority": priority}
 
 
 @app.get("/api/v1/search/history")
