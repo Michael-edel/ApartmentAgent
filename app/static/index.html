@@ -14,27 +14,29 @@
 </head>
 <body>
   <header class="topbar">
-    <div>
-      <span class="eyebrow">ASTANA PROPERTY SCOUT</span>
-      <h1>ApartmentAgent</h1>
-    </div>
+    <div><span class="eyebrow">ASTANA PROPERTY SCOUT</span><h1>ApartmentAgent</h1></div>
     <button id="refreshButton" class="icon-button" aria-label="Обновить">↻</button>
   </header>
 
   <main>
     <section class="hero card">
-      <div>
-        <p class="muted">Ваши критерии</p>
-        <h2>Полноценная 2-комнатная</h2>
-        <p>Астана · 55–70 м² · до 30 000 000 ₸</p>
-      </div>
+      <div><p class="muted">Ваши критерии</p><h2>Полноценная 2-комнатная</h2><p>Астана · 55–70 м² · до 30 000 000 ₸</p></div>
       <div class="score-badge">85+</div>
     </section>
 
     <section class="stats-grid">
-      <article class="stat card"><span>Найдено</span><strong id="totalCount">0</strong></article>
+      <article class="stat card"><span>Сохранено</span><strong id="totalCount">0</strong></article>
       <article class="stat card"><span>Сильных</span><strong id="strongCount">0</strong></article>
-      <article class="stat card"><span>Средняя цена</span><strong id="averagePrice">—</strong></article>
+      <article class="stat card"><span>Новых ссылок</span><strong id="newSearchCount">0</strong></article>
+    </section>
+
+    <section class="form-card card">
+      <p class="muted">Раннее обнаружение</p>
+      <h2>Поиск новых объявлений</h2>
+      <p>Агент проверяет поисковую выдачу Bing RSS каждые 15 минут и сохраняет новые ссылки Krisha. Поисковая система может индексировать объявления с задержкой.</p>
+      <button id="runSearchButton" class="primary" type="button">Искать сейчас</button>
+      <p id="searchMessage" class="message" role="status"></p>
+      <div id="searchResults" class="listing-grid"></div>
     </section>
 
     <section class="form-card card">
@@ -51,66 +53,34 @@
       <form id="importForm">
         <label>Ссылка на объявление<input name="source_url" type="url" required placeholder="https://krisha.kz/a/show/..."></label>
         <button class="primary" type="submit">Загрузить и оценить</button>
-        <p class="muted">Агент попробует определить цену, площадь, комнаты, этаж и год дома. При ограничении доступа используйте ручную форму ниже.</p>
+        <p class="muted">При ограничении доступа используйте ручную форму ниже.</p>
         <p id="importMessage" class="message" role="status"></p>
       </form>
     </section>
 
     <section class="section-heading">
       <div><p class="muted">Мониторинг</p><h2>Квартиры</h2></div>
-      <select id="scoreFilter" aria-label="Минимальный рейтинг">
-        <option value="0">Все</option>
-        <option value="80">80+</option>
-        <option value="85" selected>85+</option>
-        <option value="90">90+</option>
-      </select>
+      <select id="scoreFilter" aria-label="Минимальный рейтинг"><option value="0">Все</option><option value="80">80+</option><option value="85" selected>85+</option><option value="90">90+</option></select>
     </section>
 
-    <div id="emptyState" class="empty card">
-      <div class="house">⌂</div>
-      <h3>Пока нет квартир</h3>
-      <p>Вставьте ссылку Krisha выше или заполните данные вручную.</p>
-    </div>
+    <div id="emptyState" class="empty card"><div class="house">⌂</div><h3>Пока нет квартир</h3><p>Добавьте найденную ссылку или заполните данные вручную.</p></div>
     <section id="listingGrid" class="listing-grid"></section>
 
     <section class="form-card card">
-      <p class="muted">Резервный способ</p>
-      <h2>Добавить вручную</h2>
+      <p class="muted">Резервный способ</p><h2>Добавить вручную</h2>
       <form id="listingForm">
         <label>Ссылка на объявление<input name="source_url" type="url" required placeholder="https://krisha.kz/a/show/..."></label>
-        <div class="two-cols">
-          <label>Цена, ₸<input name="price_kzt" type="number" required value="30000000"></label>
-          <label>Площадь, м²<input name="area_m2" type="number" step="0.1" required value="56"></label>
-        </div>
-        <div class="two-cols">
-          <label>Этаж<input name="floor" type="number" required value="4"></label>
-          <label>Этажей в доме<input name="total_floors" type="number" required value="10"></label>
-        </div>
-        <div class="two-cols">
-          <label>Комнат<input name="rooms" type="number" required value="2"></label>
-          <label>Год дома<input name="build_year" type="number" value="2020"></label>
-        </div>
-        <label>Материал дома
-          <select name="building_type">
-            <option value="brick">Кирпич</option>
-            <option value="monolith">Монолит</option>
-            <option value="panel">Панель</option>
-            <option value="other">Другое</option>
-          </select>
-        </label>
+        <div class="two-cols"><label>Цена, ₸<input name="price_kzt" type="number" required value="30000000"></label><label>Площадь, м²<input name="area_m2" type="number" step="0.1" required value="56"></label></div>
+        <div class="two-cols"><label>Этаж<input name="floor" type="number" required value="4"></label><label>Этажей в доме<input name="total_floors" type="number" required value="10"></label></div>
+        <div class="two-cols"><label>Комнат<input name="rooms" type="number" required value="2"></label><label>Год дома<input name="build_year" type="number" value="2020"></label></div>
+        <label>Материал дома<select name="building_type"><option value="brick">Кирпич</option><option value="monolith">Монолит</option><option value="panel">Панель</option><option value="other">Другое</option></select></label>
         <label class="check"><input name="otbasy_eligible" type="checkbox" checked> Подходит под Отбасы Банк</label>
-        <button class="primary" type="submit">Оценить и сохранить</button>
-        <p id="formMessage" class="message" role="status"></p>
+        <button class="primary" type="submit">Оценить и сохранить</button><p id="formMessage" class="message" role="status"></p>
       </form>
     </section>
   </main>
 
-  <nav class="bottom-nav">
-    <a href="#top" class="active"><span>⌂</span>Обзор</a>
-    <a href="#listingGrid"><span>★</span>Лучшие</a>
-    <a href="#importForm"><span>＋</span>Добавить</a>
-  </nav>
-
+  <nav class="bottom-nav"><a href="#top" class="active"><span>⌂</span>Обзор</a><a href="#searchResults"><span>⌕</span>Новые</a><a href="#listingGrid"><span>★</span>Лучшие</a></nav>
   <script src="/static/app.js" defer></script>
 </body>
 </html>
