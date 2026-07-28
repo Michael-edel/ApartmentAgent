@@ -9,6 +9,8 @@ const form = document.querySelector('#listingForm');
 const message = document.querySelector('#formMessage');
 const importForm = document.querySelector('#importForm');
 const importMessage = document.querySelector('#importMessage');
+const runChecksButton = document.querySelector('#runChecksButton');
+const checkMessage = document.querySelector('#checkMessage');
 
 function escapeHtml(value='') {
   return String(value).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#039;','"':'&quot;'}[ch]));
@@ -54,6 +56,22 @@ async function loadListings() {
     refreshButton.disabled = false;
   }
 }
+
+runChecksButton.addEventListener('click', async () => {
+  runChecksButton.disabled = true;
+  checkMessage.textContent = 'Проверяю сохранённые объявления…';
+  try {
+    const response = await fetch('/api/v1/checks/run', {method:'POST'});
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.detail || 'Не удалось выполнить проверку');
+    checkMessage.textContent = `Проверено: ${body.checked}. Изменений цены: ${body.updated}. Блокировок источника: ${body.blocked}. Ошибок: ${body.errors}.`;
+    await loadListings();
+  } catch (error) {
+    checkMessage.textContent = error.message;
+  } finally {
+    runChecksButton.disabled = false;
+  }
+});
 
 importForm.addEventListener('submit', async event => {
   event.preventDefault();
