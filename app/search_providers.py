@@ -9,7 +9,6 @@ from xml.etree import ElementTree
 import httpx
 
 from app.config import get_settings
-from app.krisha_search import KrishaSearchError
 from app.krisha_search import search_krisha_direct as fetch_krisha_direct
 
 settings = get_settings()
@@ -25,19 +24,23 @@ class SearchItem:
 def is_allowed_listing_url(url: str) -> bool:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
-    return host.endswith("krisha.kz") and "/a/show/" in parsed.path
+    is_krisha = host == "krisha.kz" or host.endswith(".krisha.kz")
+    return is_krisha and "/a/show/" in parsed.path
 
 
 def normalize_listing_url(url: str) -> str:
     parsed = urlparse(url)
     host = (parsed.hostname or "krisha.kz").lower()
+    if host != "krisha.kz" and not host.endswith(".krisha.kz"):
+        host = "krisha.kz"
     path = parsed.path.rstrip("/")
     return f"https://{host}{path}"
 
 
 def _decode_bing_link(url: str) -> str:
     parsed = urlparse(url)
-    if not parsed.hostname or "bing.com" not in parsed.hostname:
+    hostname = (parsed.hostname or "").lower()
+    if hostname != "bing.com" and not hostname.endswith(".bing.com"):
         return url
     values = parse_qs(parsed.query)
     target = values.get("url") or values.get("u")
@@ -100,7 +103,7 @@ async def search_brave(query: str) -> list[SearchItem]:
         "X-Subscription-Token": settings.brave_search_api_key,
         "User-Agent": "ApartmentAgent/0.10",
     }
-    params = {
+    params: dict[str, str | int] = {
         "q": clean_query,
         "count": 50,
         "offset": 0,
@@ -132,10 +135,7 @@ async def search_brave(query: str) -> list[SearchItem]:
 
 
 async def search_krisha_direct(_: str) -> list[SearchItem]:
-    try:
-        items = await fetch_krisha_direct()
-    except KrishaSearchError:
-        return []
+    items = await fetch_krisha_direct()
     return [SearchItem(title=item.title, url=item.url, snippet=item.snippet) for item in items]
 
 

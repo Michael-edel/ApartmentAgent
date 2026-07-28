@@ -69,11 +69,18 @@ function render(listings) {
     const title = item.residential_complex || item.title;
     const location = [item.district, item.city].filter(Boolean).join(' · ');
     const scoreClass = item.assessment.score < 85 ? 'medium' : '';
+    const photos = (item.photo_urls || []).slice(0, 4);
+    const ai = item.ai_analysis || {};
+    const latestChange = (item.price_history || []).find(snapshot => snapshot.change_kzt);
     return `<article class="listing card">
+      ${photos.length ? `<div class="listing-photos">${photos.map((photo, index) => `<img class="listing-photo ${index ? 'thumbnail' : ''}" src="${escapeHtml(photo)}" alt="Фото квартиры ${index + 1}" loading="lazy" referrerpolicy="no-referrer">`).join('')}</div>` : ''}
       <div class="listing-top"><div><h3>${escapeHtml(title)}</h3><div class="meta">${escapeHtml(location)}</div></div><div class="rating ${scoreClass}">${item.assessment.score}</div></div>
       <div class="price">${money.format(item.price_kzt)}</div>
       <div class="meta">${number.format(item.area_m2)} м² · ${money.format(item.assessment.price_per_m2)}/м² · этаж ${item.floor || '—'}/${item.floors_total || '—'}</div>
+      ${item.building_year || item.building_type ? `<div class="meta">${item.building_year ? `Построен ${item.building_year}` : ''}${item.building_year && item.building_type ? ' · ' : ''}${escapeHtml(item.building_type || '')}</div>` : ''}
+      ${latestChange ? `<div class="price-change ${latestChange.change_kzt < 0 ? 'down' : 'up'}">${latestChange.change_kzt < 0 ? '↓' : '↑'} ${money.format(Math.abs(latestChange.change_kzt))} с последнего наблюдения</div>` : ''}
       <span class="verdict">${escapeHtml(item.assessment.verdict)}</span>
+      ${ai.summary ? `<div class="ai-summary"><b>AI-анализ</b><p>${escapeHtml(ai.summary)}</p></div>` : ''}
       <a href="${escapeHtml(item.source_url)}" target="_blank" rel="noopener">Открыть объявление →</a>
     </article>`;
   }).join('');
@@ -136,6 +143,9 @@ async function loadSearchResults() {
       ].filter(Boolean);
       const reasons = (a.reasons || []).slice(0, 3).map(reason => `<li>✓ ${escapeHtml(reason)}</li>`).join('');
       const isSaved = savedUrls.has(normalizeUrl(item.url));
+      const importStatus = item.import_status || 'pending';
+      const imported = importStatus === 'imported' || isSaved;
+      const importLabel = imported ? 'Автоматически сохранено' : importStatus === 'blocked' ? 'Источник ограничил импорт' : importStatus === 'error' ? 'Импорт не удался — повторить' : 'Импортирую…';
       return `<article class="listing card ${priorityClass(item.priority)}">
         <div class="listing-top">
           <div><span class="verdict">${priorityLabel(item.priority)}</span><h3>${escapeHtml(cleanSearchTitle(item.title))}</h3></div>
@@ -145,7 +155,7 @@ async function loadSearchResults() {
         ${reasons ? `<ul class="reason-list">${reasons}</ul>` : `<p class="meta">${escapeHtml(item.snippet || 'Откройте объявление для проверки параметров.')}</p>`}
         <div class="meta source-meta">Источник: ${escapeHtml(item.search_engine)} · обнаружено ${dateTime.format(new Date(item.first_seen))}</div>
         <div class="card-actions">
-          <button class="enrich-result primary secondary-action ${isSaved ? 'saved' : ''}" data-url="${escapeHtml(item.url)}" type="button" ${isSaved ? 'disabled' : ''}>${isSaved ? 'Уже сохранено' : 'Сохранить и оценить'}</button>
+          <button class="enrich-result primary secondary-action ${imported ? 'saved' : ''}" data-url="${escapeHtml(item.url)}" type="button" ${imported ? 'disabled' : ''}>${imported ? 'Сохранено автоматически' : importLabel}</button>
           <a class="search-open" data-result-id="${item.id}" href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Открыть объявление →</a>
         </div>
       </article>`;
@@ -166,9 +176,13 @@ async function loadSearchStatus() {
     document.querySelector('#foundHour').textContent = status.found_last_hour || 0;
     document.querySelector('#foundToday').textContent = status.found_today || 0;
     document.querySelector('#urgentCount').textContent = status.urgent_results || 0;
+    document.querySelector('#importedCount').textContent = status.imported_results || 0;
     const providers = (status.providers || []).join(', ') || 'нет';
     const lastRun = status.last_run ? dateTime.format(new Date(status.last_run)) : 'ещё не выполнялся';
     if (searchMeta) searchMeta.textContent = `Источники: ${providers}. Запросов за запуск: ${status.queries_per_run}. Последний поиск: ${lastRun}.`;
+    const telegram = await fetch('/api/v1/notifications/status').then(readJson);
+    const telegramNode = document.querySelector('#telegramStatus');
+    if (telegramNode) telegramNode.textContent = telegram.configured ? `Telegram: подключён · отправлено ${telegram.sent_notifications || 0}` : 'Telegram: добавьте TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID для уведомлений';
   } catch (error) {
     if (searchMessage) searchMessage.textContent = error.message;
   }
@@ -181,7 +195,7 @@ runSearchButton?.addEventListener('click', async () => {
     const response = await fetch('/api/v1/search/run', {method:'POST'});
     const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось выполнить поиск');
-    if (searchMessage) searchMessage.textContent = `Запросов: ${body.queries}. Найдено ссылок: ${body.found}. Новых: ${body.new}. Ошибок: ${body.errors}.`;
+    if (searchMessage) searchMessage.textContent = `Запросов: ${body.queries}. Найдено ссылок: ${body.found}. Новых: ${body.new}. Автоимпортировано: ${body.imported || 0}. Ошибок: ${body.errors + (body.import_errors || 0)}.`;
     await Promise.all([loadListings(), loadSearchStatus()]);
     await loadSearchResults();
   } catch (error) {

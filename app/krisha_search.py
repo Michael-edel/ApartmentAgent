@@ -124,9 +124,6 @@ def parse_krisha_search_page(html: str) -> list[KrishaSearchItem]:
     )
     if any(marker in lowered for marker in security_markers):
         return []
-    if len(html) < 3000:
-        return []
-
     by_url: dict[str, KrishaSearchItem] = {}
 
     for match in _TITLE_LINK_RE.finditer(html):
@@ -183,7 +180,9 @@ async def search_krisha_direct(_: str = "") -> list[KrishaSearchItem]:
                 try:
                     response = await client.get(url)
                     if response.status_code in {403, 429}:
-                        return list(result.values())
+                        raise KrishaSearchBlocked(
+                            f"Krisha ограничила поиск (HTTP {response.status_code})"
+                        )
                     response.raise_for_status()
                     break
                 except httpx.HTTPError:
@@ -193,6 +192,11 @@ async def search_krisha_direct(_: str = "") -> list[KrishaSearchItem]:
             if response is None or response.is_error:
                 return list(result.values())
 
+            if any(
+                marker in response.text.lower()
+                for marker in ("captcha", "проверка безопасности", "cloudflare", "access denied")
+            ):
+                raise KrishaSearchBlocked("Krisha запросила проверку безопасности")
             page_items = parse_krisha_search_page(response.text)
             if not page_items:
                 break

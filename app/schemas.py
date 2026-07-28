@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, HttpUrl, model_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 
 class ListingImportRequest(BaseModel):
@@ -12,6 +12,7 @@ class ListingCreate(BaseModel):
     source: str = Field(default="manual", max_length=50)
     source_url: HttpUrl
     title: str = Field(min_length=3, max_length=300)
+    description: str | None = Field(default=None, max_length=20_000)
     city: str = "Астана"
     district: str | None = None
     residential_complex: str | None = None
@@ -24,6 +25,19 @@ class ListingCreate(BaseModel):
     building_type: str | None = None
     is_full_two_room: bool = True
     mortgage_supported: bool | None = None
+    photo_urls: list[str] = Field(default_factory=list, max_length=30)
+
+    @field_validator("photo_urls")
+    @classmethod
+    def validate_photo_urls(cls, value: list[str]) -> list[str]:
+        result: list[str] = []
+        for raw_url in value:
+            url = str(raw_url).strip()
+            if not url.lower().startswith(("http://", "https://")):
+                continue
+            if url not in result:
+                result.append(url)
+        return result
 
     @model_validator(mode="after")
     def validate_floor(self) -> "ListingCreate":
@@ -39,7 +53,17 @@ class ListingAssessment(BaseModel):
     reasons: list[str]
 
 
+class PriceSnapshotResponse(BaseModel):
+    price_kzt: int
+    price_per_m2: int | None = None
+    observed_at: datetime
+    change_kzt: int | None = None
+    change_percent: float | None = None
+
+
 class ListingResponse(ListingCreate):
     id: int
     created_at: datetime
     assessment: ListingAssessment
+    ai_analysis: dict[str, object] | None = None
+    price_history: list[PriceSnapshotResponse] = Field(default_factory=list)

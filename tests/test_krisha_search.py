@@ -3,6 +3,7 @@ from app.krisha_search import (
     normalize_krisha_listing_url,
     parse_krisha_search_page,
 )
+from app.search_providers import is_allowed_listing_url
 
 
 def test_build_search_url_contains_filters() -> None:
@@ -38,3 +39,7 @@ def test_parse_search_page_collects_and_deduplicates_links() -> None:
         "https://krisha.kz/a/show/222",
     ]
     assert items[0].title == "2-комнатная квартира, 60 м²"
+
+
+def test_search_provider_rejects_lookalike_host() -> None:
+    assert is_allowed_listing_url("https://notkrisha.kz/a/show/123") is False

@@ -127,7 +127,4 @@ def is_target_search_result(
         return False
 
     price = analysis["price_kzt"]
-    if price is not None and price > max_price:
-        return False
-
-    return True
+    return not (price is not None and price > max_price)

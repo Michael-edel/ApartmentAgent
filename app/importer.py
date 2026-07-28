@@ -2,9 +2,10 @@ import json
 import re
 from html import unescape
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import httpx
+from pydantic import HttpUrl
 
 from app.schemas import ListingCreate
 
@@ -108,6 +109,37 @@ def _find_text(data: list[Any], keys: set[str]) -> str | None:
     return None
 
 
+def _find_image_urls(data: list[Any]) -> list[str]:
+    image_keys = {
+        "image",
+        "images",
+        "photo",
+        "photos",
+        "photoUrls",
+        "imageUrls",
+        "gallery",
+        "pictures",
+    }
+    urls: list[str] = []
+    for root in data:
+        for item in _walk(root):
+            for key, value in item.items():
+                if str(key).lower() not in {item.lower() for item in image_keys}:
+                    continue
+                values = value if isinstance(value, list) else [value]
+                for candidate in values:
+                    if isinstance(candidate, dict):
+                        candidate = candidate.get("url") or candidate.get("src")
+                    if not isinstance(candidate, str):
+                        continue
+                    url = unescape(candidate).strip()
+                    if url.startswith("//"):
+                        url = "https:" + url
+                    if url.startswith(("http://", "https://")) and url not in urls:
+                        urls.append(url)
+    return urls[:30]
+
+
 def _embedded_number(html: str, keys: set[str], minimum: float, maximum: float) -> float | None:
     for key in keys:
         pattern = rf'["\']{re.escape(key)}["\']\s*:\s*["\']?([\d\s.,]+)'
@@ -156,6 +188,11 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
 
     title = _extract_meta(html, "og:title") or _extract_meta(html, "twitter:title")
     description = _extract_meta(html, "og:description") or _extract_meta(html, "description") or ""
+    meta_images = [
+        value
+        for name in ("og:image", "twitter:image")
+        if (value := _extract_meta(html, name))
+    ]
     data = _json_scripts(html)
 
     price = _find_numeric(data, {"price", "price_kzt", "amount", "value"}, 500_000, 2_000_000_000)
@@ -208,13 +245,35 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
     elif "панель" in lowered:
         building_type = "panel"
 
-    district = _find_text(data, {"district", "districtName", "regionName"})
-    residential_complex = _find_text(data, {"complexName", "residentialComplex", "housingComplex"})
+    district = _find_text(
+        data,
+        {"district", "districtName", "regionName", "addressLocality", "areaName"},
+    )
+    residential_complex = _find_text(
+        data,
+        {"complexName", "residentialComplex", "housingComplex", "residentialComplexName"},
+    )
+    if not residential_complex:
+        complex_match = re.search(r"ЖК\s*[«\"]?([^»\".,;]{2,100})", combined, re.IGNORECASE)
+        residential_complex = complex_match.group(1).strip() if complex_match else None
+    if not district:
+        district_match = re.search(
+            r"((?:Есильский|Нура|Алматы|Сарыарка|Байконур)\s+район)",
+            combined,
+            re.IGNORECASE,
+        )
+        district = district_match.group(1) if district_match else None
+    photo_urls = meta_images + _find_image_urls(data)
+    photo_urls = list(dict.fromkeys(photo_urls))[:30]
+    normalized_source_url = urlunparse(
+        ("https", final_host or "krisha.kz", response.url.path.rstrip("/"), "", "", "")
+    )
 
     return ListingCreate(
         source="krisha-import",
-        source_url=str(response.url),
+        source_url=HttpUrl(normalized_source_url),
         title=(title or f"{rooms}-комнатная квартира в Астане")[:300],
+        description=description[:20_000] or None,
         city="Астана",
         district=district,
         residential_complex=residential_complex,
@@ -227,4 +286,5 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
         building_type=building_type,
         is_full_two_room=rooms == 2,
         mortgage_supported=None,
+        photo_urls=photo_urls,
     )

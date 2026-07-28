@@ -1,30 +1,34 @@
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import HttpUrl
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
 
+from app.ai_service import analyze_listing
 from app.checker import check_all_listings, periodic_checker
 from app.config import get_settings
-from app.database import SessionLocal, engine
+from app.database import SessionLocal, engine, initialize_database
 from app.importer import ListingImportError, import_krisha_listing
-from app.models import Base, Listing, ListingCheck, PriceSnapshot, SearchHistory, SearchResult
+from app.listing_service import ListingAlreadyExists, persist_listing
+from app.models import Listing, ListingCheck, PriceSnapshot, SearchHistory, SearchResult
+from app.schemas import ListingCreate, ListingImportRequest, ListingResponse, PriceSnapshotResponse
 from app.scoring import assess_listing
-from app.schemas import ListingCreate, ListingImportRequest, ListingResponse
 from app.search_agent import get_search_status, periodic_search, run_search
 from app.search_analysis import analyze_search_result
+from app.telegram import telegram_status
 
 settings = get_settings()
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    await initialize_database()
 
     stop_event = asyncio.Event()
     checker_task = asyncio.create_task(periodic_checker(stop_event))
@@ -35,7 +39,7 @@ async def lifespan(_: FastAPI):
     await engine.dispose()
 
 
-app = FastAPI(title=settings.app_name, version="0.10.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.11.0", lifespan=lifespan)
 _static_dir = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
@@ -60,7 +64,7 @@ async def health() -> dict[str, object]:
     return {
         "status": "ok",
         "service": settings.app_name,
-        "version": "0.10.0",
+        "version": "0.11.0",
         "storage": "postgresql",
         "automatic_check_minutes": max(settings.check_interval_minutes, 15),
         "search_enabled": settings.search_enabled,
@@ -69,11 +73,12 @@ async def health() -> dict[str, object]:
     }
 
 
-def _to_response(row: Listing) -> ListingResponse:
-    payload = ListingCreate(
+def _payload_from_row(row: Listing) -> ListingCreate:
+    return ListingCreate(
         source=row.source,
-        source_url=row.source_url,
+        source_url=HttpUrl(row.source_url),
         title=row.title,
+        description=row.description,
         city=row.city,
         district=row.district,
         residential_complex=row.residential_complex,
@@ -86,39 +91,68 @@ def _to_response(row: Listing) -> ListingResponse:
         building_type=row.building_type,
         is_full_two_room=row.is_full_two_room,
         mortgage_supported=row.mortgage_supported,
+        photo_urls=list(row.photo_urls or []),
     )
+
+
+def _price_history(row: Listing) -> list[PriceSnapshotResponse]:
+    snapshots = sorted(row.prices or [], key=lambda item: item.observed_at)
+    result: list[PriceSnapshotResponse] = []
+    previous: PriceSnapshot | None = None
+    for snapshot in snapshots:
+        change = snapshot.price_kzt - previous.price_kzt if previous else None
+        percent = round(change / previous.price_kzt * 100, 2) if change and previous else None
+        result.append(
+            PriceSnapshotResponse(
+                price_kzt=snapshot.price_kzt,
+                price_per_m2=snapshot.price_per_m2,
+                observed_at=snapshot.observed_at,
+                change_kzt=change,
+                change_percent=percent,
+            )
+        )
+        previous = snapshot
+    return list(reversed(result))
+
+
+def _to_response(row: Listing) -> ListingResponse:
+    payload = _payload_from_row(row)
     return ListingResponse(
         id=row.id,
         created_at=row.created_at,
         assessment=assess_listing(payload, settings),
+        ai_analysis=row.ai_analysis,
+        price_history=_price_history(row),
         **payload.model_dump(),
     )
 
 
-async def _save_listing(payload: ListingCreate) -> ListingResponse:
-    values = payload.model_dump(mode="json")
-    values["source_url"] = str(payload.source_url)
-    row = Listing(**values)
-
+async def _load_listing_response(listing_id: int) -> ListingResponse:
     async with SessionLocal() as session:
-        session.add(row)
-        try:
-            await session.flush()
-            session.add(PriceSnapshot(listing_id=row.id, price_kzt=row.price_kzt))
-            await session.commit()
-            await session.refresh(row)
-        except IntegrityError as exc:
-            await session.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Listing with this URL already exists",
-            ) from exc
+        row = await session.scalar(
+            select(Listing)
+            .options(selectinload(Listing.prices))
+            .where(Listing.id == listing_id)
+        )
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found")
     return _to_response(row)
+
+
+async def _save_listing(payload: ListingCreate, *, allow_existing: bool) -> ListingResponse:
+    try:
+        saved = await persist_listing(payload, allow_existing=allow_existing, notify=True)
+    except ListingAlreadyExists as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Listing with this URL already exists",
+        ) from exc
+    return await _load_listing_response(saved.row.id)
 
 
 @app.post("/api/v1/listings", response_model=ListingResponse, status_code=status.HTTP_201_CREATED)
 async def create_listing(payload: ListingCreate) -> ListingResponse:
-    return await _save_listing(payload)
+    return await _save_listing(payload, allow_existing=False)
 
 
 @app.post(
@@ -131,7 +165,7 @@ async def import_listing(payload: ListingImportRequest) -> ListingResponse:
         listing_data = await import_krisha_listing(str(payload.source_url))
     except ListingImportError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    return await _save_listing(listing_data)
+    return await _save_listing(listing_data, allow_existing=True)
 
 
 @app.post("/api/v1/checks/run")
@@ -143,6 +177,11 @@ async def run_checks_now() -> dict[str, int]:
         "blocked": summary.blocked,
         "errors": summary.errors,
     }
+
+
+@app.get("/api/v1/notifications/status")
+async def notifications_status() -> dict[str, object]:
+    return await telegram_status()
 
 
 @app.get("/api/v1/checks/latest")
@@ -173,6 +212,9 @@ async def run_search_now() -> dict[str, object]:
         "new": summary.new,
         "errors": summary.errors,
         "blocked": summary.blocked,
+        "imported": summary.imported,
+        "import_errors": summary.import_errors,
+        "import_blocked": summary.import_blocked,
         "providers": summary.providers,
     }
 
@@ -210,6 +252,10 @@ async def search_results(limit: int = 50, only_new: bool = False) -> list[dict[s
                 "snippet": row.snippet,
                 "status": row.status.split(":", 1)[0],
                 "priority": row.status.split(":", 1)[1] if ":" in row.status else "normal",
+                "import_status": row.import_status,
+                "imported_listing_id": row.imported_listing_id,
+                "import_error": row.import_error,
+                "imported_at": row.imported_at,
                 "first_seen": row.first_seen,
                 "last_seen": row.last_seen,
                 "analysis": analysis,
@@ -256,7 +302,13 @@ async def search_history(limit: int = 50) -> list[dict[str, object]]:
 @app.get("/api/v1/listings", response_model=list[ListingResponse])
 async def list_listings(min_score: int | None = None) -> list[ListingResponse]:
     async with SessionLocal() as session:
-        rows = (await session.scalars(select(Listing).order_by(Listing.created_at.desc()))).all()
+        rows = (
+            await session.scalars(
+                select(Listing)
+                .options(selectinload(Listing.prices))
+                .order_by(Listing.created_at.desc())
+            )
+        ).all()
     items = [_to_response(row) for row in rows]
     if min_score is not None:
         items = [item for item in items if item.assessment.score >= min_score]
@@ -266,7 +318,38 @@ async def list_listings(min_score: int | None = None) -> list[ListingResponse]:
 @app.get("/api/v1/listings/{listing_id}", response_model=ListingResponse)
 async def get_listing(listing_id: int) -> ListingResponse:
     async with SessionLocal() as session:
-        row = await session.get(Listing, listing_id)
+        row = await session.scalar(
+            select(Listing)
+            .options(selectinload(Listing.prices))
+            .where(Listing.id == listing_id)
+        )
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found")
     return _to_response(row)
+
+
+@app.get("/api/v1/listings/{listing_id}/price-history")
+async def listing_price_history(listing_id: int) -> list[PriceSnapshotResponse]:
+    async with SessionLocal() as session:
+        row = await session.scalar(
+            select(Listing)
+            .options(selectinload(Listing.prices))
+            .where(Listing.id == listing_id)
+        )
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found")
+    return _price_history(row)
+
+
+@app.post("/api/v1/listings/{listing_id}/ai-analysis", response_model=ListingResponse)
+async def refresh_listing_ai_analysis(listing_id: int) -> ListingResponse:
+    async with SessionLocal() as session:
+        row = await session.scalar(select(Listing).where(Listing.id == listing_id))
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found")
+        payload = _payload_from_row(row)
+        analysis = await analyze_listing(payload, assess_listing(payload, settings))
+        row.ai_analysis = analysis
+        row.ai_analyzed_at = datetime.now(UTC)
+        await session.commit()
+    return await _load_listing_response(listing_id)

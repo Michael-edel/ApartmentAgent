@@ -9,13 +9,13 @@
   <meta name="apple-mobile-web-app-title" content="Квартиры">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icon.svg">
-  <link rel="stylesheet" href="/static/styles.css?v=101">
+  <link rel="stylesheet" href="/static/styles.css?v=110">
   <title>ApartmentAgent</title>
 </head>
 <body>
   <header class="topbar" id="top">
     <div>
-      <span class="eyebrow">ASTANA PROPERTY SCOUT · v0.10.1</span>
+    <span class="eyebrow">ASTANA PROPERTY SCOUT · v0.11</span>
       <h1>ApartmentAgent</h1>
     </div>
     <button id="refreshButton" class="icon-button" aria-label="Обновить">↻</button>
@@ -45,10 +45,12 @@
         <article class="stat"><span>За час</span><strong id="foundHour">0</strong></article>
         <article class="stat"><span>Сегодня</span><strong id="foundToday">0</strong></article>
         <article class="stat"><span>Срочных</span><strong id="urgentCount">0</strong></article>
+        <article class="stat"><span>Автоимпорт</span><strong id="importedCount">0</strong></article>
       </div>
       <button id="runSearchButton" type="button">Искать сейчас</button>
       <p id="searchMessage" class="form-message" aria-live="polite"></p>
       <p id="searchMeta" class="microcopy"></p>
+      <p id="telegramStatus" class="microcopy"></p>
     </section>
 
     <section class="section-heading">
@@ -126,6 +128,6 @@
     <a href="#listingGrid">★<span>Лучшие</span></a>
   </nav>
 
-  <script src="/static/app.js?v=101" defer></script>
+  <script src="/static/app.js?v=110" defer></script>
 </body>
 </html>

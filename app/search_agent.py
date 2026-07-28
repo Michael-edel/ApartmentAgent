@@ -1,17 +1,21 @@
 import asyncio
+import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 
 from app.config import get_settings
 from app.database import SessionLocal
+from app.importer import ListingImportError, import_krisha_listing
 from app.krisha_search import KrishaSearchBlocked
+from app.listing_service import persist_listing
 from app.models import SearchHistory, SearchResult
 from app.search_analysis import analyze_search_result, is_target_search_result
 from app.search_providers import PROVIDERS, SearchItem
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 DISTRICTS = ["Есильский район", "Нура район", "Алматы район", "Сарыарка район", "Байконур район"]
 BASE_QUERIES = [
@@ -34,7 +38,16 @@ class SearchSummary:
     new: int = 0
     errors: int = 0
     blocked: int = 0
+    imported: int = 0
+    import_errors: int = 0
+    import_blocked: int = 0
     providers: dict[str, dict[str, int]] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class SearchImportCandidate:
+    result_id: int
+    url: str
 
 
 def _priority(title: str, snippet: str | None) -> str:
@@ -74,15 +87,24 @@ def _row_matches_target(row: SearchResult) -> bool:
 
 def _rotated_queries() -> list[str]:
     count = min(max(settings.search_queries_per_run, 1), len(SEARCH_QUERIES))
-    slot = int(datetime.now(timezone.utc).timestamp() // (max(settings.search_interval_minutes, 15) * 60))
+    slot = int(datetime.now(UTC).timestamp() // (max(settings.search_interval_minutes, 15) * 60))
     start = (slot * count) % len(SEARCH_QUERIES)
     return [SEARCH_QUERIES[(start + offset) % len(SEARCH_QUERIES)] for offset in range(count)]
 
 
-async def _save_items(provider_name: str, query: str, items: list[SearchItem]) -> tuple[int, int]:
-    accepted_items = [item for item in items if _matches_target(item)]
+async def _save_items(
+    provider_name: str,
+    query: str,
+    items: list[SearchItem],
+) -> tuple[int, int, list[SearchImportCandidate]]:
+    accepted_by_url: dict[str, SearchItem] = {}
+    for item in items:
+        if _matches_target(item):
+            accepted_by_url[item.url] = item
+    accepted_items = list(accepted_by_url.values())
     new_found = 0
-    now = datetime.now(timezone.utc)
+    candidates: list[SearchImportCandidate] = []
+    now = datetime.now(UTC)
     async with SessionLocal() as session:
         old_rows = (await session.scalars(select(SearchResult))).all()
         removed_old = 0
@@ -97,18 +119,20 @@ async def _save_items(provider_name: str, query: str, items: list[SearchItem]) -
                 existing.last_seen = now
                 existing.title = item.title or existing.title
                 existing.snippet = item.snippet or existing.snippet
+                if existing.import_status != "imported" or existing.imported_listing_id is None:
+                    candidates.append(SearchImportCandidate(result_id=existing.id, url=existing.url))
                 continue
-            session.add(
-                SearchResult(
-                    url=item.url,
-                    search_engine=provider_name,
-                    query=query,
-                    title=item.title,
-                    snippet=item.snippet,
-                    status=f"new:{_priority(item.title, item.snippet)}",
-                )
+            row = SearchResult(
+                url=item.url,
+                search_engine=provider_name,
+                query=query,
+                title=item.title,
+                snippet=item.snippet,
+                status=f"new:{_priority(item.title, item.snippet)}",
             )
+            session.add(row)
             await session.flush()
+            candidates.append(SearchImportCandidate(result_id=row.id, url=row.url))
             new_found += 1
         session.add(
             SearchHistory(
@@ -124,7 +148,68 @@ async def _save_items(provider_name: str, query: str, items: list[SearchItem]) -
             )
         )
         await session.commit()
-    return new_found, len(accepted_items)
+    return new_found, len(accepted_items), candidates
+
+
+async def _mark_import_result(
+    candidate: SearchImportCandidate,
+    *,
+    import_status: str,
+    error: str | None = None,
+    listing_id: int | None = None,
+) -> None:
+    async with SessionLocal() as session:
+        row = await session.get(SearchResult, candidate.result_id)
+        if row is None:
+            return
+        row.import_status = import_status
+        row.import_error = error[:500] if error else None
+        row.imported_listing_id = listing_id
+        row.imported_at = datetime.now(UTC) if import_status == "imported" else None
+        await session.commit()
+
+
+async def _auto_import(candidates: list[SearchImportCandidate]) -> tuple[int, int, int]:
+    if not settings.auto_import_enabled:
+        return 0, 0, 0
+
+    imported = errors = blocked = 0
+    blocked_message: str | None = None
+    unique_candidates = list({candidate.url: candidate for candidate in candidates}.values())
+    for candidate in unique_candidates:
+        if blocked_message:
+            await _mark_import_result(
+                candidate,
+                import_status="blocked",
+                error=blocked_message,
+            )
+            blocked += 1
+            continue
+        try:
+            payload = await import_krisha_listing(candidate.url)
+            saved = await persist_listing(payload, allow_existing=True, notify=True)
+            await _mark_import_result(
+                candidate,
+                import_status="imported",
+                listing_id=saved.row.id,
+            )
+            imported += 1
+        except ListingImportError as exc:
+            message = str(exc)
+            is_blocked = any(word in message.lower() for word in ("огранич", "провер", "captcha", "403", "429"))
+            if is_blocked:
+                blocked_message = message
+                blocked += 1
+                await _mark_import_result(candidate, import_status="blocked", error=message)
+            else:
+                errors += 1
+                await _mark_import_result(candidate, import_status="error", error=message)
+        except Exception as exc:  # noqa: BLE001
+            errors += 1
+            await _mark_import_result(candidate, import_status="error", error=str(exc))
+        if settings.auto_import_delay_seconds > 0:
+            await asyncio.sleep(settings.auto_import_delay_seconds)
+    return imported, errors, blocked
 
 
 async def _save_provider_status(
@@ -155,7 +240,7 @@ async def _fetch_one(
         timeout = 75.0 if provider_name == "krisha_direct" else 25.0
         items = await asyncio.wait_for(PROVIDERS[provider_name](query), timeout=timeout)
         return provider_name, query, items, None
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return provider_name, query, None, exc
 
 
@@ -176,6 +261,9 @@ async def run_search() -> SearchSummary:
             "new": 0,
             "errors": 0,
             "blocked": 0,
+            "imported": 0,
+            "import_errors": 0,
+            "import_blocked": 0,
         }
         jobs.extend((provider_name, query) for query in provider_queries)
 
@@ -197,8 +285,9 @@ async def run_search() -> SearchSummary:
 
         safe_items = items or []
         try:
-            new_found, accepted_count = await _save_items(provider_name, query, safe_items)
-        except Exception as exc:
+            new_found, accepted_count, candidates = await _save_items(provider_name, query, safe_items)
+            imported, import_errors, import_blocked = await _auto_import(candidates)
+        except Exception as exc:  # noqa: BLE001
             summary.errors += 1
             stats["errors"] += 1
             await _save_provider_status(provider_name, query, "error", str(exc))
@@ -208,6 +297,12 @@ async def run_search() -> SearchSummary:
         summary.new += new_found
         stats["found"] += accepted_count
         stats["new"] += new_found
+        stats["imported"] += imported
+        stats["import_errors"] += import_errors
+        stats["import_blocked"] += import_blocked
+        summary.imported += imported
+        summary.import_errors += import_errors
+        summary.import_blocked += import_blocked
 
     return summary
 
@@ -218,7 +313,7 @@ async def periodic_search(stop_event: asyncio.Event) -> None:
         try:
             await run_search()
         except Exception:
-            pass
+            logger.exception("Periodic search failed")
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
         except TimeoutError:
@@ -226,7 +321,7 @@ async def periodic_search(stop_event: asyncio.Event) -> None:
 
 
 async def get_search_status() -> dict[str, object]:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     hour_ago = now - timedelta(hours=1)
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -234,6 +329,9 @@ async def get_search_status() -> dict[str, object]:
         total = await session.scalar(select(func.count(SearchResult.id))) or 0
         new_total = await session.scalar(
             select(func.count(SearchResult.id)).where(SearchResult.status.like("new:%"))
+        ) or 0
+        imported_total = await session.scalar(
+            select(func.count(SearchResult.id)).where(SearchResult.import_status == "imported")
         ) or 0
         found_hour = await session.scalar(
             select(func.count(SearchResult.id)).where(SearchResult.first_seen >= hour_ago)
@@ -289,6 +387,8 @@ async def get_search_status() -> dict[str, object]:
         "queries_per_run": settings.search_queries_per_run,
         "total_results": total,
         "new_results": new_total,
+        "imported_results": imported_total,
+        "auto_import_enabled": settings.auto_import_enabled,
         "urgent_results": urgent,
         "found_last_hour": found_hour,
         "found_today": found_today,

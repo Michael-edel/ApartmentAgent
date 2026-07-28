@@ -1,6 +1,6 @@
 from app.config import Settings
-from app.scoring import assess_listing
 from app.schemas import ListingCreate
+from app.scoring import assess_listing
 
 
 def test_target_listing_scores_high() -> None:

@@ -1,3 +1,5 @@
+from typing import Literal
+
 from app.config import Settings
 from app.schemas import ListingAssessment, ListingCreate
 
@@ -53,6 +55,7 @@ def assess_listing(listing: ListingCreate, settings: Settings) -> ListingAssessm
     score = max(0, min(100, score))
     price_per_m2 = round(listing.price_kzt / listing.area_m2)
 
+    verdict: Literal["ПОКУПАТЬ", "СМОТРЕТЬ", "НЕ РЕКОМЕНДУЮ"]
     if score >= 90:
         verdict = "ПОКУПАТЬ"
     elif score >= 75:

@@ -15,6 +15,8 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    telegram_enabled: bool = True
+    telegram_notify_min_score: int = 85
     check_interval_minutes: int = 120
 
     search_enabled: bool = True
@@ -27,6 +29,15 @@ class Settings(BaseSettings):
     krisha_search_pages: int = 3
     krisha_search_timeout_seconds: float = 20.0
     krisha_search_delay_seconds: float = 2.0
+    auto_import_enabled: bool = True
+    auto_import_delay_seconds: float = 1.5
+
+    ai_enabled: bool = True
+    ai_remote_enabled: bool = False
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o-mini"
+    openai_base_url: str = "https://api.openai.com/v1"
+    ai_timeout_seconds: float = 20.0
 
     max_price_kzt: int = 30_000_000
     min_area_m2: float = 55.0

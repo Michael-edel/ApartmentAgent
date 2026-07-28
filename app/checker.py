@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -6,7 +7,10 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.database import SessionLocal
 from app.importer import ListingImportError, import_krisha_listing
-from app.models import Listing, ListingCheck, PriceSnapshot
+from app.listing_service import persist_listing
+from app.models import Listing, ListingCheck
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -29,6 +33,7 @@ async def check_all_listings() -> CheckSummary:
             fresh = await import_krisha_listing(row.source_url)
             old_price = row.price_kzt
             new_price = fresh.price_kzt
+            saved = await persist_listing(fresh, allow_existing=True, notify=True)
             status = "unchanged"
             message = "Объявление доступно, цена без изменений"
 
@@ -37,9 +42,7 @@ async def check_all_listings() -> CheckSummary:
                 if current is None:
                     continue
 
-                if new_price != old_price:
-                    current.price_kzt = new_price
-                    session.add(PriceSnapshot(listing_id=current.id, price_kzt=new_price))
+                if saved.price_change:
                     status = "price_changed"
                     message = f"Цена изменилась: {old_price} → {new_price} ₸"
                     summary.updated += 1
@@ -88,7 +91,7 @@ async def periodic_checker(stop_event: asyncio.Event) -> None:
             await check_all_listings()
         except Exception:
             # Фоновая задача не должна останавливать API.
-            pass
+            logger.exception("Periodic listing check failed")
 
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
