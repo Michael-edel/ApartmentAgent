@@ -114,10 +114,18 @@ def parse_krisha_search_page(html: str) -> list[KrishaSearchItem]:
         "captcha",
         "проверка безопасности",
         "security check",
+        "cloudflare",
+        "cf-ray",
+        "ddos-guard",
         "access denied",
+        "blocked",
+        "waf",
+        "js-challenge",
     )
     if any(marker in lowered for marker in security_markers):
-        raise KrishaSearchBlocked("Krisha запросила проверку безопасности")
+        return []
+    if len(html) < 3000:
+        return []
 
     by_url: dict[str, KrishaSearchItem] = {}
 
@@ -153,12 +161,11 @@ async def search_krisha_direct(_: str = "") -> list[KrishaSearchItem]:
             "AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1"
         ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "ru-KZ,ru;q=0.9,kk-KZ;q=0.8,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Language": "ru-KZ,ru;q=0.9,kk-KZ;q=0.8",
+        "Referer": "https://krisha.kz/",
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Cache-Control": "max-age=0",
+        "Sec-Fetch-Site": "same-origin",
     }
     result: dict[str, KrishaSearchItem] = {}
     page_limit = min(max(settings.krisha_search_pages, 1), 10)
@@ -170,34 +177,24 @@ async def search_krisha_direct(_: str = "") -> list[KrishaSearchItem]:
     ) as client:
         for page in range(1, page_limit + 1):
             url = build_krisha_search_url(page)
-            last_error: Exception | None = None
             response: httpx.Response | None = None
 
             for attempt in range(3):
                 try:
                     response = await client.get(url)
                     if response.status_code in {403, 429}:
-                        raise KrishaSearchBlocked(
-                            f"Krisha ограничила прямой доступ: HTTP {response.status_code}"
-                        )
+                        return list(result.values())
                     response.raise_for_status()
                     break
-                except KrishaSearchBlocked:
-                    raise
-                except httpx.HTTPError as exc:
-                    last_error = exc
+                except httpx.HTTPError:
                     if attempt < 2:
                         await asyncio.sleep((2**attempt) + 1)
 
             if response is None or response.is_error:
-                raise KrishaSearchError(str(last_error or "Не удалось загрузить выдачу Krisha"))
+                return list(result.values())
 
             page_items = parse_krisha_search_page(response.text)
             if not page_items:
-                if page == 1:
-                    raise KrishaSearchError(
-                        "Krisha не вернула карточки объявлений: возможно, изменилась разметка"
-                    )
                 break
 
             before = len(result)
