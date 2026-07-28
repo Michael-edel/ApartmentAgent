@@ -16,6 +16,7 @@ from app.models import Base, Listing, ListingCheck, PriceSnapshot, SearchHistory
 from app.scoring import assess_listing
 from app.schemas import ListingCreate, ListingImportRequest, ListingResponse
 from app.search_agent import get_search_status, periodic_search, run_search
+from app.search_analysis import analyze_search_result
 
 settings = get_settings()
 
@@ -34,7 +35,7 @@ async def lifespan(_: FastAPI):
     await engine.dispose()
 
 
-app = FastAPI(title=settings.app_name, version="0.7.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.10.0", lifespan=lifespan)
 _static_dir = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
@@ -59,7 +60,7 @@ async def health() -> dict[str, object]:
     return {
         "status": "ok",
         "service": settings.app_name,
-        "version": "0.7.0",
+        "version": "0.10.0",
         "storage": "postgresql",
         "automatic_check_minutes": max(settings.check_interval_minutes, 15),
         "search_enabled": settings.search_enabled,
@@ -171,6 +172,7 @@ async def run_search_now() -> dict[str, object]:
         "found": summary.found,
         "new": summary.new,
         "errors": summary.errors,
+        "blocked": summary.blocked,
         "providers": summary.providers,
     }
 
@@ -188,21 +190,32 @@ async def search_results(limit: int = 50, only_new: bool = False) -> list[dict[s
         if only_new:
             query = query.where(SearchResult.status.like("new:%"))
         rows = (await session.scalars(query)).all()
-    return [
-        {
-            "id": row.id,
-            "url": row.url,
-            "search_engine": row.search_engine,
-            "query": row.query,
-            "title": row.title,
-            "snippet": row.snippet,
-            "status": row.status.split(":", 1)[0],
-            "priority": row.status.split(":", 1)[1] if ":" in row.status else "normal",
-            "first_seen": row.first_seen,
-            "last_seen": row.last_seen,
-        }
-        for row in rows
-    ]
+
+    result: list[dict[str, object]] = []
+    for row in rows:
+        analysis = analyze_search_result(
+            row.title or "",
+            row.snippet,
+            max_price=settings.max_price_kzt,
+            min_area=settings.min_area_m2,
+            max_area=settings.max_area_m2,
+        )
+        result.append(
+            {
+                "id": row.id,
+                "url": row.url,
+                "search_engine": row.search_engine,
+                "query": row.query,
+                "title": row.title,
+                "snippet": row.snippet,
+                "status": row.status.split(":", 1)[0],
+                "priority": row.status.split(":", 1)[1] if ":" in row.status else "normal",
+                "first_seen": row.first_seen,
+                "last_seen": row.last_seen,
+                "analysis": analysis,
+            }
+        )
+    return result
 
 
 @app.post("/api/v1/search/results/{result_id}/seen")
