@@ -3,7 +3,6 @@ const number = new Intl.NumberFormat('ru-KZ', {maximumFractionDigits:1});
 const dateTime = new Intl.DateTimeFormat('ru-RU', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'});
 
 const grid = document.querySelector('#listingGrid');
-const empty = document.querySelector('#emptyState');
 const filter = document.querySelector('#scoreFilter');
 const refreshButton = document.querySelector('#refreshButton');
 const form = document.querySelector('#listingForm');
@@ -16,8 +15,7 @@ const runSearchButton = document.querySelector('#runSearchButton');
 const searchMessage = document.querySelector('#searchMessage');
 const searchMeta = document.querySelector('#searchMeta');
 const searchResults = document.querySelector('#searchResults');
-const searchEmpty = document.querySelector('#searchEmpty');
-const reloadSearchResults = document.querySelector('#reloadSearchResults');
+const reloadSearchResults = document.querySelector('#refreshSearchButton');
 
 function escapeHtml(value='') {
   return String(value).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#039;','"':'&quot;'}[ch]));
@@ -25,14 +23,9 @@ function escapeHtml(value='') {
 
 async function readJson(response) {
   const text = await response.text();
-  if (!text.trim()) {
-    throw new Error(`Сервер не вернул ответ (HTTP ${response.status}). Повторите попытку.`);
-  }
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error(response.ok ? 'Сервер вернул некорректный ответ' : `Ошибка сервера HTTP ${response.status}`);
-  }
+  if (!text.trim()) throw new Error(`Сервер не вернул ответ (HTTP ${response.status}). Повторите попытку.`);
+  try { return JSON.parse(text); }
+  catch { throw new Error(response.ok ? 'Сервер вернул некорректный ответ' : `Ошибка сервера HTTP ${response.status}`); }
 }
 
 function priorityLabel(priority) {
@@ -48,23 +41,22 @@ function priorityClass(priority) {
 }
 
 function render(listings) {
-  const minScore = Number(filter.value || 0);
+  const minScore = Number(filter?.value || 0);
   const visible = listings.filter(item => item.assessment.score >= minScore);
   const strong = listings.filter(item => item.assessment.score >= 85);
-
   document.querySelector('#totalCount').textContent = listings.length;
   document.querySelector('#strongCount').textContent = strong.length;
-  empty.hidden = visible.length > 0;
-
+  if (!grid) return;
+  if (!visible.length) {
+    grid.innerHTML = '<section class="empty card"><strong>Сохранённых квартир пока нет</strong><p>Добавьте ссылку Krisha или заполните ручную форму.</p></section>';
+    return;
+  }
   grid.innerHTML = visible.map(item => {
     const title = item.residential_complex || item.title;
     const location = [item.district, item.city].filter(Boolean).join(' · ');
     const scoreClass = item.assessment.score < 85 ? 'medium' : '';
     return `<article class="listing card">
-      <div class="listing-top">
-        <div><h3>${escapeHtml(title)}</h3><div class="meta">${escapeHtml(location)}</div></div>
-        <div class="rating ${scoreClass}">${item.assessment.score}</div>
-      </div>
+      <div class="listing-top"><div><h3>${escapeHtml(title)}</h3><div class="meta">${escapeHtml(location)}</div></div><div class="rating ${scoreClass}">${item.assessment.score}</div></div>
       <div class="price">${money.format(item.price_kzt)}</div>
       <div class="meta">${number.format(item.area_m2)} м² · ${money.format(item.assessment.price_per_m2)}/м² · этаж ${item.floor || '—'}/${item.floors_total || '—'}</div>
       <span class="verdict">${escapeHtml(item.assessment.verdict)}</span>
@@ -74,46 +66,39 @@ function render(listings) {
 }
 
 async function loadListings() {
-  refreshButton.disabled = true;
+  if (refreshButton) refreshButton.disabled = true;
   try {
     const response = await fetch('/api/v1/listings');
     if (!response.ok) throw new Error('Не удалось загрузить квартиры');
     render(await readJson(response));
   } catch (error) {
-    message.textContent = error.message;
+    if (message) message.textContent = error.message;
   } finally {
-    refreshButton.disabled = false;
+    if (refreshButton) refreshButton.disabled = false;
   }
 }
 
-async function markSeen(id) {
-  await fetch(`/api/v1/search/results/${id}/seen`, {method:'POST'});
-}
+async function markSeen(id) { await fetch(`/api/v1/search/results/${id}/seen`, {method:'POST'}); }
 
 async function loadSearchResults() {
+  if (!searchResults) return;
   try {
     const response = await fetch('/api/v1/search/results?limit=30&only_new=true');
     if (!response.ok) throw new Error('Не удалось загрузить найденные ссылки');
     const items = await readJson(response);
-    searchEmpty.hidden = items.length > 0;
+    if (!items.length) {
+      searchResults.innerHTML = '<section class="empty card"><strong>Новых ссылок пока нет</strong><p>Прямой источник Krisha может быть ограничен защитой сайта. Причина отображается после запуска поиска.</p></section>';
+      return;
+    }
     searchResults.innerHTML = items.map(item => `<article class="listing card ${priorityClass(item.priority)}">
-      <div class="listing-top">
-        <div>
-          <span class="verdict">${priorityLabel(item.priority)}</span>
-          <h3>${escapeHtml(item.title || 'Новое объявление Krisha')}</h3>
-        </div>
-        <div class="meta">${escapeHtml(item.search_engine)}</div>
-      </div>
-      <p class="meta">${escapeHtml(item.snippet || 'Данные доступны в поисковой выдаче. Откройте объявление для проверки.')}</p>
+      <div class="listing-top"><div><span class="verdict">${priorityLabel(item.priority)}</span><h3>${escapeHtml(item.title || 'Новое объявление Krisha')}</h3></div><div class="meta">${escapeHtml(item.search_engine)}</div></div>
+      <p class="meta">${escapeHtml(item.snippet || 'Откройте объявление для проверки параметров.')}</p>
       <div class="meta">Обнаружено: ${dateTime.format(new Date(item.first_seen))}</div>
       <a class="search-open" data-result-id="${item.id}" href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Открыть объявление →</a>
     </article>`).join('');
-
-    searchResults.querySelectorAll('.search-open').forEach(link => {
-      link.addEventListener('click', () => markSeen(link.dataset.resultId));
-    });
+    searchResults.querySelectorAll('.search-open').forEach(link => link.addEventListener('click', () => markSeen(link.dataset.resultId)));
   } catch (error) {
-    searchMessage.textContent = error.message;
+    if (searchMessage) searchMessage.textContent = error.message;
   }
 }
 
@@ -128,117 +113,89 @@ async function loadSearchStatus() {
     document.querySelector('#urgentCount').textContent = status.urgent_results || 0;
     const providers = (status.providers || []).join(', ') || 'нет';
     const lastRun = status.last_run ? dateTime.format(new Date(status.last_run)) : 'ещё не выполнялся';
-    searchMeta.textContent = `Источники: ${providers}. Запросов за запуск: ${status.queries_per_run}. Последний поиск: ${lastRun}.`;
+    if (searchMeta) searchMeta.textContent = `Источники: ${providers}. Запросов за запуск: ${status.queries_per_run}. Последний поиск: ${lastRun}.`;
   } catch (error) {
-    searchMessage.textContent = error.message;
+    if (searchMessage) searchMessage.textContent = error.message;
   }
 }
 
-runSearchButton.addEventListener('click', async () => {
+runSearchButton?.addEventListener('click', async () => {
   runSearchButton.disabled = true;
-  searchMessage.textContent = 'Проверяю поисковую выдачу…';
+  if (searchMessage) searchMessage.textContent = 'Проверяю поисковую выдачу…';
   try {
     const response = await fetch('/api/v1/search/run', {method:'POST'});
     const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось выполнить поиск');
-    searchMessage.textContent = `Запросов: ${body.queries}. Найдено ссылок: ${body.found}. Новых: ${body.new}. Ошибок: ${body.errors}.`;
+    if (searchMessage) searchMessage.textContent = `Запросов: ${body.queries}. Найдено ссылок: ${body.found}. Новых: ${body.new}. Ошибок: ${body.errors}.`;
     await Promise.all([loadSearchStatus(), loadSearchResults()]);
   } catch (error) {
-    searchMessage.textContent = error.message;
-  } finally {
-    runSearchButton.disabled = false;
-  }
+    if (searchMessage) searchMessage.textContent = error.message;
+  } finally { runSearchButton.disabled = false; }
 });
 
-reloadSearchResults.addEventListener('click', async () => {
+reloadSearchResults?.addEventListener('click', async () => {
   reloadSearchResults.disabled = true;
   await Promise.all([loadSearchStatus(), loadSearchResults()]);
   reloadSearchResults.disabled = false;
 });
 
-runChecksButton.addEventListener('click', async () => {
+runChecksButton?.addEventListener('click', async () => {
   runChecksButton.disabled = true;
-  checkMessage.textContent = 'Проверяю сохранённые объявления…';
+  if (checkMessage) checkMessage.textContent = 'Проверяю сохранённые объявления…';
   try {
     const response = await fetch('/api/v1/checks/run', {method:'POST'});
     const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось выполнить проверку');
-    checkMessage.textContent = `Проверено: ${body.checked}. Изменений цены: ${body.updated}. Блокировок источника: ${body.blocked}. Ошибок: ${body.errors}.`;
+    if (checkMessage) checkMessage.textContent = `Проверено: ${body.checked}. Изменений цены: ${body.updated}. Блокировок источника: ${body.blocked}. Ошибок: ${body.errors}.`;
     await loadListings();
   } catch (error) {
-    checkMessage.textContent = error.message;
-  } finally {
-    runChecksButton.disabled = false;
-  }
+    if (checkMessage) checkMessage.textContent = error.message;
+  } finally { runChecksButton.disabled = false; }
 });
 
-importForm.addEventListener('submit', async event => {
+importForm?.addEventListener('submit', async event => {
   event.preventDefault();
-  importMessage.textContent = 'Загружаю объявление и определяю параметры…';
+  if (importMessage) importMessage.textContent = 'Загружаю объявление и определяю параметры…';
   const button = importForm.querySelector('button[type="submit"]');
   button.disabled = true;
   const data = new FormData(importForm);
   try {
-    const response = await fetch('/api/v1/listings/import', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({source_url: data.get('source_url')})
-    });
+    const response = await fetch('/api/v1/listings/import', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({source_url:data.get('source_url')})});
     const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось импортировать объявление');
-    importMessage.textContent = `Готово: ${money.format(body.price_kzt)}, ${number.format(body.area_m2)} м², рейтинг ${body.assessment.score}/100.`;
+    if (importMessage) importMessage.textContent = `Готово: ${money.format(body.price_kzt)}, ${number.format(body.area_m2)} м², рейтинг ${body.assessment.score}/100.`;
     importForm.reset();
-    filter.value = '0';
+    if (filter) filter.value = '0';
     await loadListings();
-    document.querySelector('#listingGrid').scrollIntoView({behavior:'smooth'});
   } catch (error) {
-    importMessage.textContent = error.message;
-  } finally {
-    button.disabled = false;
-  }
+    if (importMessage) importMessage.textContent = error.message;
+  } finally { button.disabled = false; }
 });
 
-form.addEventListener('submit', async event => {
+form?.addEventListener('submit', async event => {
   event.preventDefault();
-  message.textContent = 'Проверяю квартиру…';
+  if (message) message.textContent = 'Проверяю квартиру…';
   const data = new FormData(form);
   const payload = {
-    source: 'manual',
-    source_url: data.get('source_url'),
-    title: '2-комнатная квартира в Астане',
-    city: 'Астана',
-    price_kzt: Number(data.get('price_kzt')),
-    area_m2: Number(data.get('area_m2')),
-    rooms: Number(data.get('rooms')),
-    floor: Number(data.get('floor')),
-    floors_total: Number(data.get('total_floors')),
-    building_year: data.get('build_year') ? Number(data.get('build_year')) : null,
-    building_type: data.get('building_type'),
-    is_full_two_room: true,
-    mortgage_supported: data.get('otbasy_eligible') === 'on'
+    source:'manual', source_url:data.get('source_url'), title:data.get('title') || '2-комнатная квартира в Астане', city:'Астана',
+    district:data.get('district') || null, residential_complex:data.get('residential_complex') || null,
+    price_kzt:Number(data.get('price_kzt')), area_m2:Number(data.get('area_m2')), rooms:Number(data.get('rooms')),
+    floor:data.get('floor') ? Number(data.get('floor')) : null, floors_total:data.get('floors_total') ? Number(data.get('floors_total')) : null,
+    building_year:data.get('building_year') ? Number(data.get('building_year')) : null, building_type:data.get('building_type') || null,
+    is_full_two_room:data.get('is_full_two_room') === 'on', mortgage_supported:null
   };
   try {
-    const response = await fetch('/api/v1/listings', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
-    });
+    const response = await fetch('/api/v1/listings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
     const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось сохранить квартиру');
-    message.textContent = `Сохранено. Рейтинг ${body.assessment.score}/100 — ${body.assessment.verdict}`;
+    if (message) message.textContent = `Сохранено. Рейтинг ${body.assessment.score}/100 — ${body.assessment.verdict}`;
     await loadListings();
   } catch (error) {
-    message.textContent = error.message;
+    if (message) message.textContent = error.message;
   }
 });
 
-filter.addEventListener('change', loadListings);
-refreshButton.addEventListener('click', async () => {
-  await Promise.all([loadListings(), loadSearchStatus(), loadSearchResults()]);
-});
-
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => navigator.serviceWorker.register('/service-worker.js'));
-}
-
+filter?.addEventListener('change', loadListings);
+refreshButton?.addEventListener('click', async () => Promise.all([loadListings(), loadSearchStatus(), loadSearchResults()]));
+if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/service-worker.js'));
 Promise.all([loadListings(), loadSearchStatus(), loadSearchResults()]);
