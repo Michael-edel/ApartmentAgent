@@ -24,6 +24,7 @@ BASE_QUERIES = [
     'site:krisha.kz/a/show/ Астана "полноценная 2-комнатная"',
 ]
 SEARCH_QUERIES = BASE_QUERIES + [f'site:krisha.kz/a/show/ Астана "2-комнатная" "{district}"' for district in DISTRICTS]
+QUERYLESS_PROVIDERS = {"krisha_direct"}
 
 
 @dataclass(slots=True)
@@ -84,7 +85,8 @@ async def _save_error(provider_name: str, query: str, exc: Exception) -> None:
 
 async def _fetch_one(provider_name: str, query: str) -> tuple[str, str, list[SearchItem] | None, Exception | None]:
     try:
-        items = await asyncio.wait_for(PROVIDERS[provider_name](query), timeout=25.0)
+        timeout = 75.0 if provider_name == "krisha_direct" else 25.0
+        items = await asyncio.wait_for(PROVIDERS[provider_name](query), timeout=timeout)
         return provider_name, query, items, None
     except Exception as exc:
         return provider_name, query, None, exc
@@ -96,10 +98,18 @@ async def run_search() -> SearchSummary:
         return summary
     queries = _rotated_queries()
     enabled_providers = [name for name in settings.search_providers if name in PROVIDERS]
-    jobs = [(provider_name, query) for provider_name in enabled_providers for query in queries]
-    summary.queries = len(jobs)
+    jobs: list[tuple[str, str]] = []
     for provider_name in enabled_providers:
-        summary.providers[provider_name] = {"queries": len(queries), "found": 0, "new": 0, "errors": 0}
+        provider_queries = ["direct filters"] if provider_name in QUERYLESS_PROVIDERS else queries
+        summary.providers[provider_name] = {
+            "queries": len(provider_queries),
+            "found": 0,
+            "new": 0,
+            "errors": 0,
+        }
+        jobs.extend((provider_name, query) for query in provider_queries)
+
+    summary.queries = len(jobs)
     results = await asyncio.gather(*(_fetch_one(provider_name, query) for provider_name, query in jobs))
     for provider_name, query, items, error in results:
         stats = summary.providers[provider_name]
@@ -152,6 +162,7 @@ async def get_search_status() -> dict[str, object]:
         "enabled": settings.search_enabled,
         "providers": settings.search_providers,
         "brave_configured": bool(settings.brave_search_api_key),
+        "krisha_direct_configured": "krisha_direct" in settings.search_providers,
         "interval_minutes": max(settings.search_interval_minutes, 15),
         "queries_per_run": settings.search_queries_per_run,
         "total_results": total,
