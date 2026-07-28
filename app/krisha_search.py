@@ -5,7 +5,7 @@ import json
 import re
 from dataclasses import dataclass
 from html import unescape
-from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 
@@ -30,6 +30,10 @@ _TAG_RE = re.compile(r"<[^>]+>")
 
 class KrishaSearchError(RuntimeError):
     pass
+
+
+class KrishaSearchBlocked(KrishaSearchError):
+    """Krisha returned a security page or rate-limit response."""
 
 
 @dataclass(slots=True)
@@ -106,8 +110,14 @@ def _extract_json_items(html: str) -> list[KrishaSearchItem]:
 
 def parse_krisha_search_page(html: str) -> list[KrishaSearchItem]:
     lowered = html.lower()
-    if "captcha" in lowered or "проверка безопасности" in lowered:
-        raise KrishaSearchError("Krisha запросила проверку безопасности")
+    security_markers = (
+        "captcha",
+        "проверка безопасности",
+        "security check",
+        "access denied",
+    )
+    if any(marker in lowered for marker in security_markers):
+        raise KrishaSearchBlocked("Krisha запросила проверку безопасности")
 
     by_url: dict[str, KrishaSearchItem] = {}
 
@@ -138,11 +148,17 @@ def parse_krisha_search_page(html: str) -> list[KrishaSearchItem]:
 
 async def search_krisha_direct(_: str = "") -> list[KrishaSearchItem]:
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1"
+        ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "ru-KZ,ru;q=0.9,en;q=0.5",
-        "Cache-Control": "no-cache",
+        "Accept-Language": "ru-KZ,ru;q=0.9,kk-KZ;q=0.8,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Cache-Control": "max-age=0",
     }
     result: dict[str, KrishaSearchItem] = {}
     page_limit = min(max(settings.krisha_search_pages, 1), 10)
@@ -156,19 +172,23 @@ async def search_krisha_direct(_: str = "") -> list[KrishaSearchItem]:
             url = build_krisha_search_url(page)
             last_error: Exception | None = None
             response: httpx.Response | None = None
+
             for attempt in range(3):
                 try:
                     response = await client.get(url)
                     if response.status_code in {403, 429}:
-                        raise KrishaSearchError(
+                        raise KrishaSearchBlocked(
                             f"Krisha ограничила прямой доступ: HTTP {response.status_code}"
                         )
                     response.raise_for_status()
                     break
-                except (httpx.HTTPError, KrishaSearchError) as exc:
+                except KrishaSearchBlocked:
+                    raise
+                except httpx.HTTPError as exc:
                     last_error = exc
                     if attempt < 2:
-                        await asyncio.sleep(2 ** attempt)
+                        await asyncio.sleep((2**attempt) + 1)
+
             if response is None or response.is_error:
                 raise KrishaSearchError(str(last_error or "Не удалось загрузить выдачу Krisha"))
 
@@ -176,7 +196,7 @@ async def search_krisha_direct(_: str = "") -> list[KrishaSearchItem]:
             if not page_items:
                 if page == 1:
                     raise KrishaSearchError(
-                        "Krisha не вернула карточки объявлений: возможно, изменилась разметка или сработала защита"
+                        "Krisha не вернула карточки объявлений: возможно, изменилась разметка"
                     )
                 break
 
