@@ -35,6 +35,9 @@ class Listing(Base):
     prices: Mapped[list["PriceSnapshot"]] = relationship(
         back_populates="listing", cascade="all, delete-orphan"
     )
+    checks: Mapped[list["ListingCheck"]] = relationship(
+        back_populates="listing", cascade="all, delete-orphan"
+    )
 
 
 class PriceSnapshot(Base):
@@ -46,3 +49,17 @@ class PriceSnapshot(Base):
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     listing: Mapped[Listing] = relationship(back_populates="prices")
+
+
+class ListingCheck(Base):
+    __tablename__ = "listing_checks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    old_price_kzt: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    new_price_kzt: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    listing: Mapped[Listing] = relationship(back_populates="checks")
