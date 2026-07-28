@@ -7,6 +7,8 @@ const filter = document.querySelector('#scoreFilter');
 const refreshButton = document.querySelector('#refreshButton');
 const form = document.querySelector('#listingForm');
 const message = document.querySelector('#formMessage');
+const importForm = document.querySelector('#importForm');
+const importMessage = document.querySelector('#importMessage');
 
 function escapeHtml(value='') {
   return String(value).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#039;','"':'&quot;'}[ch]));
@@ -52,6 +54,32 @@ async function loadListings() {
     refreshButton.disabled = false;
   }
 }
+
+importForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  importMessage.textContent = 'Загружаю объявление и определяю параметры…';
+  const button = importForm.querySelector('button[type="submit"]');
+  button.disabled = true;
+  const data = new FormData(importForm);
+  try {
+    const response = await fetch('/api/v1/listings/import', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({source_url: data.get('source_url')})
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.detail || 'Не удалось импортировать объявление');
+    importMessage.textContent = `Готово: ${money.format(body.price_kzt)}, ${number.format(body.area_m2)} м², рейтинг ${body.assessment.score}/100.`;
+    importForm.reset();
+    filter.value = '0';
+    await loadListings();
+    document.querySelector('#listingGrid').scrollIntoView({behavior:'smooth'});
+  } catch (error) {
+    importMessage.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
 
 form.addEventListener('submit', async event => {
   event.preventDefault();
