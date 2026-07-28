@@ -13,14 +13,21 @@
   <title>ApartmentAgent</title>
 </head>
 <body>
-  <header class="topbar">
-    <div><span class="eyebrow">ASTANA PROPERTY SCOUT</span><h1>ApartmentAgent</h1></div>
+  <header class="topbar" id="top">
+    <div>
+      <span class="eyebrow">ASTANA PROPERTY SCOUT · v0.7</span>
+      <h1>ApartmentAgent</h1>
+    </div>
     <button id="refreshButton" class="icon-button" aria-label="Обновить">↻</button>
   </header>
 
   <main>
     <section class="hero card">
-      <div><p class="muted">Ваши критерии</p><h2>Полноценная 2-комнатная</h2><p>Астана · 55–70 м² · до 30 000 000 ₸</p></div>
+      <div>
+        <p class="muted">Ваши критерии</p>
+        <h2>Полноценная 2-комнатная</h2>
+        <p>Астана · 55–70 м² · до 30 000 000 ₸</p>
+      </div>
       <div class="score-badge">85+</div>
     </section>
 
@@ -30,14 +37,30 @@
       <article class="stat card"><span>Новых ссылок</span><strong id="newSearchCount">0</strong></article>
     </section>
 
-    <section class="form-card card">
+    <section class="form-card card" id="searchPanel">
       <p class="muted">Раннее обнаружение</p>
       <h2>Поиск новых объявлений</h2>
-      <p>Агент проверяет поисковую выдачу Bing RSS каждые 15 минут и сохраняет новые ссылки Krisha. Поисковая система может индексировать объявления с задержкой.</p>
+      <p>Агент проверяет поисковую выдачу каждые 15 минут. Запросы автоматически чередуются по площади, цене и районам Астаны.</p>
+      <div class="stats-grid compact">
+        <article class="stat card"><span>За час</span><strong id="foundHour">0</strong></article>
+        <article class="stat card"><span>Сегодня</span><strong id="foundToday">0</strong></article>
+        <article class="stat card"><span>Срочных</span><strong id="urgentCount">0</strong></article>
+      </div>
       <button id="runSearchButton" class="primary" type="button">Искать сейчас</button>
       <p id="searchMessage" class="message" role="status"></p>
-      <div id="searchResults" class="listing-grid"></div>
+      <p id="searchMeta" class="muted"></p>
     </section>
+
+    <section class="section-heading" id="newResultsHeading">
+      <div><p class="muted">Новые находки</p><h2>Ссылки из поиска</h2></div>
+      <button id="reloadSearchResults" class="icon-button" type="button" aria-label="Обновить найденные ссылки">↻</button>
+    </section>
+    <div id="searchEmpty" class="empty card">
+      <div class="house">⌕</div>
+      <h3>Новых ссылок пока нет</h3>
+      <p>Нажмите «Искать сейчас». Поисковая индексация может происходить с задержкой.</p>
+    </div>
+    <section id="searchResults" class="listing-grid"></section>
 
     <section class="form-card card">
       <p class="muted">Автоматический контроль</p>
@@ -53,34 +76,66 @@
       <form id="importForm">
         <label>Ссылка на объявление<input name="source_url" type="url" required placeholder="https://krisha.kz/a/show/..."></label>
         <button class="primary" type="submit">Загрузить и оценить</button>
-        <p class="muted">При ограничении доступа используйте ручную форму ниже.</p>
+        <p class="muted">При ограничении доступа источника используйте ручную форму ниже.</p>
         <p id="importMessage" class="message" role="status"></p>
       </form>
     </section>
 
     <section class="section-heading">
       <div><p class="muted">Мониторинг</p><h2>Квартиры</h2></div>
-      <select id="scoreFilter" aria-label="Минимальный рейтинг"><option value="0">Все</option><option value="80">80+</option><option value="85" selected>85+</option><option value="90">90+</option></select>
+      <select id="scoreFilter" aria-label="Минимальный рейтинг">
+        <option value="0">Все</option>
+        <option value="80">80+</option>
+        <option value="85" selected>85+</option>
+        <option value="90">90+</option>
+      </select>
     </section>
 
-    <div id="emptyState" class="empty card"><div class="house">⌂</div><h3>Пока нет квартир</h3><p>Добавьте найденную ссылку или заполните данные вручную.</p></div>
+    <div id="emptyState" class="empty card">
+      <div class="house">⌂</div>
+      <h3>Пока нет квартир</h3>
+      <p>Вставьте ссылку Krisha выше или заполните данные вручную.</p>
+    </div>
     <section id="listingGrid" class="listing-grid"></section>
 
     <section class="form-card card">
-      <p class="muted">Резервный способ</p><h2>Добавить вручную</h2>
+      <p class="muted">Резервный способ</p>
+      <h2>Добавить вручную</h2>
       <form id="listingForm">
         <label>Ссылка на объявление<input name="source_url" type="url" required placeholder="https://krisha.kz/a/show/..."></label>
-        <div class="two-cols"><label>Цена, ₸<input name="price_kzt" type="number" required value="30000000"></label><label>Площадь, м²<input name="area_m2" type="number" step="0.1" required value="56"></label></div>
-        <div class="two-cols"><label>Этаж<input name="floor" type="number" required value="4"></label><label>Этажей в доме<input name="total_floors" type="number" required value="10"></label></div>
-        <div class="two-cols"><label>Комнат<input name="rooms" type="number" required value="2"></label><label>Год дома<input name="build_year" type="number" value="2020"></label></div>
-        <label>Материал дома<select name="building_type"><option value="brick">Кирпич</option><option value="monolith">Монолит</option><option value="panel">Панель</option><option value="other">Другое</option></select></label>
+        <div class="two-cols">
+          <label>Цена, ₸<input name="price_kzt" type="number" required value="30000000"></label>
+          <label>Площадь, м²<input name="area_m2" type="number" step="0.1" required value="56"></label>
+        </div>
+        <div class="two-cols">
+          <label>Этаж<input name="floor" type="number" required value="4"></label>
+          <label>Этажей в доме<input name="total_floors" type="number" required value="10"></label>
+        </div>
+        <div class="two-cols">
+          <label>Комнат<input name="rooms" type="number" required value="2"></label>
+          <label>Год дома<input name="build_year" type="number" value="2020"></label>
+        </div>
+        <label>Материал дома
+          <select name="building_type">
+            <option value="brick">Кирпич</option>
+            <option value="monolith">Монолит</option>
+            <option value="panel">Панель</option>
+            <option value="other">Другое</option>
+          </select>
+        </label>
         <label class="check"><input name="otbasy_eligible" type="checkbox" checked> Подходит под Отбасы Банк</label>
-        <button class="primary" type="submit">Оценить и сохранить</button><p id="formMessage" class="message" role="status"></p>
+        <button class="primary" type="submit">Оценить и сохранить</button>
+        <p id="formMessage" class="message" role="status"></p>
       </form>
     </section>
   </main>
 
-  <nav class="bottom-nav"><a href="#top" class="active"><span>⌂</span>Обзор</a><a href="#searchResults"><span>⌕</span>Новые</a><a href="#listingGrid"><span>★</span>Лучшие</a></nav>
+  <nav class="bottom-nav">
+    <a href="#top" class="active"><span>⌂</span>Обзор</a>
+    <a href="#newResultsHeading"><span>⌕</span>Новые</a>
+    <a href="#listingGrid"><span>★</span>Лучшие</a>
+  </nav>
+
   <script src="/static/app.js" defer></script>
 </body>
 </html>
