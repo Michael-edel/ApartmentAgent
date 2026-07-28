@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,11 +19,20 @@ class Settings(BaseSettings):
 
     search_enabled: bool = True
     search_interval_minutes: int = 15
+    search_queries_per_run: int = 8
+    search_providers: list[str] = ["bing_rss"]
 
     max_price_kzt: int = 30_000_000
     min_area_m2: float = 55.0
     max_area_m2: float = 70.0
     min_score_to_notify: int = 85
+
+    @field_validator("search_providers", mode="before")
+    @classmethod
+    def parse_search_providers(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
 
 
 @lru_cache
