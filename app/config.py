@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     telegram_chat_id: str = ""
     check_interval_minutes: int = 120
 
+    search_enabled: bool = True
+    search_interval_minutes: int = 15
+
     max_price_kzt: int = 30_000_000
     min_area_m2: float = 55.0
     max_area_m2: float = 70.0

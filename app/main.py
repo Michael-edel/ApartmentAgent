@@ -12,9 +12,10 @@ from app.checker import check_all_listings, periodic_checker
 from app.config import get_settings
 from app.database import SessionLocal, engine
 from app.importer import ListingImportError, import_krisha_listing
-from app.models import Base, Listing, ListingCheck, PriceSnapshot
+from app.models import Base, Listing, ListingCheck, PriceSnapshot, SearchHistory, SearchResult
 from app.scoring import assess_listing
 from app.schemas import ListingCreate, ListingImportRequest, ListingResponse
+from app.search_agent import get_search_status, periodic_search, run_search
 
 settings = get_settings()
 
@@ -26,13 +27,14 @@ async def lifespan(_: FastAPI):
 
     stop_event = asyncio.Event()
     checker_task = asyncio.create_task(periodic_checker(stop_event))
+    search_task = asyncio.create_task(periodic_search(stop_event))
     yield
     stop_event.set()
-    await checker_task
+    await asyncio.gather(checker_task, search_task, return_exceptions=True)
     await engine.dispose()
 
 
-app = FastAPI(title=settings.app_name, version="0.5.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.6.0", lifespan=lifespan)
 _static_dir = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
@@ -59,12 +61,14 @@ async def service_worker() -> FileResponse:
 
 
 @app.get("/health")
-async def health() -> dict[str, str | int]:
+async def health() -> dict[str, str | int | bool]:
     return {
         "status": "ok",
         "service": settings.app_name,
         "storage": "postgresql",
         "automatic_check_minutes": max(settings.check_interval_minutes, 15),
+        "search_enabled": settings.search_enabled,
+        "search_interval_minutes": max(settings.search_interval_minutes, 15),
     }
 
 
@@ -162,6 +166,80 @@ async def latest_checks() -> list[dict[str, object]]:
             "old_price_kzt": row.old_price_kzt,
             "new_price_kzt": row.new_price_kzt,
             "checked_at": row.checked_at,
+        }
+        for row in rows
+    ]
+
+
+@app.post("/api/v1/search/run")
+async def run_search_now() -> dict[str, int]:
+    summary = await run_search()
+    return {
+        "queries": summary.queries,
+        "found": summary.found,
+        "new": summary.new,
+        "errors": summary.errors,
+    }
+
+
+@app.get("/api/v1/search/status")
+async def search_status() -> dict[str, object]:
+    return await get_search_status()
+
+
+@app.get("/api/v1/search/results")
+async def search_results(limit: int = 50, only_new: bool = False) -> list[dict[str, object]]:
+    safe_limit = min(max(limit, 1), 200)
+    async with SessionLocal() as session:
+        query = select(SearchResult).order_by(SearchResult.first_seen.desc()).limit(safe_limit)
+        if only_new:
+            query = query.where(SearchResult.status == "new")
+        rows = (await session.scalars(query)).all()
+    return [
+        {
+            "id": row.id,
+            "url": row.url,
+            "search_engine": row.search_engine,
+            "query": row.query,
+            "title": row.title,
+            "snippet": row.snippet,
+            "status": row.status,
+            "first_seen": row.first_seen,
+            "last_seen": row.last_seen,
+        }
+        for row in rows
+    ]
+
+
+@app.post("/api/v1/search/results/{result_id}/seen")
+async def mark_search_result_seen(result_id: int) -> dict[str, object]:
+    async with SessionLocal() as session:
+        row = await session.get(SearchResult, result_id)
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Search result not found")
+        row.status = "seen"
+        await session.commit()
+    return {"id": result_id, "status": "seen"}
+
+
+@app.get("/api/v1/search/history")
+async def search_history(limit: int = 50) -> list[dict[str, object]]:
+    safe_limit = min(max(limit, 1), 200)
+    async with SessionLocal() as session:
+        rows = (
+            await session.scalars(
+                select(SearchHistory).order_by(SearchHistory.searched_at.desc()).limit(safe_limit)
+            )
+        ).all()
+    return [
+        {
+            "search_engine": row.search_engine,
+            "query": row.query,
+            "searched_at": row.searched_at,
+            "total_found": row.total_found,
+            "new_found": row.new_found,
+            "status": row.status,
+            "message": row.message,
         }
         for row in rows
     ]
