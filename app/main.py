@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -7,10 +8,11 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from app.checker import check_all_listings, periodic_checker
 from app.config import get_settings
 from app.database import SessionLocal, engine
 from app.importer import ListingImportError, import_krisha_listing
-from app.models import Base, Listing, PriceSnapshot
+from app.models import Base, Listing, ListingCheck, PriceSnapshot
 from app.scoring import assess_listing
 from app.schemas import ListingCreate, ListingImportRequest, ListingResponse
 
@@ -21,11 +23,16 @@ settings = get_settings()
 async def lifespan(_: FastAPI):
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+
+    stop_event = asyncio.Event()
+    checker_task = asyncio.create_task(periodic_checker(stop_event))
     yield
+    stop_event.set()
+    await checker_task
     await engine.dispose()
 
 
-app = FastAPI(title=settings.app_name, version="0.4.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.5.0", lifespan=lifespan)
 _static_dir = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
@@ -52,8 +59,13 @@ async def service_worker() -> FileResponse:
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok", "service": settings.app_name, "storage": "postgresql"}
+async def health() -> dict[str, str | int]:
+    return {
+        "status": "ok",
+        "service": settings.app_name,
+        "storage": "postgresql",
+        "automatic_check_minutes": max(settings.check_interval_minutes, 15),
+    }
 
 
 def _to_response(row: Listing) -> ListingResponse:
@@ -123,6 +135,36 @@ async def import_listing(payload: ListingImportRequest) -> ListingResponse:
     except ListingImportError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     return await _save_listing(listing_data)
+
+
+@app.post("/api/v1/checks/run")
+async def run_checks_now() -> dict[str, int]:
+    summary = await check_all_listings()
+    return {
+        "checked": summary.checked,
+        "updated": summary.updated,
+        "blocked": summary.blocked,
+        "errors": summary.errors,
+    }
+
+
+@app.get("/api/v1/checks/latest")
+async def latest_checks() -> list[dict[str, object]]:
+    async with SessionLocal() as session:
+        rows = (
+            await session.scalars(select(ListingCheck).order_by(ListingCheck.checked_at.desc()).limit(100))
+        ).all()
+    return [
+        {
+            "listing_id": row.listing_id,
+            "status": row.status,
+            "message": row.message,
+            "old_price_kzt": row.old_price_kzt,
+            "new_price_kzt": row.new_price_kzt,
+            "checked_at": row.checked_at,
+        }
+        for row in rows
+    ]
 
 
 @app.get("/api/v1/listings", response_model=list[ListingResponse])
