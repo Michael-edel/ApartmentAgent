@@ -63,3 +63,30 @@ class ListingCheck(Base):
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     listing: Mapped[Listing] = relationship(back_populates="checks")
+
+
+class SearchResult(Base):
+    __tablename__ = "search_results"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    url: Mapped[str] = mapped_column(Text, unique=True, index=True)
+    search_engine: Mapped[str] = mapped_column(String(30), index=True)
+    query: Mapped[str] = mapped_column(Text)
+    title: Mapped[str] = mapped_column(String(500))
+    snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="new", index=True)
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SearchHistory(Base):
+    __tablename__ = "search_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    search_engine: Mapped[str] = mapped_column(String(30), index=True)
+    query: Mapped[str] = mapped_column(Text)
+    searched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    total_found: Mapped[int] = mapped_column(Integer, default=0)
+    new_found: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(30), default="ok", index=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
