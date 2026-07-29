@@ -160,6 +160,29 @@ async function loadListings() {
 
 async function markSeen(id) { await fetch(`/api/v1/search/results/${id}/seen`, {method:'POST'}); }
 
+function openListingInYandexBrowser(targetUrl) {
+  const parsed = new URL(targetUrl, location.href);
+  const normalizedUrl = parsed.toString();
+  const isAndroid = /Android/i.test(navigator.userAgent);
+
+  if (!isAndroid) {
+    const opened = window.open(normalizedUrl, '_blank', 'noopener,noreferrer');
+    if (!opened) window.location.assign(normalizedUrl);
+    return;
+  }
+
+  const scheme = parsed.protocol.replace(':', '') || 'https';
+  const intentTarget = `${parsed.host}${parsed.pathname}${parsed.search}`;
+  const intentUrl = `intent://${intentTarget}#Intent;scheme=${scheme};package=com.yandex.browser;S.browser_fallback_url=${encodeURIComponent(normalizedUrl)};end`;
+  window.location.href = intentUrl;
+
+  // If Yandex Browser is not installed or Android rejects the intent, keep a
+  // reliable HTTPS fallback instead of leaving the user on an error page.
+  setTimeout(() => {
+    if (!document.hidden) window.location.assign(normalizedUrl);
+  }, 1500);
+}
+
 async function importSearchResult(url, button) {
   button.disabled = true;
   button.textContent = 'Загружаю данные…';
@@ -248,7 +271,7 @@ async function monitorBeforeOpen(link) {
     await markSeen(resultId).catch(() => {});
   } finally {
     clearTimeout(timeout);
-    window.location.assign(targetUrl);
+    openListingInYandexBrowser(targetUrl);
   }
 }
 
