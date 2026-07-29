@@ -286,7 +286,11 @@ async def search_status() -> dict[str, object]:
 async def search_results(limit: int = 50, only_new: bool = False) -> list[dict[str, object]]:
     safe_limit = min(max(limit, 1), 200)
     async with SessionLocal() as session:
-        query = select(SearchResult).order_by(SearchResult.first_seen.desc()).limit(safe_limit)
+        query = (
+            select(SearchResult)
+            .order_by(SearchResult.first_seen.desc(), SearchResult.id.desc())
+            .limit(safe_limit)
+        )
         if only_new:
             query = query.where(SearchResult.status.like("new:%"))
         rows = (await session.scalars(query)).all()

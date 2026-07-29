@@ -185,7 +185,7 @@ async function importSearchResult(url, button) {
 async function loadSearchResults() {
   if (!searchResults) return;
   try {
-    const response = await fetch('/api/v1/search/results?limit=60&only_new=true');
+    const response = await fetch('/api/v1/search/results?limit=200&only_new=false');
     if (!response.ok) throw new Error('Не удалось загрузить найденные ссылки');
     const items = await readJson(response);
     if (!items.length) {
@@ -205,9 +205,10 @@ async function loadSearchResults() {
       const importStatus = item.import_status || 'pending';
       const imported = importStatus === 'imported' || isSaved;
       const importLabel = imported ? 'Автоматически сохранено' : importStatus === 'blocked' ? 'Источник ограничил импорт' : importStatus === 'error' ? 'Импорт не удался — повторить' : 'Импортирую…';
-      return `<article class="listing card ${priorityClass(item.priority)}">
+      const seenLabel = item.status === 'seen' ? 'Просмотрено' : priorityLabel(item.priority);
+      return `<article class="listing card ${priorityClass(item.priority)} ${item.status === 'seen' ? 'result-seen' : ''}">
         <div class="listing-top">
-          <div><span class="verdict">${priorityLabel(item.priority)}</span><h3>${escapeHtml(cleanSearchTitle(item.title))}</h3></div>
+          <div><span class="verdict">${escapeHtml(seenLabel)}</span><h3>${escapeHtml(cleanSearchTitle(item.title))}</h3></div>
           <div class="rating ${a.score < 85 ? 'medium' : ''}">${a.score ?? '—'}</div>
         </div>
         ${facts.length ? `<div class="search-facts">${facts.map(value => `<span>${escapeHtml(value)}</span>`).join('')}</div>` : ''}
