@@ -165,17 +165,16 @@ function openListingInYandexBrowser(targetUrl) {
   const normalizedUrl = parsed.toString();
   const userAgent = navigator.userAgent || '';
   const isAndroid = /Android/i.test(userAgent);
-  const isYandexBrowser = /YaBrowser|Yowser/i.test(userAgent);
 
-  // When the PWA is already running in Yandex Browser, a new tab is the
-  // reliable external-browser route and avoids an intent being rejected as a
-  // self-navigation by the browser.
-  if (!isAndroid || isYandexBrowser) {
+  if (!isAndroid) {
     const opened = window.open(normalizedUrl, '_blank', 'noopener,noreferrer');
     if (!opened) window.location.assign(normalizedUrl);
     return;
   }
 
+  // Android may route an ordinary Krisha HTTPS link to the Krisha app. An
+  // explicit package keeps the listing in Yandex Browser, including when the
+  // ApartmentAgent PWA itself is already running there.
   const scheme = parsed.protocol.replace(':', '') || 'https';
   const intentTarget = `${parsed.host}${parsed.pathname}${parsed.search}`;
   const intentUrl = `intent://${intentTarget}#Intent;scheme=${scheme};package=com.yandex.browser;S.browser_fallback_url=${encodeURIComponent(normalizedUrl)};end`;
