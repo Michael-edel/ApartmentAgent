@@ -163,9 +163,14 @@ async function markSeen(id) { await fetch(`/api/v1/search/results/${id}/seen`, {
 function openListingInYandexBrowser(targetUrl) {
   const parsed = new URL(targetUrl, location.href);
   const normalizedUrl = parsed.toString();
-  const isAndroid = /Android/i.test(navigator.userAgent);
+  const userAgent = navigator.userAgent || '';
+  const isAndroid = /Android/i.test(userAgent);
+  const isYandexBrowser = /YaBrowser|Yowser/i.test(userAgent);
 
-  if (!isAndroid) {
+  // When the PWA is already running in Yandex Browser, a new tab is the
+  // reliable external-browser route and avoids an intent being rejected as a
+  // self-navigation by the browser.
+  if (!isAndroid || isYandexBrowser) {
     const opened = window.open(normalizedUrl, '_blank', 'noopener,noreferrer');
     if (!opened) window.location.assign(normalizedUrl);
     return;
@@ -253,26 +258,23 @@ async function loadSearchResults() {
   }
 }
 
-async function monitorBeforeOpen(link) {
+function monitorBeforeOpen(link) {
   const resultId = link.dataset.resultId;
   const targetUrl = link.href;
   link.classList.add('is-monitoring');
   link.setAttribute('aria-busy', 'true');
   link.textContent = 'Ставлю на мониторинг…';
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5000);
-  try {
-    const response = await fetch(`/api/v1/search/results/${resultId}/monitor`, {
-      method:'POST',
-      signal:controller.signal,
-    });
+  // Start the monitoring request, but do not await it: Android only permits an
+  // external intent while the original click still has user activation.
+  const monitorRequest = fetch(`/api/v1/search/results/${resultId}/monitor`, {
+    method:'POST',
+    keepalive:true,
+  }).then(response => {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  } catch (_) {
-    await markSeen(resultId).catch(() => {});
-  } finally {
-    clearTimeout(timeout);
-    openListingInYandexBrowser(targetUrl);
-  }
+  }).catch(() => markSeen(resultId).catch(() => {}));
+
+  openListingInYandexBrowser(targetUrl);
+  void monitorRequest;
 }
 
 async function loadSearchStatus() {
