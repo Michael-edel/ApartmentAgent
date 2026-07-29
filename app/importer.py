@@ -98,6 +98,16 @@ def _coordinate(value: Any) -> float | None:
     return None
 
 
+def _is_astana_coordinate_pair(latitude: float | None, longitude: float | None) -> bool:
+    """Accept only coordinates inside the configured Astana search area."""
+    return (
+        latitude is not None
+        and longitude is not None
+        and 50 <= latitude <= 52
+        and 69 <= longitude <= 73
+    )
+
+
 def _find_numeric(data: list[Any], keys: set[str], minimum: float, maximum: float) -> float | None:
     normalized = {key.lower() for key in keys}
     for root in data:
@@ -223,6 +233,8 @@ def _coordinates_from_html(html: str) -> tuple[float | None, float | None]:
         longitude = None
     if latitude is not None and not -90 <= latitude <= 90:
         latitude = None
+    if not _is_astana_coordinate_pair(latitude, longitude):
+        return None, None
     return latitude, longitude
 
 
@@ -381,6 +393,9 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
     longitude = longitude or _find_html_coordinate(html, {"longitude", "geoLongitude", "geoLon"}, -180, 180)
     latitude = latitude or html_latitude
     longitude = longitude or html_longitude
+    if not _is_astana_coordinate_pair(latitude, longitude):
+        latitude = None
+        longitude = None
     photo_urls = meta_images + _find_image_urls(data)
     photo_urls = list(dict.fromkeys(photo_urls))[:30]
     normalized_source_url = urlunparse(

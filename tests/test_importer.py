@@ -52,3 +52,7 @@ def test_falls_back_to_visible_title_and_map_coordinates() -> None:
         51.128,
         71.43,
     )
+    assert _coordinates_from_html('href="https://yandex.kz/maps/?ll=0.002950%2C-0.00582"') == (
+        None,
+        None,
+    )

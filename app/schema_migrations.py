@@ -41,3 +41,14 @@ def ensure_legacy_columns(connection: Connection) -> None:
                     "ON search_results (import_status)"
                 )
             )
+    # Older browser imports could mistake a map default like (0, 0) for the
+    # listing location. Clear only implausible coordinates; the app searches Astana.
+    connection.execute(
+        text(
+            "UPDATE listings SET latitude = NULL, longitude = NULL "
+            "WHERE latitude IS NULL AND longitude IS NOT NULL "
+            "   OR latitude IS NOT NULL AND longitude IS NULL "
+            "   OR latitude < 50 OR latitude > 52 "
+            "   OR longitude < 69 OR longitude > 73"
+        )
+    )

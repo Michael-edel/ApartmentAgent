@@ -108,6 +108,8 @@
     const parsed = typeof value === 'number' ? value : Number(clean(value).replace(',', '.').replace(/[^0-9+-.]/g, ''));
     return Number.isFinite(parsed) && parsed >= minimum && parsed <= maximum ? parsed : null;
   };
+  const isAstanaCoordinates = (latitude, longitude) => latitude !== null && longitude !== null
+    && latitude >= 50 && latitude <= 52 && longitude >= 69 && longitude <= 73;
   const coordinatePair = value => {
     let decoded = String(value || '');
     try { decoded = decodeURIComponent(decoded); } catch (_) { /* keep original */ }
@@ -116,7 +118,7 @@
     if (!match) return null;
     const longitude = coordinate(match[1], -180, 180);
     const latitude = coordinate(match[2], -90, 90);
-    return longitude !== null && latitude !== null ? {latitude, longitude} : null;
+    return isAstanaCoordinates(latitude, longitude) ? {latitude, longitude} : null;
   };
   const pageCoordinates = () => {
     const nodes = document.querySelectorAll('a[href], iframe[src], [data-latitude], [data-longitude], [data-lat], [data-lng], [data-coordinates]');
@@ -125,7 +127,7 @@
       if (pair) return pair;
       const latitude = coordinate(node.getAttribute('data-latitude') || node.getAttribute('data-lat'), -90, 90);
       const longitude = coordinate(node.getAttribute('data-longitude') || node.getAttribute('data-lng'), -180, 180);
-      if (latitude !== null && longitude !== null) return {latitude, longitude};
+      if (isAstanaCoordinates(latitude, longitude)) return {latitude, longitude};
     }
     return null;
   };
@@ -176,10 +178,11 @@
     || domAddress
     || addressFromText(fullText);
   const coordinates = pageCoordinates();
-  const latitude = findValue(['latitude', 'lat', 'geoLatitude', 'geoLat'], value => coordinate(value, -90, 90))
-    ?? coordinates?.latitude ?? null;
-  const longitude = findValue(['longitude', 'lng', 'lon', 'geoLongitude', 'geoLon'], value => coordinate(value, -180, 180))
-    ?? coordinates?.longitude ?? null;
+  const dataLatitude = findValue(['latitude', 'lat', 'geoLatitude', 'geoLat'], value => coordinate(value, -90, 90));
+  const dataLongitude = findValue(['longitude', 'lng', 'lon', 'geoLongitude', 'geoLon'], value => coordinate(value, -180, 180));
+  const locationCoordinates = isAstanaCoordinates(dataLatitude, dataLongitude)
+    ? {latitude: dataLatitude, longitude: dataLongitude}
+    : coordinates;
   const payload = {
     source: 'browser',
     source_url: location.href.split('#')[0],
@@ -189,8 +192,8 @@
     district,
     residential_complex: residentialComplex,
     address,
-    latitude,
-    longitude,
+    latitude: locationCoordinates?.latitude ?? null,
+    longitude: locationCoordinates?.longitude ?? null,
     price_kzt: price,
     area_m2: area,
     rooms,

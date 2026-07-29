@@ -70,6 +70,8 @@
     const parsed = typeof value === 'number' ? value : Number(clean(value).replace(',', '.').replace(/[^0-9+-.]/g, ''));
     return Number.isFinite(parsed) && parsed >= minimum && parsed <= maximum ? parsed : null;
   };
+  const isAstanaCoordinates = (latitude, longitude) => latitude !== null && longitude !== null
+    && latitude >= 50 && latitude <= 52 && longitude >= 69 && longitude <= 73;
   const coordinatePair = value => {
     let decoded = String(value || '');
     try { decoded = decodeURIComponent(decoded); } catch (_) { /* keep original */ }
@@ -78,7 +80,7 @@
     if (!match) return null;
     const longitude = coordinate(match[1], -180, 180);
     const latitude = coordinate(match[2], -90, 90);
-    return longitude !== null && latitude !== null ? {latitude, longitude} : null;
+    return isAstanaCoordinates(latitude, longitude) ? {latitude, longitude} : null;
   };
   const pageCoordinates = () => {
     const nodes = document.querySelectorAll('a[href], iframe[src], [data-latitude], [data-longitude], [data-lat], [data-lng], [data-coordinates]');
@@ -87,7 +89,7 @@
       if (pair) return pair;
       const latitude = coordinate(node.getAttribute('data-latitude') || node.getAttribute('data-lat'), -90, 90);
       const longitude = coordinate(node.getAttribute('data-longitude') || node.getAttribute('data-lng'), -180, 180);
-      if (latitude !== null && longitude !== null) return {latitude, longitude};
+      if (isAstanaCoordinates(latitude, longitude)) return {latitude, longitude};
     }
     return null;
   };
@@ -116,6 +118,11 @@
     .filter(value => /^https?:\/\//i.test(value)).slice(0, 30);
   const lower = fullText.toLowerCase();
   const coordinates = pageCoordinates();
+  const dataLatitude = findValue(['latitude', 'lat', 'geoLatitude', 'geoLat'], value => coordinate(value, -90, 90));
+  const dataLongitude = findValue(['longitude', 'lng', 'lon', 'geoLongitude', 'geoLon'], value => coordinate(value, -180, 180));
+  const locationCoordinates = isAstanaCoordinates(dataLatitude, dataLongitude)
+    ? {latitude: dataLatitude, longitude: dataLongitude}
+    : coordinates;
   const payload = {
     source: 'browser-extension',
     source_url: location.href.split('#')[0],
@@ -134,8 +141,8 @@
         .map(node => clean(node.innerText || node.textContent))
         .find(value => value.length >= 5 && value.length <= 180)
       || addressFromText(fullText),
-    latitude: findValue(['latitude', 'lat', 'geoLatitude', 'geoLat'], value => coordinate(value, -90, 90)) ?? coordinates?.latitude ?? null,
-    longitude: findValue(['longitude', 'lng', 'lon', 'geoLongitude', 'geoLon'], value => coordinate(value, -180, 180)) ?? coordinates?.longitude ?? null,
+    latitude: locationCoordinates?.latitude ?? null,
+    longitude: locationCoordinates?.longitude ?? null,
     price_kzt: price,
     area_m2: area,
     rooms,
