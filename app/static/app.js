@@ -9,6 +9,9 @@ const form = document.querySelector('#listingForm');
 const message = document.querySelector('#formMessage');
 const importForm = document.querySelector('#importForm');
 const importMessage = document.querySelector('#importMessage');
+const copyBookmarkletButton = document.querySelector('#copyBookmarkletButton');
+const bookmarkletCode = document.querySelector('#bookmarkletCode');
+const bookmarkletMessage = document.querySelector('#bookmarkletMessage');
 const runChecksButton = document.querySelector('#runChecksButton');
 const checkMessage = document.querySelector('#checkMessage');
 const runSearchButton = document.querySelector('#runSearchButton');
@@ -21,6 +24,24 @@ let savedUrls = new Set();
 function escapeHtml(value='') {
   return String(value).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#039;','"':'&quot;'}[ch]));
 }
+
+function buildBookmarklet() {
+  const scriptUrl = `${location.origin}/static/browser-import.js`;
+  return `javascript:(()=>{const s=document.createElement('script');s.src=${JSON.stringify(scriptUrl)};document.body.appendChild(s)})()`;
+}
+
+if (bookmarkletCode) bookmarkletCode.value = buildBookmarklet();
+copyBookmarkletButton?.addEventListener('click', async () => {
+  const code = buildBookmarklet();
+  try {
+    await navigator.clipboard.writeText(code);
+    if (bookmarkletMessage) bookmarkletMessage.textContent = 'Скопировано. Создайте закладку и вставьте код в поле URL.';
+  } catch (_) {
+    bookmarkletCode?.select();
+    document.execCommand('copy');
+    if (bookmarkletMessage) bookmarkletMessage.textContent = 'Выделите код вручную и сохраните его как закладку браузера.';
+  }
+});
 
 async function readJson(response) {
   const text = await response.text();

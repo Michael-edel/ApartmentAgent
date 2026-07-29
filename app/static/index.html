@@ -9,7 +9,8 @@
   <meta name="apple-mobile-web-app-title" content="Квартиры">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icon.svg">
-  <link rel="stylesheet" href="/static/styles.css?v=121">
+  <link rel="stylesheet" href="/static/styles.css?v=122">
+  <style>.bookmarklet-code{width:100%;min-height:96px;resize:vertical;border:1px solid #d8e2ec;border-radius:12px;background:#f8fafc;color:#142033;padding:12px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}</style>
   <title>ApartmentAgent</title>
 </head>
 <body>
@@ -83,6 +84,15 @@
       </form>
     </section>
 
+    <section class="form-card card" id="browserImportPanel">
+      <p class="eyebrow">Импорт из браузера</p>
+      <h2>Получить данные с открытой страницы</h2>
+      <p>Если Krisha открывается в браузере, но блокирует серверный импорт, запустите bookmarklet на странице объявления. Он передаст только видимые публичные данные и фотографии.</p>
+      <button id="copyBookmarkletButton" type="button">Скопировать bookmarklet</button>
+      <textarea id="bookmarkletCode" class="bookmarklet-code" rows="4" readonly aria-label="Код bookmarklet"></textarea>
+      <p id="bookmarkletMessage" class="form-message" aria-live="polite">Сохраните скопированный код как закладку браузера. На странице Krisha откройте эту закладку один раз.</p>
+    </section>
+
     <section class="section-heading">
       <div><p class="eyebrow">Мониторинг</p><h2>Квартиры</h2></div>
       <select id="scoreFilter" aria-label="Минимальный рейтинг">
@@ -128,6 +138,6 @@
     <a href="#listingGrid">★<span>Лучшие</span></a>
   </nav>
 
-  <script src="/static/app.js?v=121" defer></script>
+  <script src="/static/app.js?v=122" defer></script>
 </body>
 </html>

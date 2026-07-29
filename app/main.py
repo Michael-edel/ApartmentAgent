@@ -2,8 +2,10 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import HttpUrl
@@ -14,7 +16,7 @@ from app.ai_service import analyze_listing
 from app.checker import check_all_listings, periodic_checker
 from app.config import get_settings
 from app.database import SessionLocal, engine, initialize_database
-from app.importer import ListingImportError, import_krisha_listing
+from app.importer import ListingImportError, _is_krisha_host, import_krisha_listing
 from app.listing_service import ListingAlreadyExists, persist_listing
 from app.models import Listing, ListingCheck, PriceSnapshot, SearchHistory, SearchResult
 from app.schemas import ListingCreate, ListingImportRequest, ListingResponse, PriceSnapshotResponse
@@ -40,6 +42,12 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, version="0.11.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"^https://([a-z0-9-]+\.)*krisha\.kz$",
+    allow_methods=["POST"],
+    allow_headers=["content-type"],
+)
 _static_dir = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
@@ -166,6 +174,40 @@ async def import_listing(payload: ListingImportRequest) -> ListingResponse:
     except ListingImportError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     return await _save_listing(listing_data, allow_existing=True)
+
+
+@app.post(
+    "/api/v1/listings/browser-import",
+    response_model=ListingResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def import_listing_from_browser(payload: ListingCreate) -> ListingResponse:
+    """Persist public data extracted by the Krisha-page bookmarklet.
+
+    The browser script runs on the page the user opened normally. It sends
+    only parsed public fields; cookies and page HTML never leave the browser.
+    """
+    parsed = urlparse(str(payload.source_url))
+    if not _is_krisha_host((parsed.hostname or "").lower()):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Разрешены только ссылки krisha.kz",
+        )
+
+    browser_payload = payload.model_copy(update={"source": "browser"})
+    saved = await _save_listing(browser_payload, allow_existing=True)
+
+    async with SessionLocal() as session:
+        result = await session.scalar(
+            select(SearchResult).where(SearchResult.url == str(browser_payload.source_url))
+        )
+        if result is not None:
+            result.import_status = "imported"
+            result.imported_listing_id = saved.id
+            result.import_error = None
+            result.imported_at = datetime.now(UTC)
+            await session.commit()
+    return saved
 
 
 @app.post("/api/v1/checks/run")
