@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import BackgroundTasks, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -121,6 +121,37 @@ def _price_history(row: Listing) -> list[PriceSnapshotResponse]:
         )
         previous = snapshot
     return list(reversed(result))
+
+
+def _is_blocked_import_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(token in lowered for token in ("огранич", "провер", "captcha", "403", "429"))
+
+
+async def _finish_search_result_monitor(result_id: int, source_url: str) -> None:
+    import_status = "error"
+    import_error: str | None = None
+    listing_id: int | None = None
+    try:
+        payload = await import_krisha_listing(source_url)
+        saved = await persist_listing(payload, allow_existing=True, notify=True)
+        import_status = "imported"
+        listing_id = saved.row.id
+    except ListingImportError as exc:
+        import_error = str(exc)
+        import_status = "blocked" if _is_blocked_import_error(import_error) else "error"
+    except Exception as exc:  # noqa: BLE001
+        import_error = str(exc)
+
+    async with SessionLocal() as session:
+        row = await session.get(SearchResult, result_id)
+        if row is None:
+            return
+        row.import_status = import_status
+        row.imported_listing_id = listing_id
+        row.import_error = import_error[:500] if import_error else None
+        row.imported_at = datetime.now(UTC) if import_status == "imported" else None
+        await session.commit()
 
 
 def _to_response(row: Listing) -> ListingResponse:
@@ -336,6 +367,42 @@ async def mark_search_result_seen(result_id: int) -> dict[str, object]:
         row.status = f"seen:{priority}"
         await session.commit()
     return {"id": result_id, "status": "seen", "priority": priority}
+
+
+@app.post("/api/v1/search/results/{result_id}/monitor", status_code=status.HTTP_202_ACCEPTED)
+async def monitor_search_result(
+    result_id: int,
+    background_tasks: BackgroundTasks,
+) -> dict[str, object]:
+    """Start monitoring before opening a search result in the browser.
+
+    The server tries to import the listing in the background. If Krisha blocks
+    the server, the browser extension/bookmarklet can complete the same import
+    after the user opens the public listing page.
+    """
+    async with SessionLocal() as session:
+        row = await session.get(SearchResult, result_id)
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Search result not found")
+
+        priority = row.status.split(":", 1)[1] if ":" in row.status else "normal"
+        row.status = f"seen:{priority}"
+        should_schedule = row.import_status not in {"imported", "queued"}
+        if should_schedule:
+            row.import_status = "queued"
+            row.import_error = None
+        source_url = row.url
+        imported_listing_id = row.imported_listing_id
+        await session.commit()
+
+    if should_schedule:
+        background_tasks.add_task(_finish_search_result_monitor, result_id, source_url)
+    return {
+        "id": result_id,
+        "status": "monitoring_started",
+        "import_status": "queued" if should_schedule else "imported",
+        "imported_listing_id": imported_listing_id,
+    }
 
 
 @app.get("/api/v1/search/history")

@@ -204,7 +204,7 @@ async function loadSearchResults() {
       const isSaved = savedUrls.has(normalizeUrl(item.url));
       const importStatus = item.import_status || 'pending';
       const imported = importStatus === 'imported' || isSaved;
-      const importLabel = imported ? 'Автоматически сохранено' : importStatus === 'blocked' ? 'Источник ограничил импорт' : importStatus === 'error' ? 'Импорт не удался — повторить' : 'Импортирую…';
+      const importLabel = imported ? 'Автоматически сохранено' : importStatus === 'queued' ? 'Мониторинг запущен' : importStatus === 'blocked' ? 'Источник ограничил импорт' : importStatus === 'error' ? 'Импорт не удался — повторить' : 'Импортирую…';
       const seenLabel = item.status === 'seen' ? 'Просмотрено' : priorityLabel(item.priority);
       return `<article class="listing card ${priorityClass(item.priority)} ${item.status === 'seen' ? 'result-seen' : ''}">
         <div class="listing-top">
@@ -216,14 +216,39 @@ async function loadSearchResults() {
         <div class="meta source-meta">Источник: ${escapeHtml(item.search_engine)} · обнаружено ${dateTime.format(new Date(item.first_seen))}</div>
         <div class="card-actions">
           <button class="enrich-result primary secondary-action ${imported ? 'saved' : ''}" data-url="${escapeHtml(item.url)}" type="button" ${imported ? 'disabled' : ''}>${imported ? 'Сохранено автоматически' : importLabel}</button>
-          <a class="search-open" data-result-id="${item.id}" href="${escapeHtml(item.url)}">Открыть объявление →</a>
+          <a class="search-open" data-result-id="${item.id}" href="${escapeHtml(item.url)}">Открыть и мониторить →</a>
         </div>
       </article>`;
     }).join('');
-    searchResults.querySelectorAll('.search-open').forEach(link => link.addEventListener('click', () => markSeen(link.dataset.resultId)));
+    searchResults.querySelectorAll('.search-open').forEach(link => link.addEventListener('click', event => {
+      event.preventDefault();
+      void monitorBeforeOpen(link);
+    }));
     searchResults.querySelectorAll('.enrich-result:not(.saved)').forEach(button => button.addEventListener('click', () => importSearchResult(button.dataset.url, button)));
   } catch (error) {
     if (searchMessage) searchMessage.textContent = error.message;
+  }
+}
+
+async function monitorBeforeOpen(link) {
+  const resultId = link.dataset.resultId;
+  const targetUrl = link.href;
+  link.classList.add('is-monitoring');
+  link.setAttribute('aria-busy', 'true');
+  link.textContent = 'Ставлю на мониторинг…';
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(`/api/v1/search/results/${resultId}/monitor`, {
+      method:'POST',
+      signal:controller.signal,
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  } catch (_) {
+    await markSeen(resultId).catch(() => {});
+  } finally {
+    clearTimeout(timeout);
+    window.location.assign(targetUrl);
   }
 }
 
