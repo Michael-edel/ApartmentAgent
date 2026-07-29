@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     auto_import_enabled: bool = True
     auto_import_delay_seconds: float = 1.5
 
+    twogis_enabled: bool = True
+    twogis_api_key: str = ""
+    twogis_api_url: str = "https://catalog.api.2gis.com/3.0/items"
+    twogis_timeout_seconds: float = 10.0
+    twogis_refresh_hours: int = 24
+
     ai_enabled: bool = True
     ai_remote_enabled: bool = False
     openai_api_key: str = ""

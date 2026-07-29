@@ -26,6 +26,10 @@ class ListingCreate(BaseModel):
     floors_total: int | None = Field(default=None, gt=0)
     building_year: int | None = Field(default=None, ge=1900, le=2100)
     building_type: str | None = None
+    twogis_name: str | None = Field(default=None, max_length=300)
+    twogis_rating: float | None = Field(default=None, ge=0, le=5)
+    twogis_review_count: int | None = Field(default=None, ge=0)
+    twogis_url: str | None = Field(default=None, max_length=500)
     is_full_two_room: bool = True
     mortgage_supported: bool | None = None
     photo_urls: list[str] = Field(default_factory=list, max_length=30)

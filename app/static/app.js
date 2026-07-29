@@ -111,6 +111,9 @@ function render(listings) {
     const photos = (item.photo_urls || []).slice(0, 4);
     const ai = item.ai_analysis || {};
     const latestChange = (item.price_history || []).find(snapshot => snapshot.change_kzt);
+    const twogisRating = Number(item.twogis_rating);
+    const twogisReviews = Number(item.twogis_review_count || 0);
+    const twogisLine = item.twogis_name ? `<div class="twogis-review"><b>2GIS</b> ${Number.isFinite(twogisRating) && twogisReviews ? `★ ${twogisRating.toFixed(1)}/5 · ${twogisReviews} отзывов` : 'оценка и отзывы не опубликованы'}${item.twogis_url ? ` · <a href="${escapeHtml(item.twogis_url)}" target="_blank" rel="noopener noreferrer">Открыть в 2GIS →</a>` : ''}</div>` : '';
     return `<article class="listing card">
       ${photos.length ? `<div class="listing-photos">${photos.map((photo, index) => `<img class="listing-photo ${index ? 'thumbnail' : ''}" src="${escapeHtml(photo)}" alt="Фото квартиры ${index + 1}" loading="lazy" referrerpolicy="no-referrer">`).join('')}</div>` : ''}
       <div class="listing-top"><div><h3>${escapeHtml(title)}</h3><div class="meta">${escapeHtml(location)}</div></div><div class="rating ${scoreClass}">${item.assessment.score}</div></div>
@@ -119,6 +122,7 @@ function render(listings) {
       ${mapUrl ? `<a class="location-link" href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener noreferrer">Открыть местоположение на карте →</a>` : ''}
       ${locationMissing ? '<div class="meta location-missing">Точное местоположение не опубликовано в открытых данных Krisha</div>' : ''}
       ${item.building_year || item.building_type ? `<div class="meta">${item.building_year ? `Построен ${item.building_year}` : ''}${item.building_year && item.building_type ? ' · ' : ''}${escapeHtml(item.building_type || '')}</div>` : ''}
+      ${twogisLine}
       ${latestChange ? `<div class="price-change ${latestChange.change_kzt < 0 ? 'down' : 'up'}">${latestChange.change_kzt < 0 ? '↓' : '↑'} ${money.format(Math.abs(latestChange.change_kzt))} с последнего наблюдения</div>` : ''}
       <span class="verdict">${escapeHtml(item.assessment.verdict)}</span>
       ${ai.summary ? `<div class="ai-summary"><b>AI-анализ</b><p>${escapeHtml(ai.summary)}</p></div>` : ''}
@@ -299,6 +303,9 @@ async function loadSearchStatus() {
     const telegram = await fetch('/api/v1/notifications/status').then(readJson);
     const telegramNode = document.querySelector('#telegramStatus');
     if (telegramNode) telegramNode.textContent = telegram.configured ? `Telegram: подключён · отправлено ${telegram.sent_notifications || 0}` : 'Telegram: добавьте TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID для уведомлений';
+    const health = await fetch('/health').then(readJson);
+    const twogisNode = document.querySelector('#twogisStatus');
+    if (twogisNode) twogisNode.textContent = health.twogis_configured ? '2GIS: автоматический поиск ЖК и отзывов включён' : '2GIS: добавьте TWOGIS_API_KEY для автоматического рейтинга ЖК';
   } catch (error) {
     if (searchMessage) searchMessage.textContent = error.message;
   }

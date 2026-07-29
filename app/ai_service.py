@@ -35,6 +35,21 @@ def build_local_analysis(listing: ListingCreate, assessment: ListingAssessment) 
         strengths.append(f"В объявлении доступно фотографий: {len(listing.photo_urls)}")
     if listing.address or (listing.latitude is not None and listing.longitude is not None):
         strengths.append("Местоположение подтверждено данными объявления")
+    if listing.twogis_rating is not None and listing.twogis_review_count:
+        review_label = "отзывов" if listing.twogis_review_count != 1 else "отзыв"
+        review_summary = (
+            f"ЖК {listing.twogis_name or listing.residential_complex or ''}"
+            f" имеет оценку 2GIS {listing.twogis_rating:.1f}/5"
+            f" ({listing.twogis_review_count} {review_label})"
+        ).replace("ЖК  имеет", "ЖК имеет")
+        if listing.twogis_rating >= 4:
+            strengths.append(review_summary)
+        elif listing.twogis_rating < 3.5:
+            risks.append(review_summary)
+        else:
+            risks.append(review_summary)
+    elif listing.twogis_name:
+        risks.append(f"В 2GIS у ЖК {listing.twogis_name} нет доступной оценки")
 
     if listing.floor == 1:
         risks.append("Первый этаж: нужна проверка влажности, окон и безопасности")
@@ -97,6 +112,9 @@ def _remote_prompt(listing: ListingCreate, assessment: ListingAssessment) -> str
         "floors_total": listing.floors_total,
         "building_year": listing.building_year,
         "building_type": listing.building_type,
+        "twogis_name": listing.twogis_name,
+        "twogis_rating": listing.twogis_rating,
+        "twogis_review_count": listing.twogis_review_count,
         "score": assessment.score,
         "verdict": assessment.verdict,
         "reasons": assessment.reasons,

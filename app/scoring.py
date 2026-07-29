@@ -52,6 +52,33 @@ def assess_listing(listing: ListingCreate, settings: Settings) -> ListingAssessm
         score -= 25
         reasons.append("Не подтверждена возможность покупки через ипотеку")
 
+    if listing.twogis_rating is not None:
+        review_count = listing.twogis_review_count or 0
+        if review_count >= 5 and listing.twogis_rating >= 4.5:
+            score += 4
+            reasons.append(
+                f"Высокая оценка ЖК в 2GIS: {listing.twogis_rating:.1f}/5 ({review_count} отзывов)"
+            )
+        elif review_count >= 5 and listing.twogis_rating >= 4:
+            score += 2
+            reasons.append(
+                f"Хорошая оценка ЖК в 2GIS: {listing.twogis_rating:.1f}/5 ({review_count} отзывов)"
+            )
+        elif review_count >= 5 and listing.twogis_rating < 3:
+            score -= 8
+            reasons.append(
+                f"Низкая оценка ЖК в 2GIS: {listing.twogis_rating:.1f}/5 ({review_count} отзывов)"
+            )
+        elif review_count >= 5 and listing.twogis_rating < 3.5:
+            score -= 4
+            reasons.append(
+                f"Сдержанная оценка ЖК в 2GIS: {listing.twogis_rating:.1f}/5 ({review_count} отзывов)"
+            )
+        elif review_count:
+            reasons.append(
+                f"Оценка ЖК в 2GIS: {listing.twogis_rating:.1f}/5 ({review_count} отзывов)"
+            )
+
     score = max(0, min(100, score))
     price_per_m2 = round(listing.price_kzt / listing.area_m2)
 

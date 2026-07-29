@@ -41,7 +41,7 @@ async def lifespan(_: FastAPI):
     await engine.dispose()
 
 
-app = FastAPI(title=settings.app_name, version="0.11.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.12.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https://([a-z0-9-]+\.)*krisha\.kz$",
@@ -72,12 +72,14 @@ async def health() -> dict[str, object]:
     return {
         "status": "ok",
         "service": settings.app_name,
-        "version": "0.11.0",
+        "version": "0.12.0",
         "storage": "postgresql",
         "automatic_check_minutes": max(settings.check_interval_minutes, 15),
         "search_enabled": settings.search_enabled,
         "search_interval_minutes": max(settings.search_interval_minutes, 15),
         "search_providers": settings.search_providers,
+        "twogis_enabled": settings.twogis_enabled,
+        "twogis_configured": bool(settings.twogis_api_key),
     }
 
 
@@ -100,6 +102,10 @@ def _payload_from_row(row: Listing) -> ListingCreate:
         floors_total=row.floors_total,
         building_year=row.building_year,
         building_type=row.building_type,
+        twogis_name=row.twogis_name,
+        twogis_rating=row.twogis_rating,
+        twogis_review_count=row.twogis_review_count,
+        twogis_url=row.twogis_url,
         is_full_two_room=row.is_full_two_room,
         mortgage_supported=row.mortgage_supported,
         photo_urls=list(row.photo_urls or []),

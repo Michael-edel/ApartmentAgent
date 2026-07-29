@@ -41,6 +41,13 @@ class Listing(Base):
     floors_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     building_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
     building_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    twogis_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    twogis_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
+    twogis_review_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    twogis_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    twogis_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     is_full_two_room: Mapped[bool] = mapped_column(Boolean, default=True)
     mortgage_supported: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     photo_urls: Mapped[list[str]] = mapped_column(

@@ -30,6 +30,13 @@ def _message_for_listing(listing: ListingCreate, *, price_change: tuple[int, int
         lines.append(f"Адрес: {escape(listing.address)}")
     elif listing.latitude is not None and listing.longitude is not None:
         lines.append(f"Координаты: {listing.latitude:.6f}, {listing.longitude:.6f}")
+    if listing.twogis_name:
+        if listing.twogis_rating is not None and listing.twogis_review_count:
+            lines.append(
+                f"2GIS: {listing.twogis_rating:.1f}/5 · {listing.twogis_review_count} отзывов"
+            )
+        else:
+            lines.append("2GIS: отзывов с оценкой нет")
     if price_change:
         old, new = price_change
         direction = "↓" if new < old else "↑"
