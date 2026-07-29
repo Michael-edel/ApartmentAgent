@@ -1,7 +1,8 @@
 from functools import lru_cache
+from typing import Annotated
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -22,7 +23,10 @@ class Settings(BaseSettings):
     search_enabled: bool = True
     search_interval_minutes: int = 15
     search_queries_per_run: int = 8
-    search_providers: list[str] = ["krisha_direct", "brave", "bing_rss"]
+    # The example .env uses a readable comma-separated value.  NoDecode keeps
+    # pydantic-settings from trying to parse that value as JSON before the
+    # validator below normalizes it.
+    search_providers: Annotated[list[str], NoDecode] = ["krisha_direct", "brave", "bing_rss"]
     brave_search_api_key: str = ""
     search_freshness: str = "pw"
 
