@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.ai_service import analyze_listing
-from app.checker import check_all_listings, periodic_checker
+from app.checker import ListingNotFound, check_all_listings, check_listing, periodic_checker
 from app.config import get_settings
 from app.database import SessionLocal, engine, initialize_database
 from app.importer import ListingImportError, _is_krisha_host, import_krisha_listing
@@ -218,6 +218,22 @@ async def run_checks_now() -> dict[str, int]:
         "updated": summary.updated,
         "blocked": summary.blocked,
         "errors": summary.errors,
+    }
+
+
+@app.post("/api/v1/listings/{listing_id}/check")
+async def check_one_listing(listing_id: int) -> dict[str, object]:
+    try:
+        result = await check_listing(listing_id)
+    except ListingNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found") from exc
+    return {
+        "listing_id": result.listing_id,
+        "status": result.status,
+        "message": result.message,
+        "old_price_kzt": result.old_price_kzt,
+        "new_price_kzt": result.new_price_kzt,
+        "updated": result.updated,
     }
 
 

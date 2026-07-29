@@ -4,6 +4,7 @@ const dateTime = new Intl.DateTimeFormat('ru-RU', {day:'2-digit', month:'2-digit
 
 const grid = document.querySelector('#listingGrid');
 const filter = document.querySelector('#scoreFilter');
+const listingSort = document.querySelector('#listingSort');
 const refreshButton = document.querySelector('#refreshButton');
 const form = document.querySelector('#listingForm');
 const message = document.querySelector('#formMessage');
@@ -74,10 +75,22 @@ function priorityClass(priority) {
   return 'priority-normal';
 }
 
+function sortListings(listings) {
+  const items = [...listings];
+  const sort = listingSort?.value || 'newest';
+  const compare = (left, right) => {
+    if (sort === 'score') return right.assessment.score - left.assessment.score || right.id - left.id;
+    if (sort === 'price_m2') return left.assessment.price_per_m2 - right.assessment.price_per_m2 || left.id - right.id;
+    if (sort === 'price') return left.price_kzt - right.price_kzt || left.id - right.id;
+    return String(right.created_at).localeCompare(String(left.created_at)) || right.id - left.id;
+  };
+  return items.sort(compare);
+}
+
 function render(listings) {
   savedUrls = new Set(listings.map(item => normalizeUrl(item.source_url)));
   const minScore = Number(filter?.value || 0);
-  const visible = listings.filter(item => item.assessment.score >= minScore);
+  const visible = sortListings(listings).filter(item => item.assessment.score >= minScore);
   const strong = listings.filter(item => item.assessment.score >= 85);
   document.querySelector('#totalCount').textContent = listings.length;
   document.querySelector('#strongCount').textContent = strong.length;
@@ -102,9 +115,31 @@ function render(listings) {
       ${latestChange ? `<div class="price-change ${latestChange.change_kzt < 0 ? 'down' : 'up'}">${latestChange.change_kzt < 0 ? '↓' : '↑'} ${money.format(Math.abs(latestChange.change_kzt))} с последнего наблюдения</div>` : ''}
       <span class="verdict">${escapeHtml(item.assessment.verdict)}</span>
       ${ai.summary ? `<div class="ai-summary"><b>AI-анализ</b><p>${escapeHtml(ai.summary)}</p></div>` : ''}
+      <div class="listing-actions"><button class="check-listing secondary-action" data-listing-id="${item.id}" type="button">↻ Проверить квартиру</button></div>
       <a href="${escapeHtml(item.source_url)}">Открыть объявление →</a>
     </article>`;
   }).join('');
+}
+
+async function checkListingNow(id, button) {
+  button.disabled = true;
+  button.textContent = 'Проверяю…';
+  try {
+    const response = await fetch(`/api/v1/listings/${id}/check`, {method:'POST'});
+    const body = await readJson(response);
+    if (!response.ok) throw new Error(body.detail || 'Не удалось проверить квартиру');
+    if (checkMessage) checkMessage.textContent = `Квартира #${id}: ${body.message}`;
+    await loadListings();
+  } catch (error) {
+    button.textContent = error.message;
+    button.classList.add('button-error');
+    setTimeout(() => {
+      if (!button.isConnected) return;
+      button.textContent = '↻ Проверить квартиру';
+      button.disabled = false;
+      button.classList.remove('button-error');
+    }, 3500);
+  }
 }
 
 async function loadListings() {
@@ -113,6 +148,9 @@ async function loadListings() {
     const response = await fetch('/api/v1/listings');
     if (!response.ok) throw new Error('Не удалось загрузить квартиры');
     render(await readJson(response));
+    grid?.querySelectorAll('.check-listing').forEach(button => {
+      button.addEventListener('click', () => checkListingNow(Number(button.dataset.listingId), button));
+    });
   } catch (error) {
     if (message) message.textContent = error.message;
   } finally {
@@ -290,6 +328,7 @@ form?.addEventListener('submit', async event => {
 });
 
 filter?.addEventListener('change', loadListings);
+listingSort?.addEventListener('change', loadListings);
 refreshButton?.addEventListener('click', async () => { await loadListings(); await Promise.all([loadSearchStatus(), loadSearchResults()]); });
 if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/service-worker.js'));
 (async () => { await loadListings(); await Promise.all([loadSearchStatus(), loadSearchResults()]); })();
