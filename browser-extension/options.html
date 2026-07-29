@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ApartmentAgent — настройки</title>
+  <style>
+    body{font:16px system-ui,sans-serif;max-width:620px;margin:32px auto;padding:0 18px;color:#142033}
+    label{display:grid;gap:8px;margin:20px 0;font-weight:600}
+    input{font:inherit;padding:10px;border:1px solid #ccd6e0;border-radius:8px}
+    button{font:inherit;padding:10px 16px;border:0;border-radius:8px;background:#17365d;color:white}
+    #message{min-height:24px;color:#126b4d}
+  </style>
+</head>
+<body>
+  <h1>ApartmentAgent</h1>
+  <p>Расширение автоматически импортирует публичные данные, когда вы открываете объявление Krisha.</p>
+  <label>Адрес ApartmentAgent
+    <input id="apiOrigin" type="url" placeholder="https://...-8000.app.github.dev">
+  </label>
+  <label><input id="enabled" type="checkbox"> Автоматически импортировать открытые объявления</label>
+  <button id="save" type="button">Сохранить</button>
+  <p id="message" aria-live="polite"></p>
+  <script src="options.js"></script>
+</body>
+</html>
