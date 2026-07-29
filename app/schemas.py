@@ -16,6 +16,9 @@ class ListingCreate(BaseModel):
     city: str = "Астана"
     district: str | None = None
     residential_complex: str | None = None
+    address: str | None = Field(default=None, max_length=500)
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
     price_kzt: int = Field(gt=0)
     area_m2: float = Field(gt=0)
     rooms: int = Field(gt=0)

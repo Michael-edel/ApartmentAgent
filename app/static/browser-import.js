@@ -79,7 +79,23 @@
     }
     return null;
   };
-  const findText = keys => findValue(keys, value => typeof value === 'string' ? clean(value) : null);
+  const textValue = value => {
+    if (typeof value === 'string' && clean(value)) return clean(value);
+    if (!value || typeof value !== 'object') return null;
+    for (const key of ['formattedAddress', 'fullAddress', 'displayAddress']) {
+      const candidate = textValue(value[key]);
+      if (candidate) return candidate;
+    }
+    const parts = ['streetAddress', 'addressLocality', 'addressRegion']
+      .map(key => textValue(value[key]))
+      .filter(Boolean);
+    return [...new Set(parts)].join(', ') || null;
+  };
+  const coordinate = (value, minimum, maximum) => {
+    const parsed = typeof value === 'number' ? value : Number(clean(value).replace(',', '.').replace(/[^0-9+-.]/g, ''));
+    return Number.isFinite(parsed) && parsed >= minimum && parsed <= maximum ? parsed : null;
+  };
+  const findText = keys => findValue(keys, textValue);
 
   const price = findValue(['price', 'price_kzt', 'priceKzt', 'amount', 'value'], parsePrice) || parsePrice(fullText);
   const areaMatch = fullText.match(/(\d{2,3}(?:[.,]\d+)?)\s*(?:м²|м2|кв\.?\s*м)/i);
@@ -113,10 +129,15 @@
   const description = clean(meta('og:description') || meta('description')).slice(0, 20000) || null;
   const lower = fullText.toLowerCase();
   const buildingType = lower.includes('кирпич') ? 'brick' : lower.includes('монолит') ? 'monolith' : lower.includes('панел') ? 'panel' : null;
-  const district = findText(['district', 'districtName', 'regionName', 'addressLocality', 'areaName'])
-    || (fullText.match(/((?:Есильский|Нура|Алматы|Сарыарка|Байконур)\s+район)/i)?.[1] || null);
+  const districtValue = findText(['district', 'districtName', 'areaName'])
+    || [findText(['regionName', 'addressRegion'])].find(value => value && /\b(?:район|р-н)\b/i.test(value))
+    || (fullText.match(/((?:Есильский|Нура|Алматы|Сарыарка|Байконур)\s+(?:район|р-н))/i)?.[1] || null);
+  const district = districtValue ? districtValue.replace(/\s+р-н\b/i, ' район') : null;
   const residentialComplex = findText(['complexName', 'residentialComplex', 'housingComplex', 'residentialComplexName'])
     || (fullText.match(/ЖК\s*[«"]?([^»".,;]{2,100})/i)?.[1]?.trim() || null);
+  const address = findText(['address', 'streetAddress', 'formattedAddress', 'fullAddress', 'addressLine', 'displayAddress']);
+  const latitude = findValue(['latitude', 'lat', 'geoLatitude', 'geoLat'], value => coordinate(value, -90, 90));
+  const longitude = findValue(['longitude', 'lng', 'lon', 'geoLongitude', 'geoLon'], value => coordinate(value, -180, 180));
   const payload = {
     source: 'browser',
     source_url: location.href.split('#')[0],
@@ -125,6 +146,9 @@
     city: 'Астана',
     district,
     residential_complex: residentialComplex,
+    address,
+    latitude,
+    longitude,
     price_kzt: price,
     area_m2: area,
     rooms,

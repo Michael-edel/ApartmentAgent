@@ -86,6 +86,18 @@ def _number(value: Any) -> float | None:
     return None
 
 
+def _coordinate(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.strip().replace(",", ".")
+        try:
+            return float(re.sub(r"[^0-9+-.]", "", cleaned))
+        except ValueError:
+            return None
+    return None
+
+
 def _find_numeric(data: list[Any], keys: set[str], minimum: float, maximum: float) -> float | None:
     normalized = {key.lower() for key in keys}
     for root in data:
@@ -99,14 +111,66 @@ def _find_numeric(data: list[Any], keys: set[str], minimum: float, maximum: floa
     return None
 
 
+def _find_coordinate(data: list[Any], keys: set[str], minimum: float, maximum: float) -> float | None:
+    normalized = {key.lower() for key in keys}
+    for root in data:
+        for item in _walk(root):
+            for key, value in item.items():
+                if str(key).lower() not in normalized:
+                    continue
+                candidate = _coordinate(value)
+                if candidate is not None and minimum <= candidate <= maximum:
+                    return candidate
+    return None
+
+
+def _text_value(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if not isinstance(value, dict):
+        return None
+    for key in ("formattedAddress", "fullAddress", "displayAddress"):
+        candidate = _text_value(value.get(key))
+        if candidate:
+            return candidate
+    parts: list[str] = []
+    for key in (
+        "streetAddress",
+        "addressLocality",
+        "addressRegion",
+    ):
+        candidate = _text_value(value.get(key))
+        if candidate and candidate not in parts:
+            parts.append(candidate)
+    return ", ".join(parts) or None
+
+
 def _find_text(data: list[Any], keys: set[str]) -> str | None:
     normalized = {key.lower() for key in keys}
     for root in data:
         for item in _walk(root):
             for key, value in item.items():
-                if str(key).lower() in normalized and isinstance(value, str) and value.strip():
-                    return value.strip()
+                if str(key).lower() in normalized:
+                    candidate = _text_value(value)
+                    if candidate:
+                        return candidate
     return None
+
+
+def _find_district(data: list[Any], combined: str) -> str | None:
+    district = _find_text(data, {"district", "districtName", "areaName"})
+    if not district:
+        region = _find_text(data, {"regionName", "addressRegion"})
+        if region and re.search(r"\b(?:район|р-н)\b", region, re.IGNORECASE):
+            district = region
+    if not district:
+        district_match = re.search(
+            r"((?:Есильский|Нура|Алматы|Сарыарка|Байконур)\s+(?:район|р-н))",
+            combined,
+            re.IGNORECASE,
+        )
+        district = district_match.group(1) if district_match else None
+    return re.sub(r"\s+р-н\b", " район", district, flags=re.IGNORECASE) if district else None
 
 
 def _find_image_urls(data: list[Any]) -> list[str]:
@@ -245,10 +309,7 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
     elif "панель" in lowered:
         building_type = "panel"
 
-    district = _find_text(
-        data,
-        {"district", "districtName", "regionName", "addressLocality", "areaName"},
-    )
+    district = _find_district(data, combined)
     residential_complex = _find_text(
         data,
         {"complexName", "residentialComplex", "housingComplex", "residentialComplexName"},
@@ -256,13 +317,12 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
     if not residential_complex:
         complex_match = re.search(r"ЖК\s*[«\"]?([^»\".,;]{2,100})", combined, re.IGNORECASE)
         residential_complex = complex_match.group(1).strip() if complex_match else None
-    if not district:
-        district_match = re.search(
-            r"((?:Есильский|Нура|Алматы|Сарыарка|Байконур)\s+район)",
-            combined,
-            re.IGNORECASE,
-        )
-        district = district_match.group(1) if district_match else None
+    address = _find_text(
+        data,
+        {"address", "streetAddress", "formattedAddress", "fullAddress", "addressLine", "displayAddress"},
+    )
+    latitude = _find_coordinate(data, {"latitude", "lat", "geoLatitude", "geoLat"}, -90, 90)
+    longitude = _find_coordinate(data, {"longitude", "lng", "lon", "geoLongitude", "geoLon"}, -180, 180)
     photo_urls = meta_images + _find_image_urls(data)
     photo_urls = list(dict.fromkeys(photo_urls))[:30]
     normalized_source_url = urlunparse(
@@ -277,6 +337,9 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
         city="Астана",
         district=district,
         residential_complex=residential_complex,
+        address=address,
+        latitude=latitude,
+        longitude=longitude,
         price_kzt=price,
         area_m2=area,
         rooms=rooms,

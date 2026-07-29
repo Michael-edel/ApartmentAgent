@@ -34,6 +34,19 @@ def test_local_ai_analysis_contains_strengths_and_next_steps() -> None:
     assert result["recommendation"] == assessment.verdict
 
 
+def test_local_ai_analysis_marks_location_and_reports_missing_coordinates() -> None:
+    located = _listing(address="ул. Кенен Азербаев, 6", latitude=51.128, longitude=71.43)
+    located_result = build_local_analysis(located, assess_listing(located, Settings()))
+    assert "Местоположение подтверждено данными объявления" in located_result["strengths"]
+
+    without_location = _listing()
+    without_location_result = build_local_analysis(
+        without_location,
+        assess_listing(without_location, Settings()),
+    )
+    assert "Точный адрес и координаты не определены автоматически" in without_location_result["risks"]
+
+
 def test_photo_extraction_supports_nested_gallery_objects() -> None:
     data = [
         {

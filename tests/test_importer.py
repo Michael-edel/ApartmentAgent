@@ -1,4 +1,10 @@
-from app.importer import _embedded_number, _find_numeric, _json_scripts
+from app.importer import (
+    _embedded_number,
+    _find_coordinate,
+    _find_numeric,
+    _find_text,
+    _json_scripts,
+)
 
 
 def test_reads_next_data_values() -> None:
@@ -17,3 +23,20 @@ def test_reads_embedded_javascript_values() -> None:
     html = '<script>window.data={"priceKzt": "30 000 000", "areaM2": 58.2}</script>'
     assert _embedded_number(html, {"priceKzt"}, 500_000, 2_000_000_000) == 30_000_000
     assert _embedded_number(html, {"areaM2"}, 10, 1000) == 58.2
+
+
+def test_reads_address_and_coordinates_from_nested_data() -> None:
+    data = [
+        {
+            "address": {
+                "streetAddress": "ул. Кенен Азербаев, 6",
+                "addressLocality": "Астана",
+            },
+            "districtName": "Алматы р-н",
+            "geo": {"latitude": "51,128", "longitude": "71.430"},
+        }
+    ]
+
+    assert _find_text(data, {"address"}) == "ул. Кенен Азербаев, 6, Астана"
+    assert _find_coordinate(data, {"latitude"}, -90, 90) == 51.128
+    assert _find_coordinate(data, {"longitude"}, -180, 180) == 71.43

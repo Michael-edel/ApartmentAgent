@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Квартиры">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icon.svg">
-  <link rel="stylesheet" href="/static/styles.css?v=124">
+  <link rel="stylesheet" href="/static/styles.css?v=129">
   <style>.bookmarklet-code{width:100%;min-height:96px;resize:vertical;border:1px solid #d8e2ec;border-radius:12px;background:#f8fafc;color:#142033;padding:12px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}</style>
   <title>ApartmentAgent</title>
 </head>
@@ -130,6 +130,11 @@
         </div>
         <label>Район<input name="district"></label>
         <label>ЖК<input name="residential_complex"></label>
+        <label>Адрес или ориентир<input name="address" placeholder="Улица, дом, ЖК"></label>
+        <div class="form-grid">
+          <label>Широта<input name="latitude" type="number" step="any" min="-90" max="90" placeholder="51.128"></label>
+          <label>Долгота<input name="longitude" type="number" step="any" min="-180" max="180" placeholder="71.430"></label>
+        </div>
         <label>Тип дома
           <select name="building_type"><option value="">Не указан</option><option value="brick">Кирпичный</option><option value="monolith">Монолитный</option><option value="panel">Панельный</option></select>
         </label>
@@ -146,6 +151,6 @@
     <a href="#listingGrid">★<span>Лучшие</span></a>
   </nav>
 
-  <script src="/static/app.js?v=128" defer></script>
+  <script src="/static/app.js?v=129" defer></script>
 </body>
 </html>

@@ -2,3 +2,6 @@
 .section-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}.listing-actions{margin-top:14px}
 .result-seen .verdict{background:#edf3f8;color:var(--muted)}
 .search-open.is-monitoring{opacity:.65;pointer-events:none}
+.listing .location-link{display:inline-block;margin-top:7px;font-size:13px}
+.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+@media(max-width:420px){.form-grid{grid-template-columns:1fr}}

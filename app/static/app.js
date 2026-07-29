@@ -101,7 +101,10 @@ function render(listings) {
   }
   grid.innerHTML = visible.map(item => {
     const title = item.residential_complex || item.title;
-    const location = [item.district, item.city].filter(Boolean).join(' · ');
+    const location = [item.address, item.district, item.city].filter(Boolean).join(' · ');
+    const mapUrl = item.latitude != null && item.longitude != null
+      ? `https://yandex.ru/maps/?ll=${encodeURIComponent(`${item.longitude},${item.latitude}`)}&z=16&pt=${encodeURIComponent(`${item.longitude},${item.latitude},pm2rdm`)}`
+      : null;
     const scoreClass = item.assessment.score < 85 ? 'medium' : '';
     const photos = (item.photo_urls || []).slice(0, 4);
     const ai = item.ai_analysis || {};
@@ -111,6 +114,7 @@ function render(listings) {
       <div class="listing-top"><div><h3>${escapeHtml(title)}</h3><div class="meta">${escapeHtml(location)}</div></div><div class="rating ${scoreClass}">${item.assessment.score}</div></div>
       <div class="price">${money.format(item.price_kzt)}</div>
       <div class="meta">${number.format(item.area_m2)} м² · ${money.format(item.assessment.price_per_m2)}/м² · этаж ${item.floor || '—'}/${item.floors_total || '—'}</div>
+      ${mapUrl ? `<a class="location-link" href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener noreferrer">Открыть местоположение на карте →</a>` : ''}
       ${item.building_year || item.building_type ? `<div class="meta">${item.building_year ? `Построен ${item.building_year}` : ''}${item.building_year && item.building_type ? ' · ' : ''}${escapeHtml(item.building_type || '')}</div>` : ''}
       ${latestChange ? `<div class="price-change ${latestChange.change_kzt < 0 ? 'down' : 'up'}">${latestChange.change_kzt < 0 ? '↓' : '↑'} ${money.format(Math.abs(latestChange.change_kzt))} с последнего наблюдения</div>` : ''}
       <span class="verdict">${escapeHtml(item.assessment.verdict)}</span>
@@ -360,6 +364,9 @@ form?.addEventListener('submit', async event => {
   const payload = {
     source:'manual', source_url:data.get('source_url'), title:data.get('title') || '2-комнатная квартира в Астане', city:'Астана',
     district:data.get('district') || null, residential_complex:data.get('residential_complex') || null,
+    address:data.get('address') || null,
+    latitude:data.get('latitude') ? Number(data.get('latitude')) : null,
+    longitude:data.get('longitude') ? Number(data.get('longitude')) : null,
     price_kzt:Number(data.get('price_kzt')), area_m2:Number(data.get('area_m2')), rooms:Number(data.get('rooms')),
     floor:data.get('floor') ? Number(data.get('floor')) : null, floors_total:data.get('floors_total') ? Number(data.get('floors_total')) : null,
     building_year:data.get('building_year') ? Number(data.get('building_year')) : null, building_type:data.get('building_type') || null,

@@ -26,6 +26,10 @@ def _message_for_listing(listing: ListingCreate, *, price_change: tuple[int, int
         lines.append(
             " · ".join(escape(item) for item in (listing.district, listing.residential_complex) if item)
         )
+    if listing.address:
+        lines.append(f"Адрес: {escape(listing.address)}")
+    elif listing.latitude is not None and listing.longitude is not None:
+        lines.append(f"Координаты: {listing.latitude:.6f}, {listing.longitude:.6f}")
     if price_change:
         old, new = price_change
         direction = "↓" if new < old else "↑"

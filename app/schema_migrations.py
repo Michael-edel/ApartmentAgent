@@ -6,6 +6,9 @@ from sqlalchemy.engine import Connection
 _COLUMNS: dict[str, dict[str, str]] = {
     "listings": {
         "description": "TEXT",
+        "address": "VARCHAR(500)",
+        "latitude": "DOUBLE PRECISION",
+        "longitude": "DOUBLE PRECISION",
         "photo_urls": "JSON NOT NULL DEFAULT '[]'",
         "ai_analysis": "JSON",
         "ai_analyzed_at": "TIMESTAMP WITH TIME ZONE",

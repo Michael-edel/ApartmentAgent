@@ -33,6 +33,8 @@ def build_local_analysis(listing: ListingCreate, assessment: ListingAssessment) 
         strengths.append(f"Дом построен в {listing.building_year} году")
     if listing.photo_urls:
         strengths.append(f"В объявлении доступно фотографий: {len(listing.photo_urls)}")
+    if listing.address or (listing.latitude is not None and listing.longitude is not None):
+        strengths.append("Местоположение подтверждено данными объявления")
 
     if listing.floor == 1:
         risks.append("Первый этаж: нужна проверка влажности, окон и безопасности")
@@ -44,6 +46,8 @@ def build_local_analysis(listing: ListingCreate, assessment: ListingAssessment) 
         risks.append("Район не определён автоматически")
     if not listing.residential_complex:
         risks.append("ЖК не определён автоматически")
+    if not listing.address and (listing.latitude is None or listing.longitude is None):
+        risks.append("Точный адрес и координаты не определены автоматически")
     if not listing.building_year:
         risks.append("Год постройки не указан — запросите документы")
     if not listing.building_type:
@@ -82,6 +86,9 @@ def _remote_prompt(listing: ListingCreate, assessment: ListingAssessment) -> str
         "city": listing.city,
         "district": listing.district,
         "residential_complex": listing.residential_complex,
+        "address": listing.address,
+        "latitude": listing.latitude,
+        "longitude": listing.longitude,
         "price_kzt": listing.price_kzt,
         "area_m2": listing.area_m2,
         "price_per_m2": assessment.price_per_m2,
