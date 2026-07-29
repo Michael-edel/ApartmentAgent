@@ -81,7 +81,7 @@ function render(listings) {
       ${latestChange ? `<div class="price-change ${latestChange.change_kzt < 0 ? 'down' : 'up'}">${latestChange.change_kzt < 0 ? '↓' : '↑'} ${money.format(Math.abs(latestChange.change_kzt))} с последнего наблюдения</div>` : ''}
       <span class="verdict">${escapeHtml(item.assessment.verdict)}</span>
       ${ai.summary ? `<div class="ai-summary"><b>AI-анализ</b><p>${escapeHtml(ai.summary)}</p></div>` : ''}
-      <a href="${escapeHtml(item.source_url)}" target="_blank" rel="noopener">Открыть объявление →</a>
+      <a href="${escapeHtml(item.source_url)}">Открыть объявление →</a>
     </article>`;
   }).join('');
 }
@@ -156,7 +156,7 @@ async function loadSearchResults() {
         <div class="meta source-meta">Источник: ${escapeHtml(item.search_engine)} · обнаружено ${dateTime.format(new Date(item.first_seen))}</div>
         <div class="card-actions">
           <button class="enrich-result primary secondary-action ${imported ? 'saved' : ''}" data-url="${escapeHtml(item.url)}" type="button" ${imported ? 'disabled' : ''}>${imported ? 'Сохранено автоматически' : importLabel}</button>
-          <a class="search-open" data-result-id="${item.id}" href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Открыть объявление →</a>
+          <a class="search-open" data-result-id="${item.id}" href="${escapeHtml(item.url)}">Открыть объявление →</a>
         </div>
       </article>`;
     }).join('');
