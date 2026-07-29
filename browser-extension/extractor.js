@@ -40,7 +40,57 @@
     }
     return null;
   };
-  const findText = keys => findValue(keys, value => typeof value === 'string' ? clean(value) : null);
+  const textValue = value => {
+    if (typeof value === 'string' && clean(value)) return clean(value);
+    if (!value || typeof value !== 'object') return null;
+    for (const key of ['formattedAddress', 'fullAddress', 'displayAddress']) {
+      const candidate = textValue(value[key]);
+      if (candidate) return candidate;
+    }
+    const parts = ['streetAddress', 'addressLocality', 'addressRegion']
+      .map(key => textValue(value[key]))
+      .filter(Boolean);
+    return [...new Set(parts)].join(', ') || null;
+  };
+  const findText = keys => findValue(keys, textValue);
+  const addressFromText = value => {
+    const normalized = clean(value);
+    const patterns = [
+      /(?:№\s*\d+\s*[:：]\s*|Продажа[^:—]{0,120}[:：]\s*)([^—]{3,120}?),\s*(?:Астана|Astana)(?![А-Яа-яЁё])/i,
+      /\b((?:ул\.?|улица|просп\.?|проспект|пер\.?|переулок|мкр\.?|микрорайон|шоссе|набережная)\s+[^,;]{2,80},?\s+\d+[A-Za-zА-Яа-яЁё]?)/i,
+    ];
+    for (const pattern of patterns) {
+      const match = normalized.match(pattern);
+      const candidate = clean(match?.[1]).replace(/[ ,.-]+$/, '');
+      if (candidate.length >= 5 && candidate.length <= 180) return candidate;
+    }
+    return null;
+  };
+  const coordinate = (value, minimum, maximum) => {
+    const parsed = typeof value === 'number' ? value : Number(clean(value).replace(',', '.').replace(/[^0-9+-.]/g, ''));
+    return Number.isFinite(parsed) && parsed >= minimum && parsed <= maximum ? parsed : null;
+  };
+  const coordinatePair = value => {
+    let decoded = String(value || '');
+    try { decoded = decodeURIComponent(decoded); } catch (_) { /* keep original */ }
+    const match = decoded.match(/(?:[?&#](?:ll|center|pt|coords|coordinates)=)([-+]?\d{1,3}(?:\.\d+)?)[,%20]+([-+]?\d{1,2}(?:\.\d+)?)/i)
+      || decoded.match(/^\s*([-+]?\d{1,3}(?:\.\d+)?)[,\s]+([-+]?\d{1,2}(?:\.\d+)?)\s*$/);
+    if (!match) return null;
+    const longitude = coordinate(match[1], -180, 180);
+    const latitude = coordinate(match[2], -90, 90);
+    return longitude !== null && latitude !== null ? {latitude, longitude} : null;
+  };
+  const pageCoordinates = () => {
+    const nodes = document.querySelectorAll('a[href], iframe[src], [data-latitude], [data-longitude], [data-lat], [data-lng], [data-coordinates]');
+    for (const node of nodes) {
+      const pair = coordinatePair(node.href || node.src || node.getAttribute('data-coordinates'));
+      if (pair) return pair;
+      const latitude = coordinate(node.getAttribute('data-latitude') || node.getAttribute('data-lat'), -90, 90);
+      const longitude = coordinate(node.getAttribute('data-longitude') || node.getAttribute('data-lng'), -180, 180);
+      if (latitude !== null && longitude !== null) return {latitude, longitude};
+    }
+    return null;
+  };
   const fullText = clean(`${document.title} ${document.body?.innerText || ''}`);
   const areaMatch = fullText.match(/(\d{2,3}(?:[.,]\d+)?)\s*(?:м²|м2|кв\.?\s*м)/i);
   const roomsMatch = fullText.match(/(\d+)\s*[-–]?\s*комн(?:ат(?:н(?:ая|ую|ой))?|\.)/i);
@@ -65,14 +115,27 @@
   const photoUrls = [...new Set(photos.map(clean).map(value => value.startsWith('//') ? `https:${value}` : value))]
     .filter(value => /^https?:\/\//i.test(value)).slice(0, 30);
   const lower = fullText.toLowerCase();
+  const coordinates = pageCoordinates();
   const payload = {
     source: 'browser-extension',
     source_url: location.href.split('#')[0],
     title: clean(meta('og:title') || document.querySelector('h1')?.textContent || document.title || `${rooms || 2}-комнатная квартира`).slice(0, 300),
     description: clean(meta('og:description') || meta('description')).slice(0, 20000) || null,
     city: 'Астана',
-    district: findText(['district', 'districtName', 'regionName', 'addressLocality', 'areaName']) || (fullText.match(/((?:Есильский|Нура|Алматы|Сарыарка|Байконур)\s+район)/i)?.[1] || null),
+    district: (() => {
+      const candidate = findText(['district', 'districtName', 'areaName'])
+        || [findText(['regionName', 'addressRegion'])].find(value => value && /\b(?:район|р-н)\b/i.test(value))
+        || (fullText.match(/((?:Есильский|Нура|Алматы|Сарыарка|Байконур)\s+(?:район|р-н))/i)?.[1] || null);
+      return candidate ? candidate.replace(/\s+р-н\b/i, ' район') : null;
+    })(),
     residential_complex: findText(['complexName', 'residentialComplex', 'housingComplex', 'residentialComplexName']) || (fullText.match(/ЖК\s*[«"]?([^»".,;]{2,100})/i)?.[1]?.trim() || null),
+    address: findText(['address', 'streetAddress', 'formattedAddress', 'fullAddress', 'addressLine', 'displayAddress'])
+      || [...document.querySelectorAll('[itemprop="streetAddress"], [data-testid*="address" i], [class*="address" i]')]
+        .map(node => clean(node.innerText || node.textContent))
+        .find(value => value.length >= 5 && value.length <= 180)
+      || addressFromText(fullText),
+    latitude: findValue(['latitude', 'lat', 'geoLatitude', 'geoLat'], value => coordinate(value, -90, 90)) ?? coordinates?.latitude ?? null,
+    longitude: findValue(['longitude', 'lng', 'lon', 'geoLongitude', 'geoLon'], value => coordinate(value, -180, 180)) ?? coordinates?.longitude ?? null,
     price_kzt: price,
     area_m2: area,
     rooms,

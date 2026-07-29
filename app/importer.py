@@ -2,7 +2,7 @@ import json
 import re
 from html import unescape
 from typing import Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import unquote, urlparse, urlunparse
 
 import httpx
 from pydantic import HttpUrl
@@ -173,6 +173,59 @@ def _find_district(data: list[Any], combined: str) -> str | None:
     return re.sub(r"\s+р-н\b", " район", district, flags=re.IGNORECASE) if district else None
 
 
+def _address_from_text(value: str) -> str | None:
+    patterns = (
+        re.compile(
+            r"(?:№\s*\d+\s*[:：]\s*|Продажа[^:—]{0,120}[:：]\s*)"
+            r"(?P<address>[^—\n]{3,120}?),\s*(?:Астана|Astana)\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?P<address>(?:ул\.?|улица|просп\.?|проспект|пер\.?|переулок|"
+            r"мкр\.?|микрорайон|шоссе|набережная)\s+[^,\n;]{2,80},?\s+"
+            r"\d+[A-Za-zА-Яа-яЁё]?)",
+            re.IGNORECASE,
+        ),
+    )
+    for pattern in patterns:
+        match = pattern.search(value)
+        if match:
+            address = re.sub(r"\s+", " ", match.group("address")).strip(" ,.-")
+            if 5 <= len(address) <= 180:
+                return address
+    return None
+
+
+def _find_html_coordinate(html: str, keys: set[str], minimum: float, maximum: float) -> float | None:
+    names = "|".join(re.escape(key) for key in keys)
+    pattern = rf"(?:data[-_]?)?(?:{names})[\"']?\s*[:=]\s*[\"']?([-+]?\d+(?:[.,]\d+)?)"
+    match = re.search(pattern, html, re.IGNORECASE)
+    if not match:
+        return None
+    candidate = _coordinate(match.group(1))
+    return candidate if candidate is not None and minimum <= candidate <= maximum else None
+
+
+def _coordinates_from_html(html: str) -> tuple[float | None, float | None]:
+    decoded = unquote(html)
+    match = re.search(
+        r"(?:[?&#](?:ll|center|pt|coords|coordinates)=)"
+        r"(?P<longitude>[-+]?\d{1,3}(?:\.\d+)?)[,%20]+"
+        r"(?P<latitude>[-+]?\d{1,2}(?:\.\d+)?)",
+        decoded,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None, None
+    longitude = _coordinate(match.group("longitude"))
+    latitude = _coordinate(match.group("latitude"))
+    if longitude is not None and not -180 <= longitude <= 180:
+        longitude = None
+    if latitude is not None and not -90 <= latitude <= 90:
+        latitude = None
+    return latitude, longitude
+
+
 def _find_image_urls(data: list[Any]) -> list[str]:
     image_keys = {
         "image",
@@ -320,9 +373,14 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
     address = _find_text(
         data,
         {"address", "streetAddress", "formattedAddress", "fullAddress", "addressLine", "displayAddress"},
-    )
+    ) or _address_from_text(combined)
     latitude = _find_coordinate(data, {"latitude", "lat", "geoLatitude", "geoLat"}, -90, 90)
     longitude = _find_coordinate(data, {"longitude", "lng", "lon", "geoLongitude", "geoLon"}, -180, 180)
+    html_latitude, html_longitude = _coordinates_from_html(html)
+    latitude = latitude or _find_html_coordinate(html, {"latitude", "geoLatitude", "geoLat"}, -90, 90)
+    longitude = longitude or _find_html_coordinate(html, {"longitude", "geoLongitude", "geoLon"}, -180, 180)
+    latitude = latitude or html_latitude
+    longitude = longitude or html_longitude
     photo_urls = meta_images + _find_image_urls(data)
     photo_urls = list(dict.fromkeys(photo_urls))[:30]
     normalized_source_url = urlunparse(

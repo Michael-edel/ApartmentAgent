@@ -96,12 +96,14 @@ function render(listings) {
   document.querySelector('#strongCount').textContent = strong.length;
   if (!grid) return;
   if (!visible.length) {
-    grid.innerHTML = '<section class="empty card"><strong>Сохранённых квартир пока нет</strong><p>Добавьте ссылку Krisha или заполните ручную форму.</p></section>';
+    grid.innerHTML = '<section class="empty card"><strong>Сохранённых квартир пока нет</strong><p>Нажмите «Открыть и мониторить» у найденного объявления — браузер автоматически передаст данные в приложение.</p></section>';
     return;
   }
   grid.innerHTML = visible.map(item => {
     const title = item.residential_complex || item.title;
     const location = [item.address, item.district, item.city].filter(Boolean).join(' · ');
+    const hasCoordinates = item.latitude != null && item.longitude != null;
+    const locationMissing = !item.address && !hasCoordinates;
     const mapUrl = item.latitude != null && item.longitude != null
       ? `https://yandex.ru/maps/?ll=${encodeURIComponent(`${item.longitude},${item.latitude}`)}&z=16&pt=${encodeURIComponent(`${item.longitude},${item.latitude},pm2rdm`)}`
       : null;
@@ -115,6 +117,7 @@ function render(listings) {
       <div class="price">${money.format(item.price_kzt)}</div>
       <div class="meta">${number.format(item.area_m2)} м² · ${money.format(item.assessment.price_per_m2)}/м² · этаж ${item.floor || '—'}/${item.floors_total || '—'}</div>
       ${mapUrl ? `<a class="location-link" href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener noreferrer">Открыть местоположение на карте →</a>` : ''}
+      ${locationMissing ? '<div class="meta location-missing">Точное местоположение не опубликовано в открытых данных Krisha</div>' : ''}
       ${item.building_year || item.building_type ? `<div class="meta">${item.building_year ? `Построен ${item.building_year}` : ''}${item.building_year && item.building_type ? ' · ' : ''}${escapeHtml(item.building_type || '')}</div>` : ''}
       ${latestChange ? `<div class="price-change ${latestChange.change_kzt < 0 ? 'down' : 'up'}">${latestChange.change_kzt < 0 ? '↓' : '↑'} ${money.format(Math.abs(latestChange.change_kzt))} с последнего наблюдения</div>` : ''}
       <span class="verdict">${escapeHtml(item.assessment.verdict)}</span>

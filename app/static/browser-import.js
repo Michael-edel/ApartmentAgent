@@ -91,9 +91,43 @@
       .filter(Boolean);
     return [...new Set(parts)].join(', ') || null;
   };
+  const addressFromText = value => {
+    const normalized = clean(value);
+    const patterns = [
+      /(?:№\s*\d+\s*[:：]\s*|Продажа[^:—]{0,120}[:：]\s*)([^—]{3,120}?),\s*(?:Астана|Astana)(?![А-Яа-яЁё])/i,
+      /\b((?:ул\.?|улица|просп\.?|проспект|пер\.?|переулок|мкр\.?|микрорайон|шоссе|набережная)\s+[^,;]{2,80},?\s+\d+[A-Za-zА-Яа-яЁё]?)/i,
+    ];
+    for (const pattern of patterns) {
+      const match = normalized.match(pattern);
+      const candidate = clean(match?.[1]).replace(/[ ,.-]+$/, '');
+      if (candidate.length >= 5 && candidate.length <= 180) return candidate;
+    }
+    return null;
+  };
   const coordinate = (value, minimum, maximum) => {
     const parsed = typeof value === 'number' ? value : Number(clean(value).replace(',', '.').replace(/[^0-9+-.]/g, ''));
     return Number.isFinite(parsed) && parsed >= minimum && parsed <= maximum ? parsed : null;
+  };
+  const coordinatePair = value => {
+    let decoded = String(value || '');
+    try { decoded = decodeURIComponent(decoded); } catch (_) { /* keep original */ }
+    const match = decoded.match(/(?:[?&#](?:ll|center|pt|coords|coordinates)=)([-+]?\d{1,3}(?:\.\d+)?)[,%20]+([-+]?\d{1,2}(?:\.\d+)?)/i)
+      || decoded.match(/^\s*([-+]?\d{1,3}(?:\.\d+)?)[,\s]+([-+]?\d{1,2}(?:\.\d+)?)\s*$/);
+    if (!match) return null;
+    const longitude = coordinate(match[1], -180, 180);
+    const latitude = coordinate(match[2], -90, 90);
+    return longitude !== null && latitude !== null ? {latitude, longitude} : null;
+  };
+  const pageCoordinates = () => {
+    const nodes = document.querySelectorAll('a[href], iframe[src], [data-latitude], [data-longitude], [data-lat], [data-lng], [data-coordinates]');
+    for (const node of nodes) {
+      const pair = coordinatePair(node.href || node.src || node.getAttribute('data-coordinates'));
+      if (pair) return pair;
+      const latitude = coordinate(node.getAttribute('data-latitude') || node.getAttribute('data-lat'), -90, 90);
+      const longitude = coordinate(node.getAttribute('data-longitude') || node.getAttribute('data-lng'), -180, 180);
+      if (latitude !== null && longitude !== null) return {latitude, longitude};
+    }
+    return null;
   };
   const findText = keys => findValue(keys, textValue);
 
@@ -135,9 +169,17 @@
   const district = districtValue ? districtValue.replace(/\s+р-н\b/i, ' район') : null;
   const residentialComplex = findText(['complexName', 'residentialComplex', 'housingComplex', 'residentialComplexName'])
     || (fullText.match(/ЖК\s*[«"]?([^»".,;]{2,100})/i)?.[1]?.trim() || null);
-  const address = findText(['address', 'streetAddress', 'formattedAddress', 'fullAddress', 'addressLine', 'displayAddress']);
-  const latitude = findValue(['latitude', 'lat', 'geoLatitude', 'geoLat'], value => coordinate(value, -90, 90));
-  const longitude = findValue(['longitude', 'lng', 'lon', 'geoLongitude', 'geoLon'], value => coordinate(value, -180, 180));
+  const domAddress = [...document.querySelectorAll('[itemprop="streetAddress"], [data-testid*="address" i], [class*="address" i]')]
+    .map(node => clean(node.innerText || node.textContent))
+    .find(value => value.length >= 5 && value.length <= 180) || null;
+  const address = findText(['address', 'streetAddress', 'formattedAddress', 'fullAddress', 'addressLine', 'displayAddress'])
+    || domAddress
+    || addressFromText(fullText);
+  const coordinates = pageCoordinates();
+  const latitude = findValue(['latitude', 'lat', 'geoLatitude', 'geoLat'], value => coordinate(value, -90, 90))
+    ?? coordinates?.latitude ?? null;
+  const longitude = findValue(['longitude', 'lng', 'lon', 'geoLongitude', 'geoLon'], value => coordinate(value, -180, 180))
+    ?? coordinates?.longitude ?? null;
   const payload = {
     source: 'browser',
     source_url: location.href.split('#')[0],

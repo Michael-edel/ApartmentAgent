@@ -1,4 +1,6 @@
 from app.importer import (
+    _address_from_text,
+    _coordinates_from_html,
     _embedded_number,
     _find_coordinate,
     _find_numeric,
@@ -40,3 +42,13 @@ def test_reads_address_and_coordinates_from_nested_data() -> None:
     assert _find_text(data, {"address"}) == "ул. Кенен Азербаев, 6, Астана"
     assert _find_coordinate(data, {"latitude"}, -90, 90) == 51.128
     assert _find_coordinate(data, {"longitude"}, -180, 180) == 71.43
+
+
+def test_falls_back_to_visible_title_and_map_coordinates() -> None:
+    text = "Продажа 2-комнатной квартиры №1014062199: Кенен Азербаев, 6б, Астана, Алматы р-н"
+
+    assert _address_from_text(text) == "Кенен Азербаев, 6б"
+    assert _coordinates_from_html('href="https://yandex.kz/maps/?ll=71.430%2C51.128&z=16"') == (
+        51.128,
+        71.43,
+    )
