@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const extractorSource = fs.readFileSync('browser-extension/extractor.js', 'utf8');
 const contentSource = fs.readFileSync('browser-extension/content.js', 'utf8');
 
-function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyAt = 0, failures = 0, respond = true, failureMessage = 'Сервер недоступен', bodySuffix = '', mainHeading = null, captchaForm = null, extraAt = () => ({}), detailsMode = false} = {}) {
+function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyAt = 0, failures = 0, respond = true, failureMessage = 'Сервер недоступен', bodySuffix = '', mainHeading = null, captchaForm = null, captchaWidgets = [], extraAt = () => ({}), detailsMode = false} = {}) {
   let now = 0;
   let sequence = 0;
   const tasks = [];
@@ -25,7 +25,16 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
       const extra = extraAt(now);
       if (selector.startsWith('[data-apartment-agent-extension-message]')) return notices.filter(node => !node.removed);
       if (selector === 'h1, [role="heading"][aria-level="1"]') return mainHeading ? [typeof mainHeading === 'string' ? {textContent:mainHeading} : mainHeading] : [];
-      if (selector.startsWith('form[action*="captcha"')) return captchaForm ? [captchaForm] : [];
+      if (selector.startsWith('form[action*="captcha"')) return [captchaForm, ...captchaWidgets].filter(Boolean).filter(node => {
+        const tag = String(node.tagName || '').toUpperCase();
+        const attribute = name => node.getAttribute?.(name) || node[name] || '';
+        return tag === 'FORM' && selector.includes('form[action*="captcha" i]') && /captcha/i.test(attribute('action'))
+          || tag === 'IFRAME' && selector.includes('iframe[src*="/captcha" i]') && /\/captcha/i.test(attribute('src'))
+          || tag === 'IFRAME' && selector.includes('iframe[src*="/recaptcha/" i]') && /\/recaptcha\//i.test(attribute('src'))
+          || selector.includes('[data-testid="captcha"]') && attribute('data-testid') === 'captcha'
+          || selector.includes('.g-recaptcha') && String(node.className || '').split(/\s+/).includes('g-recaptcha')
+          || selector.includes('#captcha') && attribute('id') === 'captcha';
+      });
       if (selector.startsWith('.offer__info-item')) return extra.properties || [];
       if (selector.startsWith('.offer__description')) return extra.description ? [{textContent:extra.description}] : [];
       if (selector.startsWith('[data-testid="seller"]')) return extra.author ? [{textContent:extra.author}] : [];
@@ -124,6 +133,28 @@ blankWithFooter.advance(14000);
 assert.deepEqual(blankWithFooter.outcomes, ['unknown'], 'a footer alone does not turn an unreadable page into a CAPTCHA');
 assert.deepEqual(blankWithFooter.reasons, ['unreadable']);
 
+// Normal site widgets can arrive before required listing fields. They must not
+// terminate observation at 1.2s while the price becomes available at 3s.
+const anchorWidget = {tagName:'IFRAME',src:'https://www.google.com/recaptcha/api2/anchor',style:{display:'block'}};
+const badgeWidgets = [
+  {tagName:'DIV',className:'g-recaptcha',textContent:'',style:{display:'block'}},
+  {tagName:'DIV',className:'grecaptcha-badge',textContent:'',style:{display:'block'}},
+];
+for (const widgets of [[anchorWidget], badgeWidgets]) {
+  const delayedWithWidget = fixture({readyAt:3000,captchaWidgets:widgets});
+  delayedWithWidget.run();
+  delayedWithWidget.advance(14000);
+  assert.equal(delayedWithWidget.posted.length,1,'a normal widget must not stop a listing whose price loads later');
+  assert.deepEqual(delayedWithWidget.outcomes,['imported']);
+  assert.equal(delayedWithWidget.events[0].at,12000);
+}
+const unreadableWithBadge = fixture({readyAt:20000,captchaWidgets:badgeWidgets});
+unreadableWithBadge.run();
+unreadableWithBadge.advance(14000);
+assert.equal(unreadableWithBadge.posted.length,0);
+assert.deepEqual(unreadableWithBadge.outcomes,['unknown'],'an unreadable page with a normal badge is not a CAPTCHA gate');
+assert.deepEqual(unreadableWithBadge.reasons,['unreadable']);
+
 for (const heading of ['CAPTCHA', 'Krisha.kz — CAPTCHA', '403 Forbidden', '429 Too Many Requests', '468', 'Проверка браузера']) {
   const challengeHeading = fixture({mainHeading:heading});
   challengeHeading.run();
@@ -138,10 +169,20 @@ bodyHttpError.advance(14000);
 assert.equal(bodyHttpError.posted.length, 0, 'an explicit HTTP error must not import unrelated listing metadata');
 assert.deepEqual(bodyHttpError.outcomes, ['blocked']);
 
-const visibleForm = fixture({readyAt:20000,captchaForm:{style:{display:'block'}}});
+const visibleForm = fixture({readyAt:20000,captchaForm:{tagName:'FORM',action:'/captcha/verify',style:{display:'block'}}});
 visibleForm.run();
 visibleForm.advance(14000);
 assert.deepEqual(visibleForm.outcomes, ['blocked']);
+
+const visibleChallengeFrame = fixture({readyAt:20000,captchaWidgets:[{tagName:'IFRAME',src:'/captcha/challenge',style:{display:'block'}}]});
+visibleChallengeFrame.run();
+visibleChallengeFrame.advance(14000);
+assert.deepEqual(visibleChallengeFrame.outcomes,['blocked']);
+
+const explicitVerification = fixture({readyAt:20000,bodySuffix:'Подтвердите, что вы человек'});
+explicitVerification.run();
+explicitVerification.advance(14000);
+assert.deepEqual(explicitVerification.outcomes,['blocked']);
 
 const hiddenHeading = fixture({mainHeading:{textContent:'403 Forbidden', hidden:true}});
 hiddenHeading.run();

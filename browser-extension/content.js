@@ -65,8 +65,9 @@
     if (coreReady) return false;
     const explicitVerification = /(?:complete|solve|enter)\s+(?:the\s+)?captcha|verify.{0,25}(?:human|not\s+a\s+robot)|введите\s+код\s+с\s+картинки/i;
     if (text.length < 5000 && (check.test(text) || httpBlock.test(text) || explicitVerification.test(text))) return true;
-    // reCAPTCHA footers/badges alone are normal site furniture, not a block.
-    return [...document.querySelectorAll('form[action*="captcha" i], iframe[src*="/captcha" i], iframe[src*="/recaptcha/" i], [data-testid="captcha"], .g-recaptcha, #captcha')].some(visible);
+    // Ordinary reCAPTCHA anchors and badges can load before the listing's price.
+    // Their presence is not a verification gate; keep observing the page.
+    return [...document.querySelectorAll('form[action*="captcha" i], iframe[src*="/captcha" i], [data-testid="captcha"], #captcha')].some(visible);
   };
   const unavailableDetected = () => {
     const text = `${document.title || ''} ${pageText()}`;
