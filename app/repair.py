@@ -26,12 +26,15 @@ _PATTERNS = (
     ("косметический ремонт", rf"косметическ(?:ий|им|ого|ом){_SPACE}{_REPAIR}"),
     ("дизайнерский ремонт", rf"дизайнерск(?:ий|им|ого|ом){_SPACE}{_REPAIR}"),
     ("евроремонт", r"евро[^\S\r\n-]*-?[^\S\r\n]*ремонт(?:а|ом|е|у)?"),
-    ("хорошее состояние", rf"хорош(?:ее|ем){_SPACE}состояни[еи]"),
+    ("хорошее состояние", rf"хорош(?:ее|ем){_SPACE}состояни[еи]|в{_SPACE}хорошем{_SPACE}состояни\."),
+    ("удовлетворительное состояние", r"состояние(?:\s+квартиры)?\s*[:—–-]?\s*удовлетворительное"),
+    ("с ремонтом", rf"с{_SPACE}ремонтом"),
 )
 _COMPILED = tuple((condition, re.compile(rf"(?<!\w)(?:{pattern})(?!\w)", re.I))
                   for condition, pattern in _PATTERNS)
 _APARTMENT = re.compile(r"\b(?:квартир(?:а|у|е|ой)|жиль[еёя]|апартамент(?:ы|ах)?|студи(?:я|ю|и))\b", re.I)
 _NON_APARTMENT = re.compile(r"\b(?:подъезд\w*|парадн\w*|фасад\w*|крыш\w*|кровл\w*|холл\w*|лестниц\w*|сосед\w*|офис\w*|паркинг\w*|лифтов\w*|ванн\w*|санузл\w*|кухн\w*|балкон\w*|спальн\w*|дом(?:а|е|ом|ов)?|здани\w*|гараж\w*)\b", re.I)
+_FURNITURE = re.compile(r"\bмебел\w*\b", re.I)
 _GENERIC_COMPLEX = re.compile(r"\b(?:жк|жил(?:ой|ого|ом)\s+комплекс\w*)\b", re.I)
 _HYPOTHETICAL = re.compile(r"\b(?:можно|можете|сможете|хотите|планиру\w*|предстоит|понадобится|сдела(?:ть|ем|ете)|выполним|закаж\w*|обновим|будет|будут)\b|\b(?:при|по)\s+желанию\b|\bза\s+(?:наш|ваш)\s+сч[её]т\b|\b(?:услуги|дизайн[ -]проект)\b", re.I)
 _NEGATED_BEFORE = re.compile(r"\b(?:не\s+(?:с\s+)?|нет\s+|отсутствует\s+)$", re.I)
@@ -39,6 +42,11 @@ _NEGATED_AFTER = re.compile(r"^\s+не\s+(?:сделан\w*|выполнен\w*|
 _NEEDED_BEFORE = re.compile(r"\b(?:требуется|нужен|необходим|нуждается\s+в)\s+$", re.I)
 _DIRECT_PREFIX = re.compile(r"^(?:(?:в|с|улучшенная|улучшенной|качественный|качественным|качественная|новая|новой)\s*[,—:-]?\s*)*$", re.I)
 _CONDITION_LABEL = re.compile(r"\b(?:состояние(?:\s+квартиры)?|ремонт|отделка)\s*[:—-]?\s*$", re.I)
+_STATE_LABEL_AT_END = re.compile(r"(?:^|[,;])\s*состояние(?:\s+квартиры)?\s*$", re.I)
+_POSITIVE_REPAIR = {"не новый, но аккуратный ремонт", "хороший ремонт", "качественный ремонт",
+                    "свежий ремонт", "новый ремонт", "средний ремонт", "косметический ремонт",
+                    "дизайнерский ремонт", "евроремонт", "хорошее состояние",
+                    "удовлетворительное состояние"}
 _DECORATION = " \t•*✔✅☑️💥–—-:;,.()[]"
 
 
@@ -72,9 +80,29 @@ def _claim_context(unit: str, match: re.Match, condition: str, paragraph_apartme
     if _GENERIC_COMPLEX.search(unit) and not direct_apartment:
         return False
     if condition == "хорошее состояние":
-        return direct_apartment
+        return direct_apartment and not _FURNITURE.search(left_clause + " " + right_clause)
+    if condition == "удовлетворительное состояние":
+        # This match includes the explicit state label.  A nearby room or
+        # furniture must not turn its own condition into a whole-flat claim.
+        return not (_NON_APARTMENT.search(unit) or _FURNITURE.search(unit))
+    if condition == "с ремонтом":
+        # A generic renovation says nothing about its quality.  Accept it only
+        # when the current clause explicitly names this apartment.
+        return bool(_APARTMENT.search(left_clause + " " + right_clause)) and not _FURNITURE.search(left_clause + " " + right_clause)
     prefix = before.strip(_DECORATION)
     return apartment or bool(_CONDITION_LABEL.search(before)) or bool(_DIRECT_PREFIX.fullmatch(prefix))
+
+
+def _description_units(line: str):
+    start = 0
+    for separator in re.finditer(r"(?<=[.!?;])\s+|\s+[—–]\s+", line):
+        if separator.group().strip() in {"—", "–"} and _STATE_LABEL_AT_END.search(line[start:separator.start()]):
+            # Keep a structured-looking label and value together, including
+            # 'Этажность – 2 (5), состояние – удовлетворительное'.
+            continue
+        yield line[start:separator.start()]
+        start = separator.end()
+    yield line[start:]
 
 
 def parse_repair_description(text: str | None) -> tuple[str, str] | None:
@@ -99,7 +127,7 @@ def parse_repair_description(text: str | None) -> tuple[str, str] | None:
             continue
         # Separating dash clauses keeps a real 'предчистовая отделка' claim
         # distinct from the following 'можно сделать ремонт по своему вкусу'.
-        for unit in re.split(r"(?<=[.!?;])\s+|\s+[—–]\s+", line):
+        for unit in _description_units(line):
             matches = sorted(((condition, match) for condition, pattern in _COMPILED
                               for match in pattern.finditer(unit)),
                              key=lambda pair: pair[1].end() - pair[1].start(), reverse=True)
@@ -113,6 +141,10 @@ def parse_repair_description(text: str | None) -> tuple[str, str] | None:
     if not claims:
         return None
     keys = set(claims)
+    # A specific positive condition can refine a generic 'с ремонтом', but
+    # neither negative nor conflicting condition claims can be resolved by it.
+    if "с ремонтом" in keys and keys - {"с ремонтом"} <= _POSITIVE_REPAIR and len(keys) > 1:
+        keys.remove("с ремонтом")
     if len(keys) == 1:
         condition = next(iter(keys))
         return condition, claims[condition]

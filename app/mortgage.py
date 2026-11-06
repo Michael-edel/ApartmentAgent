@@ -19,6 +19,7 @@ _POSITIVE = re.compile(
     r"|\bипотеку\s+(?:рассмотрим|рассматриваем|рассматривают)\b"
     r"|\b(?:рассмотрим|рассматриваем)\s+(?:любую\s+)?ипотеку\b"
     r"|\b(?:покупка|продажа)\s+в\s+ипотеку\b"
+    r"|\bв\s+ипотеку\s+проходит\b"
     r"|\b(?:возможно|доступно)\s+оформление\s+(?:(?:любого\s+вида|партн[её]рской|банковской)\s+){0,3}ипотеки\b",
     re.I,
 )
@@ -30,6 +31,8 @@ _NEGATED_PREFIX = re.compile(r"\b(?:не\s+(?:(?:всегда|только)\s+)?
 _CASH_PROMOTION = re.compile(r"\b(?:скидк\w*|акци\w*|торг\w*|бонус\w*)\b", re.I)
 _OTHER_PAYMENT = re.compile(r"\b(?:первоначальн\w*\s+взнос\w*|перв(?:ый|ого)\s+взнос\w*|аванс\w*|задаток\w*|комисси\w*|услуг\w*)\b", re.I)
 _SALE_CONTEXT = re.compile(r"\b(?:квартира|жиль[еёя]|апартаменты|прода[её]тся|продажа|реализуется)\b", re.I)
+_OTHER_OBJECT = re.compile(r"\b(?:(?:соседн\w*|друг\w*)\s+(?:квартир\w*|жиль\w*|объект\w*)|у\s+сосед\w*)\b", re.I)
+_QUESTION_OR_APPROVAL = re.compile(r"\b(?:проходит\s+ли|если\s+банк|после\s+одобрени\w*|при\s+одобрени\w*)\b", re.I)
 
 
 def _unit(text: str, start: int, end: int) -> tuple[str, int, int]:
@@ -74,7 +77,7 @@ def parse_mortgage_claim(text: str | None) -> tuple[bool, str] | None:
     positive, cash_only = [], []
     for match in _POSITIVE.finditer(text):
         unit, start, end = _unit(text, match.start(), match.end())
-        if (_allowed(unit, start)
+        if (_allowed(unit, start) and not _OTHER_OBJECT.search(unit) and not _QUESTION_OR_APPROVAL.search(unit)
                 and ("оформление" not in match.group().casefold() or _SALE_CONTEXT.search(unit))):
             positive.append(_evidence(unit, start, end))
     for line in text.splitlines():
