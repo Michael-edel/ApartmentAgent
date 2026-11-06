@@ -92,7 +92,7 @@ def test_employer_caption_is_skipped_before_a_structured_apartment_address():
                                                        ("Кенен Азербаев 6б", "Кенен Азербаев 6б")])
 async def test_employer_address_does_not_override_apartment_location(monkeypatch, explicit_address, expected):
     html = '''<meta property="og:title" content="Продажа 4-комнатной квартиры №123: Кудайбердыулы 36/3, Астана">
-    <script type="application/ld+json">{"price":45000000,"area":106.4,"rooms":4,
+    <script type="application/ld+json">{"url":"https://krisha.kz/a/show/123","price":45000000,"area":106.4,"rooms":4,
     "seller":{"address":"Работает в компании Royal Invest"}}</script>
     <div class="seller-address">Работает в компании Royal Invest</div>'''
     if explicit_address:
@@ -125,7 +125,7 @@ def test_falls_back_to_visible_title_and_map_coordinates() -> None:
 
 
 async def test_import_preserves_bathrooms_lower_bound(monkeypatch):
-    html = '<script type="application/ld+json">{"price":45000000,"area":100,"rooms":4,"bathroomsCount":"2 с/у и более"}</script>'
+    html = '<script type="application/ld+json">{"id":123,"price":45000000,"area":100,"rooms":4,"bathroomsCount":"2 с/у и более"}</script>'
     class FakeClient:
         def __init__(self, **kwargs):
             pass

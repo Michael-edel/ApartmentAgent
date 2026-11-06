@@ -10,7 +10,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import SessionLocal
-from app.krisha_search import normalize_krisha_listing_url
+from app.krisha_search import normalize_krisha_import_url, normalize_krisha_listing_url
 from app.models import BathroomCheckControl, BathroomCheckJob, BathroomCheckTask, Listing, SearchResult
 from app.search_analysis import is_target_search_result, parse_bathrooms_count
 
@@ -182,6 +182,23 @@ async def bathroom_check_status() -> dict:
 class StartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mode: Literal["bathrooms", "details"] = "bathrooms"
+    source_url: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("source_url")
+    @classmethod
+    def normalize_source(cls, value):
+        if value is None:
+            return None
+        canonical = normalize_krisha_import_url(value)
+        if canonical is None:
+            raise ValueError("Укажите номер объявления или ссылку Krisha")
+        return canonical
+
+    @model_validator(mode="after")
+    def single_import_mode(self):
+        if self.source_url and self.mode != "details":
+            raise ValueError("Импорт по номеру выполняется в режиме дополнения карточек")
+        return self
 
 
 @router.post("/start")
@@ -190,9 +207,15 @@ async def bathroom_check_start(request: StartRequest | None = None) -> dict:
         control = await _control(session)
         job = await _job(session, control)
         await _expire(session, job, _now())
+        if request and request.source_url and job is not None and job.status in {"running", "paused"}:
+            raise HTTPException(409, "Другая очередь уже запущена. Завершите или остановите её перед импортом по номеру.")
         if job is None or job.status not in {"running", "paused"}:
             criteria = _criteria(request.mode if request else "bathrooms")
-            candidates = await _candidates(session, criteria)
+            if request and request.source_url:
+                criteria.update(manual_import=True, source_url=request.source_url)
+                candidates = [(request.source_url, None)]
+            else:
+                candidates = await _candidates(session, criteria)
             job = BathroomCheckJob(status="running" if candidates else "completed", criteria=criteria,
                                    message=None if candidates else ("Нет объявлений для получения подробностей." if criteria["mode"] == "details" else "Нет объявлений с неизвестным количеством санузлов."))
             session.add(job)
@@ -283,9 +306,11 @@ async def bathroom_check_claim(request: ClaimRequest) -> dict:
         if job.criteria.get("mode") == "details":
             version = request.extension_version or ""
             parts = tuple(int(part) for part in version.split(".")) if re.fullmatch(r"\d+(?:\.\d+){1,3}", version) else ()
-            if not parts or (parts + (0,) * (4 - len(parts))) < (0, 2, 0, 0):
+            minimum = (0, 3, 0, 0) if job.criteria.get("manual_import") else (0, 2, 0, 0)
+            if not parts or (parts + (0,) * (4 - len(parts))) < minimum:
                 job.status = "paused"
-                job.message = "Для полного импорта нужно обновить расширение до 0.2.0."
+                release = "0.3.0" if job.criteria.get("manual_import") else "0.2.0"
+                job.message = f"Для полного импорта нужно обновить расширение до {release}."
                 result.update(status=job.status, message=job.message)
                 return result
         tasks = await _tasks(session, job)
@@ -304,6 +329,8 @@ async def bathroom_check_claim(request: ClaimRequest) -> dict:
                 count = await _stored_count(session, candidate.url)
                 details_mode = job.criteria.get("mode") == "details"
                 ready = await _details_ready(session, candidate.url, candidate.claimed_at) if details_mode else count is not None
+                if job.criteria.get("manual_import"):
+                    ready = False  # An explicit number import refreshes an existing card too.
                 if ready:
                     candidate.status = "unknown" if count is None else "confirmed" if count >= 2 else "rejected"
                     candidate.completed_at = now

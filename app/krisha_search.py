@@ -121,6 +121,25 @@ def normalize_krisha_listing_url(raw_url: str) -> str | None:
     return urlunparse(("https", "krisha.kz", parsed.path.rstrip("/"), "", "", ""))
 
 
+def normalize_krisha_import_url(value: str) -> str | None:
+    """Accept a public advert number or its strict Krisha URL, never another host/path."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if re.fullmatch(r"[1-9]\d{0,14}", value):
+        return f"https://krisha.kz/a/show/{value}"
+    try:
+        parsed = urlparse(value)
+        if (parsed.scheme not in {"http", "https"} or parsed.hostname not in {"krisha.kz", "www.krisha.kz"}
+                or parsed.username or parsed.password or parsed.port):
+            return None
+    except ValueError:
+        return None
+    if match := re.fullmatch(r"/a/show/([1-9]\d{0,14})/?", parsed.path):
+        return f"https://krisha.kz/a/show/{match.group(1)}"
+    return None
+
+
 def _plain_text(value: str) -> str:
     return re.sub(r"\s+", " ", unescape(_TAG_RE.sub(" ", value))).strip()
 

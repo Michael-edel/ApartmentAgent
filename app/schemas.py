@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
+from app.krisha_search import normalize_krisha_import_url
+
 
 def plain_detail_text(value: str) -> str:
     value = re.sub(r"<(?:script|style)\b[^>]*>.*?</(?:script|style)>", "", value, flags=re.I | re.S)
@@ -14,6 +16,17 @@ def plain_detail_text(value: str) -> str:
 
 class ListingImportRequest(BaseModel):
     source_url: HttpUrl
+
+    @field_validator("source_url", mode="before")
+    @classmethod
+    def listing_number_or_url(cls, value):
+        if isinstance(value, HttpUrl):
+            value = str(value)
+        if isinstance(value, str):
+            normalized = normalize_krisha_import_url(value)
+            if normalized:
+                return normalized
+        raise ValueError("Укажите номер объявления или ссылку https://krisha.kz/a/show/номер")
 
 
 class ListingCreate(BaseModel):

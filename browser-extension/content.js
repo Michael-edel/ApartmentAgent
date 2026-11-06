@@ -17,7 +17,11 @@
 
   // Each page reload can update an existing card, including after an upgrade.
   // Deduplicate successful payloads only during this bounded observation run.
-  const deadline = Date.now() + 12000;
+  const startedAt = Date.now();
+  const deadline = startedAt + 12000;
+  let observedSignature = '';
+  let stableSince = startedAt;
+  let lastSuccessfulSignature = '';
   const succeeded = new Set();
   let inFlight = false;
   let failures = 0;
@@ -29,6 +33,29 @@
   let lastSavedBathrooms = null;
   let waitingDetails = false;
   let lastSavedDetails = false;
+  const hasText = value => typeof value === 'string' && !!value.trim();
+  const fastSnapshotReady = payload => {
+    let listingId = null;
+    try {
+      const url = new URL(payload?.source_url);
+      if (url.protocol === 'https:' && ['krisha.kz', 'www.krisha.kz'].includes(url.hostname)) {
+        listingId = url.pathname.match(/^\/a\/show\/(\d+)\/?$/)?.[1] || null;
+      }
+    } catch (_) { return false; }
+    const matchedId = window.ApartmentAgentImportState?.matched_json_id;
+    // A price-only JSON object is never enough to close the page early.
+    return listingId && String(matchedId || '') === listingId && window.ApartmentAgentImportState?.has_json_photos === true && payload.details_extracted === true
+      && ['price_kzt', 'area_m2', 'rooms'].every(key => Number(payload[key]) > 0)
+      && Number.isInteger(payload.bathrooms_count) && payload.bathrooms_count >= 0
+      && typeof payload.mortgage_supported === 'boolean'
+      && (hasText(payload.seller_name) || hasText(payload.seller_type))
+      && hasText(payload.repair_condition) && hasText(payload.city) && hasText(payload.district)
+      && (hasText(payload.address) || Number.isFinite(payload.latitude) && Number.isFinite(payload.longitude)
+        && payload.latitude >= 50 && payload.latitude <= 52 && payload.longitude >= 69 && payload.longitude <= 73)
+      && typeof payload.description === 'string' && payload.description.trim().length >= 30
+      && Array.isArray(payload.photo_urls) && payload.photo_urls.length > 0
+      && ['krisha_city_price_per_m2', 'krisha_district_price_per_m2'].every(key => Number.isSafeInteger(payload[key]) && payload[key] > 0);
+  };
   const notifyQueue = (outcome, error = '', reason = '') => {
     if (queueNotified) return;
     queueNotified = true;
@@ -116,6 +143,15 @@
         missing = payload ? ['price_kzt', 'area_m2', 'rooms'].filter(key => !payload[key]) : [];
         if (payload && !missing.length) {
           const signature = JSON.stringify(payload);
+          if (signature !== observedSignature) {
+            observedSignature = signature;
+            stableSince = Date.now();
+          }
+          if (!inFlight && !lastError && lastSuccessfulSignature === signature
+            && Date.now() >= startedAt + 2000 && Date.now() - stableSince >= 800 && fastSnapshotReady(payload)) {
+            finish();
+            return;
+          }
           if (!succeeded.has(signature)) {
             inFlight = true;
             show('ApartmentAgent: импортирую открытое объявление…');
@@ -130,6 +166,7 @@
                 return;
               }
               succeeded.add(signature);
+              lastSuccessfulSignature = signature;
               lastError = '';
               lastSavedBathrooms = payload.bathrooms_count;
               lastSavedDetails = payload.details_extracted === true;

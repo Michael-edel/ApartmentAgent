@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const extractorSource = fs.readFileSync('browser-extension/extractor.js', 'utf8');
 const contentSource = fs.readFileSync('browser-extension/content.js', 'utf8');
 
-function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyAt = 0, failures = 0, respond = true, failureMessage = 'Сервер недоступен', bodySuffix = '', mainHeading = null, captchaForm = null, captchaWidgets = [], extraAt = () => ({}), detailsMode = false} = {}) {
+function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyAt = 0, failures = 0, respond = true, failureMessage = 'Сервер недоступен', bodySuffix = '', mainHeading = null, captchaForm = null, captchaWidgets = [], extraAt = () => ({}), detailsMode = false, payloadAt = null, matchedId = null, responseDelay = 50, jsonPhotos = true} = {}) {
   let now = 0;
   let sequence = 0;
   const tasks = [];
@@ -52,7 +52,7 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
     posted.push(sent);
     if (respond) setTimeout(() => callback(posted.length <= failures
       ? {ok:false, error:failureMessage}
-      : {ok:true, waiting_details:detailsMode && !sent.details_extracted, observing:true, listing:{assessment:{score:95}}}), 50);
+      : {ok:true, waiting_details:detailsMode && !sent.details_extracted, observing:true, listing:{assessment:{score:95}}}), responseDelay);
   }}};
   const context = {
     document, chrome, location:{href:'https://krisha.kz/a/show/fixture'}, URL,
@@ -61,6 +61,10 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
     sessionStorage:{getItem(){throw new Error('Legacy session marker must not be read');}, setItem(){throw new Error('Legacy session marker must not be written');}},
   };
   vm.runInNewContext(extractorSource, context);
+  if (payloadAt) context.window.ApartmentAgentExtract = () => {
+    context.window.ApartmentAgentImportState = {matched_json_id:matchedId,has_json_photos:jsonPhotos};
+    return JSON.parse(JSON.stringify(payloadAt(now)));
+  };
   const extract = () => context.window.ApartmentAgentExtract();
   const run = () => vm.runInNewContext(contentSource, context);
   const advance = target => {
@@ -90,6 +94,42 @@ assert.equal(stable.posted[0].floor, null, 'the rating 95/100 in our own banner 
 assert.match(stable.messages.at(-1), /Санузлов: не менее 2/);
 assert.deepEqual(stable.outcomes,['imported']);
 assert.equal(stable.events[0].at,12000,'a queue tab remains open for the full observation interval');
+
+const fastPayload = {source_url:'https://krisha.kz/a/show/123', price_kzt:45000000, area_m2:100, rooms:4,
+  bathrooms_count:2, mortgage_supported:false, seller_type:'Хозяин недвижимости', repair_condition:'хороший ремонт',
+  city:'Астана', district:'Алматы район', address:'Кудайбердыулы 36/3',
+  description:'Полное описание квартиры с отдельной кухней и тихим двором.', photo_urls:['https://images.example/photo.jpg'],
+  krisha_city_price_per_m2:500000, krisha_district_price_per_m2:520000, details_extracted:true};
+const fast = fixture({payloadAt:() => fastPayload, matchedId:'123', detailsMode:true});
+fast.run(); fast.advance(14000);
+assert.equal(fast.posted.length,1);
+assert.deepEqual(fast.outcomes,['imported']);
+assert.equal(fast.events[0].at,2000,'a complete matched and successfully saved JSON snapshot finishes early');
+for (const missingKey of ['seller_type','repair_condition','mortgage_supported','krisha_district_price_per_m2']) {
+  const partial = {...fastPayload}; delete partial[missingKey];
+  const fallback = fixture({payloadAt:() => partial, matchedId:'123', detailsMode:true});
+  fallback.run(); fallback.advance(14000);
+  assert.equal(fallback.events[0].at,12000,`missing ${missingKey} must keep waiting for DOM`);
+}
+const unmatched = fixture({payloadAt:() => fastPayload, matchedId:'999', detailsMode:true});
+unmatched.run(); unmatched.advance(14000);
+assert.equal(unmatched.events[0].at,12000,'an unrelated JSON object must not enable the fast path');
+const firstPhotoOnly = fixture({payloadAt:() => fastPayload, matchedId:'123', detailsMode:true,jsonPhotos:false});
+firstPhotoOnly.run(); firstPhotoOnly.advance(14000);
+assert.equal(firstPhotoOnly.events[0].at,12000,'a metadata preview must not close the page before its actual gallery is read');
+const changed = fixture({payloadAt:time => ({...fastPayload,repair_condition:time < 2000 ? 'хороший ремонт' : 'свежий ремонт'}), matchedId:'123',detailsMode:true});
+changed.run(); changed.advance(14000);
+assert.equal(changed.events[0].at,2800,'changed fields must stabilize and be saved before early completion');
+assert.equal(changed.posted.at(-1).repair_condition,'свежий ремонт');
+const slowSave = fixture({payloadAt:() => fastPayload, matchedId:'123', detailsMode:true,responseDelay:2000});
+slowSave.run(); slowSave.advance(3000);
+assert.equal(slowSave.outcomes.length,0,'never close a fast snapshot before the save acknowledgment');
+slowSave.advance(14000);
+assert.equal(slowSave.events[0].at,3200);
+const challengedFast = fixture({payloadAt:() => fastPayload,matchedId:'123',mainHeading:'Проверка браузера'});
+challengedFast.run(); challengedFast.advance(14000);
+assert.deepEqual(challengedFast.outcomes,['blocked']);
+assert.equal(challengedFast.posted.length,0);
 
 const lateDetails = fixture({detailsMode:true,extraAt:time => time < 3000 ? {} : {
   properties:[{className:'offer__info-item',textContent:'Состояние квартиры хороший ремонт'}],

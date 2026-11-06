@@ -74,7 +74,7 @@
       <p id="searchMeta" class="microcopy"></p>
       <section id="bathroomCheckPanel" class="bathroom-check-panel" aria-labelledby="bathroomCheckHeading">
         <h3 id="bathroomCheckHeading">Автопроверка объявлений</h3>
-        <p class="microcopy">Для проверки санузлов и дополнения карточек нужно расширение ApartmentAgent 0.2.1 и открытый браузер. Объявления проверяются последовательно в одной вкладке. При проверке безопасности или CAPTCHA работа приостанавливается.</p>
+        <p class="microcopy">Для быстрого импорта по номеру нужно расширение ApartmentAgent 0.3.0 и открытый браузер. Объявления проверяются последовательно в одной вкладке. При проверке безопасности или CAPTCHA работа приостанавливается.</p>
         <p id="bathroomCheckMode" class="microcopy" hidden></p>
         <p id="bathroomCheckCriteria" class="microcopy" hidden></p>
         <p id="bathroomCheckCounts" class="microcopy">Загружаю состояние проверки…</p>
@@ -112,13 +112,14 @@
 
     <section class="form-card card">
       <p class="eyebrow">Быстрое добавление</p>
-      <h2>Вставьте ссылку Krisha</h2>
+      <h2>Номер или ссылка объявления Krisha</h2>
       <form id="importForm">
-        <label>Ссылка на объявление
-          <input id="importUrl" name="source_url" type="url" required placeholder="https://krisha.kz/a/show/...">
+        <label>Номер или ссылка
+          <input id="importUrl" name="source_url" type="text" maxlength="2000" required placeholder="1010095181 или https://krisha.kz/a/show/...">
         </label>
-        <button type="submit">Загрузить и оценить</button>
-        <p class="microcopy">При ограничении доступа источника используйте ручную форму ниже.</p>
+        <button type="submit">Импортировать автоматически</button>
+        <button id="serverImportButton" class="secondary-action" type="submit">Загрузить без расширения</button>
+        <p class="microcopy">Автоматический импорт использует расширение: JSON объявления дополняется данными карточки. При активной очереди сначала завершите или остановите её.</p>
         <p id="importMessage" class="form-message" aria-live="polite"></p>
       </form>
     </section>
@@ -199,6 +200,6 @@
     <a href="#listingGrid">★<span>Лучшие</span></a>
   </nav>
 
-  <script src="/static/app.js?v=155" defer></script>
+  <script src="/static/app.js?v=156" defer></script>
 </body>
 </html>

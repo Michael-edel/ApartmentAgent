@@ -356,3 +356,47 @@ async def test_details_mode_does_not_repeat_enriched_legacy_url_variant(env):
     await store_count(env, "https://krisha.kz/a/show/100", None)
     result = await queue.bathroom_check_start(queue.StartRequest(mode="details"))
     assert result["status"] == "completed" and result["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_single_number_import_does_not_require_discovery_or_match_search_filters(env):
+    started = await queue.bathroom_check_start(queue.StartRequest(mode="details", source_url="1010095181"))
+    assert started["total"] == 1 and started["criteria"]["manual_import"] is True
+    old = await queue.bathroom_check_claim(queue.ClaimRequest(worker_id="browser-1", extension_version="0.2.2"))
+    assert old["task"] is None and old["status"] == "paused" and "0.3.0" in old["message"]
+    await queue.bathroom_check_resume()
+    ready = await queue.bathroom_check_claim(queue.ClaimRequest(worker_id="browser-1", extension_version="0.3.0"))
+    assert ready["task"]["url"] == "https://krisha.kz/a/show/1010095181"
+    async with env.sessions() as session:
+        assert (await session.scalar(select(BathroomCheckTask))).search_result_id is None
+
+
+@pytest.mark.asyncio
+async def test_single_number_import_refreshes_existing_full_card(env):
+    await store_count(env, "https://krisha.kz/a/show/123", 2)
+    async with env.sessions() as session:
+        row = await session.scalar(select(Listing))
+        row.details_imported_at = env.clock["now"] - timedelta(hours=1)
+        await session.commit()
+    await queue.bathroom_check_start(queue.StartRequest(mode="details", source_url="123"))
+    result = await queue.bathroom_check_claim(queue.ClaimRequest(worker_id="browser-1", extension_version="0.3.0"))
+    assert result["task"] is not None
+
+
+@pytest.mark.asyncio
+async def test_single_number_import_cannot_replace_active_batch(env):
+    await seed(env)
+    started = await queue.bathroom_check_start()
+    with pytest.raises(HTTPException) as busy:
+        await queue.bathroom_check_start(queue.StartRequest(mode="details", source_url="123"))
+    assert busy.value.status_code == 409
+    assert (await queue.bathroom_check_status())["job_id"] == started["job_id"]
+
+
+@pytest.mark.asyncio
+async def test_single_number_http_contract_rejects_wrong_mode_and_foreign_urls(env):
+    from app.main import app
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://queue.test") as client:
+        for payload in ({"source_url":"123"}, {"mode":"details", "source_url":"https://example.invalid/123"}):
+            assert (await client.post("/api/v1/search/bathroom-check/start", json=payload)).status_code == 422
+    assert (await queue.bathroom_check_status())["job_id"] is None

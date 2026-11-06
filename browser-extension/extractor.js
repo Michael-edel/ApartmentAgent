@@ -2,6 +2,7 @@
   window.ApartmentAgentExtract = () => {
   const clean = value => String(value ?? '').replace(/\s+/g, ' ').trim();
   const number = value => {
+    if (value && typeof value === 'object') value = value.value ?? value.amount;
     if (typeof value === 'number' && value > 0) return value;
     const parsed = Number(clean(value).replace(/[^\d.,]/g, '').replace(',', '.'));
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
@@ -164,18 +165,124 @@
     return digits.length >= 6 ? Number(digits) : null;
   };
   const meta = name => document.querySelector(`meta[property="${name}"], meta[name="${name}"]`)?.content || '';
-  const roots = [];
+  const rawRoots = [];
   document.querySelectorAll('script[type="application/ld+json"], script#__NEXT_DATA__, script[type="application/json"]').forEach(node => {
     try {
       const value = JSON.parse(node.textContent || '');
-      if (value) roots.push(value);
+      if (value) rawRoots.push(value);
     } catch (_) {}
   });
+  // Read only JSON literals from recognised assignments. Never execute page code.
+  const assignment = /(?:^|[;\n])\s*(?:(?:var|let|const)\s+(?:data|advert|__INITIAL_STATE__)|window\.(?:data|advert|__INITIAL_STATE__))\s*=\s*([\[{])/g;
+  const codePosition = (source, position) => {
+    let mode = 'code', escaped = false, characterClass = false, previous = '', depth = 0;
+    for (let index = 0; index < position; index++) {
+      const char = source[index], next = source[index + 1];
+      if (mode === 'line') { if (char === '\n') mode = 'code'; continue; }
+      if (mode === 'block') { if (char === '*' && next === '/') { mode = 'code'; index++; } continue; }
+      if (mode !== 'code') {
+        if (escaped) { escaped = false; continue; }
+        if (char === '\\') { escaped = true; continue; }
+        if (mode === 'regex') {
+          if (char === '[') characterClass = true;
+          else if (char === ']') characterClass = false;
+          else if (char === '/' && !characterClass) mode = 'code';
+        } else if (char === mode) mode = 'code';
+        continue;
+      }
+      if (char === '/' && next === '/') { mode = 'line'; index++; continue; }
+      if (char === '/' && next === '*') { mode = 'block'; index++; continue; }
+      if (['"', "'", '`'].includes(char)) { mode = char; continue; }
+      if (char === '/' && (!previous || /[=([{,:;!&|?~%^<>]/.test(previous))) { mode = 'regex'; continue; }
+      if ('({['.includes(char)) depth++;
+      else if (')}]'.includes(char)) depth--;
+      if (!/\s/.test(char)) previous = char;
+    }
+    return mode === 'code' && depth === 0;
+  };
+  for (const script of document.querySelectorAll('script:not([src])')) {
+    const source = String(script.textContent || '');
+    assignment.lastIndex = 0;
+    for (let match; (match = assignment.exec(source));) {
+      const position = match.index + match[0].search(/(?:var|let|const|window)\b/);
+      if (!codePosition(source,position)) continue;
+      const start = assignment.lastIndex - 1;
+      const stack = [];
+      let quoted = false, escaped = false;
+      for (let index = start; index < source.length; index++) {
+        const char = source[index];
+        if (quoted) {
+          if (escaped) escaped = false;
+          else if (char === '\\') escaped = true;
+          else if (char === '"') quoted = false;
+          continue;
+        }
+        if (char === '"') { quoted = true; continue; }
+        if (char === '{' || char === '[') stack.push(char);
+        else if (char === '}' || char === ']') {
+          if (stack.pop() !== (char === '}' ? '{' : '[')) break;
+          if (!stack.length) {
+            try { rawRoots.push(JSON.parse(source.slice(start,index + 1))); } catch (_) {}
+            assignment.lastIndex = index + 1;
+            break;
+          }
+        }
+      }
+    }
+  }
+  const adIdFromUrl = value => {
+    if (typeof value !== 'string') return null;
+    try {
+      const url = new URL(value, location.href);
+      return url.protocol === 'https:' && ['krisha.kz','www.krisha.kz'].includes(url.hostname)
+        && !url.port && !url.username && !url.password ? url.pathname.match(/^\/a\/show\/(\d+)\/?$/)?.[1] || null : null;
+    } catch (_) { return null; }
+  };
+  const targetId = adIdFromUrl(location.href);
+  const excludedBranch = key => /^(?:recommendations?|recommended(?:Adverts?|Listings?|Offers?)?|other(?:Adverts?|Listings?|Offers?)|similar(?:Adverts?|Listings?|Offers?)?|related(?:Adverts?|Listings?|Offers?)?|suggestions?)$/i.test(key);
+  const entityTypes = item => (Array.isArray(item['@type']) ? item['@type'] : [item['@type']]).map(value => String(value || ''));
+  const nonListingType = item => entityTypes(item).some(type => /^(?:Person|Organization|RealEstateAgent|PostalAddress|GeoCoordinates|Offer|AggregateOffer)$/i.test(type));
+  const listingShape = item => !nonListingType(item) && (['price','price_kzt','offers','area','area_m2','areaM2','floorSize','rooms','numberOfRooms','additionalProperty','properties','property_details','mainEntity']
+    .some(key => key in item) || entityTypes(item).some(type => /^(?:Apartment|Residence|House|Product|RealEstateListing)$/i.test(type)));
+  const identities = item => {
+    if (nonListingType(item)) return [];
+    const result = [];
+    for (const key of ['advertId','advert_id','listingId','listing_id']) if (/^\d+$/.test(String(item[key] ?? ''))) result.push(String(item[key]));
+    for (const key of ['url','@id','source_url','canonicalUrl']) {
+      const id = adIdFromUrl(item[key]);
+      if (id) result.push(id);
+    }
+    if (listingShape(item) && /^\d+$/.test(String(item.id ?? ''))) result.push(String(item.id));
+    return [...new Set(result)];
+  };
+  const candidates = [];
+  const selectCandidate = value => {
+    if (Array.isArray(value)) { for (const child of value) selectCandidate(child); return; }
+    if (!value || typeof value !== 'object') return;
+    const ids = identities(value);
+    if (ids.length && (ids.length !== 1 || ids[0] !== targetId)) return;
+    if (targetId && ids[0] === targetId && listingShape(value)) candidates.push(value);
+    for (const [key,child] of Object.entries(value)) if (!excludedBranch(key)) selectCandidate(child);
+  };
+  for (const root of rawRoots) selectCandidate(root);
+  const prune = (value, isRoot = false) => {
+    if (Array.isArray(value)) return value.map(child => prune(child)).filter(child => child !== undefined);
+    if (!value || typeof value !== 'object') return value;
+    const ids = identities(value);
+    if (!isRoot && ids.length && (ids.length !== 1 || ids[0] !== targetId)) return undefined;
+    return Object.fromEntries(Object.entries(value).filter(([key]) => !excludedBranch(key))
+      .map(([key,child]) => [key,prune(child)]).filter(([,child]) => child !== undefined));
+  };
+  const roots = [...new Set(candidates)].map(value => prune(value,true));
+  window.ApartmentAgentImportState = {matched_json_id:roots.length ? targetId : null};
   function* walk(value) {
     if (Array.isArray(value)) for (const child of value) yield* walk(child);
     else if (value && typeof value === 'object') {
+      if (entityTypes(value).some(type => /^(?:Person|Organization|RealEstateAgent)$/i.test(type))) return;
       yield value;
-      for (const child of Object.values(value)) yield* walk(child);
+      for (const [key,child] of Object.entries(value)) {
+        if (!/^(?:seller|owner|advertiser|author|publisher|agent|contact|provider)$/i.test(key)) yield* walk(child);
+      }
     }
   }
   const findValue = (keys, parser = number) => {
@@ -201,6 +308,40 @@
     return [...new Set(parts)].join(', ') || null;
   };
   const findText = keys => findValue(keys, textValue);
+  const jsonListingObjects = roots.flatMap(root => [...walk(root)].filter(item => listingShape(item)));
+  const jsonDetailValues = {};
+  const addJsonDetail = (rawLabel, rawValue) => {
+    const label = semanticLabels[rawLabel] || labels[labelKey(rawLabel)] || clean(rawLabel);
+    if (!label || label.length > 100 || /Автор|Реклама|Похожие|телефон|Политика|Подписаться/i.test(label)) return;
+    if (rawValue && typeof rawValue === 'object') rawValue = rawValue.value ?? rawValue.text ?? rawValue.label;
+    if (!['string','number','boolean'].includes(typeof rawValue)) return;
+    const value = clean(typeof rawValue === 'boolean' ? rawValue ? 'Да' : 'Нет' : rawValue);
+    if (value && !(label in jsonDetailValues) && Object.keys(jsonDetailValues).length < 60) jsonDetailValues[label] = value.slice(0,1500);
+  };
+  for (const item of jsonListingObjects) {
+    for (const container of ['additionalProperty','properties','property_details','characteristics','parameters']) {
+      const values = item[container];
+      if (Array.isArray(values)) for (const value of values) {
+        if (value && typeof value === 'object') addJsonDetail(value.name ?? value.label ?? value.title ?? value.propertyID, value.value ?? value.text);
+      }
+      else if (values && typeof values === 'object') for (const [key,value] of Object.entries(values)) addJsonDetail(key,value);
+    }
+    for (const [key,value] of Object.entries(item)) if (semanticLabels[key]) addJsonDetail(key,value);
+  }
+  for (const [key,value] of Object.entries(jsonDetailValues)) if (!(key in propertyDetails) && Object.keys(propertyDetails).length < 60) propertyDetails[key] = value;
+  const jsonDescription = jsonListingObjects.map(item => typeof item.description === 'string' ? prose(item.description) : '')
+    .filter(value => value.length >= 10).sort((a,b) => b.length-a.length)[0]?.slice(0,20000) || null;
+  const jsonTitle = jsonListingObjects.map(item => typeof (item.title ?? item.headline ?? item.name) === 'string' ? clean(item.title ?? item.headline ?? item.name) : '').find(Boolean) || null;
+  const jsonSeller = jsonListingObjects.map(item => item.seller ?? item.owner ?? item.advertiser ?? item.author).find(value => value && typeof value === 'object');
+  const jsonSellerName = validSellerName(jsonSeller?.name) || findValue(['sellerName','seller_name','ownerName','owner_name','advertiserName','advertiser_name'],validSellerName);
+  const jsonSellerType = sellerTypeText(jsonSeller?.sellerType ?? jsonSeller?.type ?? jsonSeller?.role);
+  const jsonRichEvidence = !!(roots.length && jsonDescription
+    && (Object.keys(jsonDetailValues).length >= 2 || (jsonSellerName && findText(['repairCondition','repair_condition','renovation']))));
+  const jsonComparison = {
+    krisha_district_price_per_m2:findValue(['krisha_district_price_per_m2'],value => Number.isSafeInteger(Number(value)) && Number(value) > 0 && Number(value) <= 1000000000 ? Number(value) : null),
+    krisha_city_price_per_m2:findValue(['krisha_city_price_per_m2'],value => Number.isSafeInteger(Number(value)) && Number(value) > 0 && Number(value) <= 1000000000 ? Number(value) : null),
+    krisha_comparison_district:findText(['krisha_comparison_district'])?.slice(0,150) || null,
+  };
   const districtFromText = (value, allowBare = false) => {
     const text = clean(value);
     const names = [
@@ -220,10 +361,10 @@
     }
     return null;
   };
-  const sellerName = () => domSellerName || findValue(['sellerName', 'ownerName', 'advertiserName'], value =>
-    typeof value === 'string' ? validSellerName(value) : null);
-  const sellerType = () => domSellerType || findValue(['sellerType', 'ownerType', 'advertiserType'], value =>
-    typeof value === 'string' && clean(value) ? clean(value).slice(0, 100) : null);
+  const sellerName = () => domSellerName || findValue(['sellerName', 'seller_name', 'ownerName', 'owner_name', 'advertiserName', 'advertiser_name'], value =>
+    typeof value === 'string' ? validSellerName(value) : null) || jsonSellerName;
+  const sellerType = () => domSellerType || findValue(['sellerType', 'seller_type', 'ownerType', 'owner_type', 'advertiserType', 'advertiser_type'], value =>
+    typeof value === 'string' && clean(value) ? clean(value).slice(0, 100) : null) || jsonSellerType;
   const mortgageValue = value => {
     if (typeof value === 'boolean') return value;
     if (typeof value !== 'string') return null;
@@ -241,7 +382,7 @@
   const mortgageSupported = () => {
     const structured = mortgageValue(propertyDetails['Ипотека']) ?? findValue(['mortgageSupported', 'mortgage_supported', 'isMortgageAvailable'], mortgageValue);
     const fieldText = listingNodes('[data-testid="mortgage"], [data-testid="mortgage-status"], [data-property="mortgage"]').map(propertyText).join(' ');
-    const descriptionText = domDescription || '';
+    const descriptionText = domDescription || jsonDescription || '';
     const values = [structured, mortgageTextValue(fieldText), mortgageTextValue(descriptionText), domDescription ? null : mortgageTextValue(meta('og:description') || meta('description'))];
     if (values.includes(false)) return false;
     return values.includes(true) ? true : null;
@@ -298,15 +439,19 @@
   for (const notice of document.querySelectorAll('[data-apartment-agent-extension-message], [data-apartment-agent-message]')) {
     pageText = pageText.replace(notice.innerText || notice.textContent || '', '');
   }
-  const headline = listingNodes('h1').map(propertyText).find(Boolean) || meta('og:title') || document.title || '';
+  const domHeadline = listingNodes('h1').map(propertyText).find(Boolean) || '';
+  const headline = domHeadline || jsonTitle || meta('og:title') || document.title || '';
   const fullText = clean(`${headline} ${pageText}`);
-  const areaMatch = fullText.match(/(\d{2,3}(?:[.,]\d+)?)\s*(?:м²|м2|кв\.?\s*м)/i);
-  const roomsMatch = fullText.match(/(\d+)\s*[-–]?\s*комн(?:ат(?:н(?:ая|ую|ой))?|\.)/i);
-  const floorMatch = fullText.match(/(\d{1,2})\s*(?:из|\/)\s*(\d{1,2})\s*(?:этаж|эт\.)|(?:этаж|эт\.)\s*[:—-]?\s*(\d{1,2})\s*(?:из|\/)\s*(\d{1,2})/i);
+  // Once structured data is present, missing values must not be borrowed from
+  // arbitrary page text (for example, the "similar apartments" list).
+  const fallbackText = rawRoots.length ? domHeadline : fullText;
+  const areaMatch = fallbackText.match(/(\d{2,3}(?:[.,]\d+)?)\s*(?:м²|м2|кв\.?\s*м)/i);
+  const roomsMatch = fallbackText.match(/(\d+)\s*[-–]?\s*комн(?:ат(?:н(?:ая|ую|ой))?|\.)/i);
+  const floorMatch = fallbackText.match(/(\d{1,2})\s*(?:из|\/)\s*(\d{1,2})\s*(?:этаж|эт\.)|(?:этаж|эт\.)\s*[:—-]?\s*(\d{1,2})\s*(?:из|\/)\s*(\d{1,2})/i);
   const propertyFloor = clean(propertyDetails['Этаж']).match(/^(\d{1,2})(?:\s*(?:из|\/)\s*(\d{1,2}))?/i);
-  const yearMatch = fullText.match(/(?:год\s+постройки|построен\w*)\D{0,12}(19\d{2}|20\d{2})/i);
-  const headlineArea = headline.match(/(\d{2,3}(?:[.,]\d+)?)\s*(?:м²|м2)/i);
-  const headlineRooms = headline.match(/(\d+)\s*[-–]?\s*комнат/i);
+  const yearMatch = fallbackText.match(/(?:год\s+постройки|построен\w*)\D{0,12}(19\d{2}|20\d{2})/i);
+  const headlineArea = domHeadline.match(/(\d{2,3}(?:[.,]\d+)?)\s*(?:м²|м2)/i);
+  const headlineRooms = domHeadline.match(/(\d+)\s*[-–]?\s*комнат/i);
   const area = leadingNumber(propertyDetails['Площадь']) || (headlineArea ? number(headlineArea[1]) : null) || findValue(['area', 'area_m2', 'areaM2', 'square', 'floorSize', 'totalArea']) || (areaMatch ? number(areaMatch[1]) : null);
   const positiveInteger = value => Number.isInteger(value) && value > 0 ? value : null;
   const rooms = positiveInteger(leadingNumber(propertyDetails['Количество комнат']) || (headlineRooms ? Number(headlineRooms[1]) : null) || findValue(['rooms', 'roomCount', 'numberOfRooms', 'roomsCount']) || (roomsMatch ? Number(roomsMatch[1]) : null));
@@ -349,54 +494,64 @@
     ?? findValue(['bathroomsCount', 'bathrooms_count', 'numberOfBathroomsTotal', 'numberOfBathrooms'], bathroomInfo) ?? null;
   const bathroomsCount = bathroomData?.count ?? null;
   let floor = positiveInteger((propertyFloor ? Number(propertyFloor[1]) : null) || findValue(['floor', 'floorNumber']) || (floorMatch ? Number(floorMatch[1] || floorMatch[3]) : null));
-  let floorsTotal = positiveInteger((propertyFloor?.[2] ? Number(propertyFloor[2]) : null) || leadingNumber(propertyDetails['Этажей в доме']) || findValue(['floors', 'floorsTotal', 'floorCount', 'numberOfFloors']) || (floorMatch ? Number(floorMatch[2] || floorMatch[4]) : null));
+  let floorsTotal = positiveInteger((propertyFloor?.[2] ? Number(propertyFloor[2]) : null) || leadingNumber(propertyDetails['Этажей в доме']) || findValue(['floors', 'floorsTotal', 'floors_total', 'floorCount', 'numberOfFloors']) || (floorMatch ? Number(floorMatch[2] || floorMatch[4]) : null));
   if (floor && floorsTotal && floor > floorsTotal) { floor = null; floorsTotal = null; }
-  const rawYear = leadingNumber(propertyDetails['Год постройки']) || findValue(['year', 'buildYear', 'buildingYear', 'yearBuilt']) || (yearMatch ? Number(yearMatch[1]) : null);
+  const rawYear = leadingNumber(propertyDetails['Год постройки']) || findValue(['year', 'buildYear', 'buildingYear', 'building_year', 'yearBuilt']) || (yearMatch ? Number(yearMatch[1]) : null);
   const buildingYear = Number.isInteger(rawYear) && rawYear >= 1900 && rawYear <= 2100 ? rawYear : null;
   const domPrice = listingNodes('.offer__price, [data-testid="price"], [itemprop="price"]').map(node => parsePrice(node.getAttribute?.('content') || propertyText(node))).find(Boolean);
-  const price = domPrice || findValue(['price', 'price_kzt', 'priceKzt'], parsePrice) || parsePrice(fullText, false);
+  const price = domPrice || findValue(['price', 'price_kzt', 'priceKzt'], parsePrice) || parsePrice(fallbackText, false);
   const photos = listingNodes('.offer__photos img, .offer__gallery img, .gallery img, .gallery__main img, img.gallery__main-image, [data-testid="gallery"] img, [data-testid="advert-gallery"] img, [data-testid="offer-gallery"] img, [data-name="photos"] img, .offer__photos a[href], .offer__gallery a[href]')
     .map(image => image.tagName === 'A' && !/\.(?:jpe?g|png|webp|avif|gif)(?:[?#]|$)/i.test(image.href || '') ? null
       : image.dataset?.full || image.dataset?.src || image.getAttribute?.('data-full') || image.currentSrc || image.src || image.href);
   photos.push(meta('og:image'), meta('twitter:image'));
-  const imageKeys = new Set(['image', 'images', 'photo', 'photos', 'photoUrls', 'imageUrls', 'gallery', 'pictures']);
-  for (const root of roots) for (const item of walk(root)) {
-    const source = String(item.url || item['@id'] || '').split(/[?#]/)[0].replace(/\/$/,'');
-    if (source !== location.href.split(/[?#]/)[0].replace(/\/$/,'')) continue;
+  const jsonPhotos = [];
+  const imageKeys = new Set(['image', 'images', 'photo', 'photos', 'photoUrls', 'photo_urls', 'imageUrls', 'gallery', 'pictures']);
+  for (const item of jsonListingObjects) {
     for (const [key,value] of Object.entries(item)) {
       if (!imageKeys.has(key)) continue;
-      for (const candidate of (Array.isArray(value) ? value : [value])) photos.push(typeof candidate === 'string' ? candidate : candidate?.url || candidate?.src);
+      for (const candidate of (Array.isArray(value) ? value : [value])) jsonPhotos.push(typeof candidate === 'string' ? candidate : candidate?.url || candidate?.src);
     }
   }
+  photos.push(...jsonPhotos);
+  window.ApartmentAgentImportState.has_json_photos = jsonPhotos.some(value => /^(?:https?:)?\/\//i.test(clean(value)));
   const photoUrls = [...new Set(photos.map(clean).map(value => value.startsWith('//') ? `https:${value}` : value))]
     .filter(value => /^https?:\/\//i.test(value)).slice(0, 30);
-  const buildingText = (propertyDetails['Тип дома'] || findText(['buildingType', 'houseType', 'wallMaterial']) || '').toLowerCase();
-  const description = domDescription || clean(meta('og:description') || meta('description')).slice(0,20000) || null;
+  const buildingText = (propertyDetails['Тип дома'] || findText(['buildingType', 'building_type', 'houseType', 'wallMaterial']) || '').toLowerCase();
+  const description = domDescription || jsonDescription || clean(meta('og:description') || meta('description')).slice(0,20000) || null;
   const cityText = clean(propertyDetails['Город'] || findText(['city', 'addressLocality']));
   const city = cityText ? cityText.split(',')[0].replace(/^Город\s+/i,'').replace(/\s+(?:р\s*-\s*н|район)\s+.*$/i,'').trim().slice(0,100) : 'Астана';
   const address = validPropertyAddress(propertyDetails['Адрес']) || listingNodes('[itemprop="streetAddress"], [data-testid*="address" i], [class*="address" i]').map(propertyText).find(value => value.length <= 180 && validPropertyAddress(value))
-    || addressFromText(headline) || findValue(['streetAddress', 'formattedAddress', 'fullAddress', 'addressLine', 'displayAddress', 'address'], value => validPropertyAddress(textValue(value))) || addressFromText(fullText);
+    || addressFromText(domHeadline) || findValue(['streetAddress', 'formattedAddress', 'fullAddress', 'addressLine', 'displayAddress', 'address'], value => validPropertyAddress(textValue(value?.streetAddress ?? value))) || addressFromText(fallbackText);
   const complex = propertyDetails['Жилой комплекс'] || findText(['complexName', 'residentialComplex', 'housingComplex', 'residentialComplexName']) || (headline.match(/ЖК\s*[«"]?([^»".,;]{2,100})/i)?.[1]?.trim() || null);
   const coordinates = pageCoordinates();
-  const dataLatitude = findValue(['latitude', 'lat', 'geoLatitude', 'geoLat'], value => coordinate(value, -90, 90));
-  const dataLongitude = findValue(['longitude', 'lng', 'lon', 'geoLongitude', 'geoLon'], value => coordinate(value, -180, 180));
-  const locationCoordinates = isAstanaCoordinates(dataLatitude, dataLongitude)
-    ? {latitude: dataLatitude, longitude: dataLongitude}
-    : coordinates;
+  // Both coordinates must come from the same advertised location, never from
+  // two JSON snapshots or the author's office/profile.
+  let jsonCoordinates = null;
+  for (const item of jsonListingObjects.flatMap(value => [value,value.geo,value.coordinates,value.location?.geo])) {
+    if (!item || typeof item !== 'object') continue;
+    const latitudeKey = ['latitude','lat','geoLatitude','geoLat'].find(key => key in item);
+    const longitudeKey = ['longitude','lng','lon','geoLongitude','geoLon'].find(key => key in item);
+    if (!latitudeKey || !longitudeKey) continue;
+    const latitude = coordinate(item[latitudeKey],-90,90), longitude = coordinate(item[longitudeKey],-180,180);
+    if (isAstanaCoordinates(latitude,longitude)) { jsonCoordinates = {latitude,longitude}; break; }
+  }
+  const locationCoordinates = coordinates || jsonCoordinates;
+  const domComparison = krishaComparison();
+  const comparison = Object.fromEntries(Object.keys(jsonComparison).map(key => [key,domComparison[key] ?? jsonComparison[key]]));
   const payload = {
     source: 'browser-extension',
-    ...krishaComparison(),
+    ...comparison,
     ...complexDescription(),
     source_url: location.href.split('#')[0],
     title: clean(headline || `${rooms || 2}-комнатная квартира`).slice(0,300),
     description,
     repair_condition: (propertyDetails['Состояние квартиры'] || findText(['repairCondition', 'repair_condition', 'renovation']))?.slice(0,500) || null,
     property_details: propertyDetails,
-    details_extracted: !!(price && area && rooms && hasDomEvidence),
+    details_extracted: !!(price && area && rooms && (hasDomEvidence || jsonRichEvidence)),
     city,
     district: districtFromText(propertyDetails['Город']) || districtFromText(propertyDetails['Район'], true) || districtFromText(findText(['district', 'districtName', 'areaName']), true)
       || districtFromText(findText(['regionName', 'addressRegion']))
-      || districtFromText(fullText),
+      || districtFromText(fallbackText),
     residential_complex: complex?.slice(0,200) || null,
     address: address?.slice(0,500) || null,
     latitude: locationCoordinates?.latitude ?? null,

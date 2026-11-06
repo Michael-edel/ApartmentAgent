@@ -10,6 +10,7 @@ from pydantic import HttpUrl
 
 from app.schemas import ListingCreate, plain_detail_text
 from app.mortgage import mortgage_from_html, mortgage_value, parse_mortgage_text
+from app.krisha_search import normalize_krisha_import_url
 
 
 class _FieldNode:
@@ -318,20 +319,248 @@ def _extract_meta(html: str, property_name: str) -> str | None:
     return None
 
 
+def _top_level_script_position(text: str, position: int) -> bool:
+    quote = comment = None
+    depth, escaped, index = 0, False, 0
+    while index < position:
+        char, pair = text[index], text[index:index + 2]
+        if comment == "line":
+            if char in "\r\n": comment = None
+        elif comment == "block":
+            if pair == "*/": comment = None; index += 1
+        elif quote:
+            if escaped: escaped = False
+            elif char == "\\": escaped = True
+            elif char == quote: quote = None
+        elif pair == "//": comment = "line"; index += 1
+        elif pair == "/*": comment = "block"; index += 1
+        elif char in "\"'`": quote = char
+        elif char in "{[(": depth += 1
+        elif char in "}])": depth = max(depth - 1, 0)
+        index += 1
+    return quote is None and comment is None and depth == 0
+
+
 def _json_scripts(html: str) -> list[Any]:
-    values: list[Any] = []
-    patterns = [
-        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
-        r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
-        r'<script[^>]+type=["\']application/json["\'][^>]*>(.*?)</script>',
-    ]
-    for pattern in patterns:
-        for raw in re.findall(pattern, html, flags=re.IGNORECASE | re.DOTALL):
-            try:
-                values.append(json.loads(unescape(raw).strip()))
-            except (json.JSONDecodeError, TypeError):
+    """Read data literals only. Executable JavaScript is never evaluated."""
+    values, decoder = [], json.JSONDecoder()
+    assignments = re.compile(
+        r"(?<![\w.$])(?:window\s*\.\s*(?:data|advert|__INITIAL_STATE__)|(?:var|let|const)\s+data)\s*=\s*",
+        re.I,
+    )
+    for attrs, raw in re.findall(r"<script\b([^>]*)>(.*?)</script\s*>", html, re.I | re.S):
+        candidates = []
+        if re.search(r'''(?:type\s*=\s*["']application/(?:ld\+)?json["']|id\s*=\s*["']__NEXT_DATA__["'])''', attrs, re.I):
+            candidates.append(raw.strip())
+        for match in assignments.finditer(raw):
+            if not _top_level_script_position(raw, match.start()):
                 continue
+            literal = raw[match.end():].lstrip()
+            if literal.startswith(("{", "[")):
+                try:
+                    value, _ = decoder.raw_decode(literal)
+                    values.append(value)
+                except (ValueError, TypeError, RecursionError):
+                    pass
+        for candidate in candidates:
+            try:
+                values.append(json.loads(candidate))
+            except (ValueError, TypeError, RecursionError):
+                try:
+                    values.append(json.loads(unescape(candidate)))
+                except (ValueError, TypeError, RecursionError):
+                    pass
     return values
+
+
+def _listing_number(value: Any) -> str | None:
+    if isinstance(value, bool):
+        return None
+    text = str(value or "").strip()
+    if re.fullmatch(r"[1-9]\d{0,14}", text):
+        return text
+    normalized = normalize_krisha_import_url(text)
+    if normalized:
+        return normalized.rsplit("/", 1)[-1]
+    return None
+
+
+_OTHER_ADVERT_BRANCH = re.compile(r"^(?:recommendations?|similar|related|suggested|otherAdverts|recommendedAdverts)", re.I)
+
+
+def _object_listing_number(item: dict[str, Any]) -> str | None:
+    identities = set()
+    for key in ("advertId", "advert_id", "listingId", "listing_id", "source_url", "canonicalUrl", "url", "@id"):
+        if (number := _listing_number(item.get(key))) is not None:
+            identities.add(number)
+    kind = str(item.get("@type") or "").lower()
+    advert_keys = {"price", "pricekzt", "price_kzt", "offers", "area", "area_m2", "floorsize", "rooms", "numberofrooms", "additionalproperty", "property_details"}
+    if kind not in {"person", "organization", "realestateagent", "offer", "quantitativevalue", "propertyvalue"} and advert_keys.intersection(key.lower() for key in item):
+        if (number := _listing_number(item.get("id"))) is not None:
+            identities.add(number)
+    return next(iter(identities)) if len(identities) == 1 else "!conflict" if identities else None
+
+
+def _scoped_json(data: list[Any], source_url: str) -> list[dict[str, Any]]:
+    """Return only objects belonging to this advert, excluding recommendation data."""
+    target = _listing_number(source_url)
+    if target is None:
+        return []
+    selected = []
+
+    def prune(value, depth=0):
+        if depth > 64:
+            return None
+        if isinstance(value, list):
+            return [clean for child in value if (clean := prune(child, depth + 1)) is not None]
+        if isinstance(value, dict):
+            identity = _object_listing_number(value)
+            if identity is not None and identity != target:
+                return None
+            return {key: clean for key, child in value.items()
+                    if not _OTHER_ADVERT_BRANCH.match(key) and (clean := prune(child, depth + 1)) is not None}
+        return value
+
+    def visit(value, depth=0):
+        if depth > 64:
+            return
+        if isinstance(value, list):
+            for child in value:
+                visit(child, depth + 1)
+        elif isinstance(value, dict):
+            identity = _object_listing_number(value)
+            if identity == target:
+                selected.append(prune(value))
+                return
+            if identity is None:
+                for key, child in value.items():
+                    if not _OTHER_ADVERT_BRANCH.match(key):
+                        visit(child, depth + 1)
+
+    for root in data:
+        visit(root)
+    return selected
+
+
+_JSON_PROPERTY_LABELS = {
+    "flat.toilet": "Санузел", "bathrooms": "Санузел", "bathroomsCount": "Санузел",
+    "flat.renovation": "Состояние квартиры", "flat.condition": "Состояние квартиры", "repairCondition": "Состояние квартиры",
+    "flat.area": "Площадь", "flat.rooms": "Количество комнат", "flat.building": "Тип дома",
+    "house.type": "Тип дома", "flat.year": "Год постройки", "house.year": "Год постройки",
+    "flat.floor": "Этаж", "flat.kitchen": "Площадь кухни", "flat.ceiling": "Высота потолков",
+    "flat.mortgage": "Ипотека", "flat.address": "Адрес", "flat.balcony": "Балкон",
+}
+
+
+def _json_property_details(item: dict[str, Any]) -> dict[str, str]:
+    result = {}
+    for key in ("property_details", "properties", "additionalProperty", "attributes", "parameters"):
+        values = item.get(key)
+        if isinstance(values, dict):
+            pairs = values.items()
+        elif isinstance(values, list):
+            pairs = ((value.get("name") or value.get("label") or value.get("title") or value.get("propertyID") or value.get("code"), value.get("value"))
+                     for value in values if isinstance(value, dict))
+        else:
+            continue
+        for label, value in pairs:
+            if isinstance(value, dict):
+                value = value.get("value") or value.get("name") or value.get("label")
+            if not isinstance(label, str) or isinstance(value, (dict, list)) or value is None:
+                continue
+            label = plain_detail_text(_JSON_PROPERTY_LABELS.get(label, label)).rstrip(": ")
+            value = plain_detail_text(str(value))
+            if label and value and len(label) <= 100 and len(value) <= 1500 and len(result) < 60:
+                result[label] = value
+    return result
+
+
+def _normalized_json(data: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, str], bool]:
+    """Flatten documented field shapes; nested seller/recommendation facts cannot leak."""
+    normalized, details, rich = [], {}, False
+    for item in data:
+        # A selected WebPage can identify its apartment through mainEntity.
+        # Inherit the already checked page identity only across this explicit
+        # relation; never recursively flatten arbitrary nested objects.
+        entity = item.get("mainEntity")
+        if isinstance(entity, dict):
+            kinds = entity.get("@type")
+            kinds = kinds if isinstance(kinds, list) else [kinds]
+            allowed = {"apartment", "house", "residence", "singlefamilyresidence", "accommodation", "product", "realestatelisting"}
+            if any(str(kind).casefold() in allowed for kind in kinds):
+                item = {**item, **entity}
+        row = {}
+        def first(*keys):
+            return next((item[key] for key in keys if item.get(key) is not None), None)
+        def scalar(value):
+            if isinstance(value, dict):
+                return value.get("value") if value.get("value") is not None else value.get("amount")
+            return value
+        aliases = {
+            "price": ("price", "priceKzt", "price_kzt"), "area": ("area", "areaM2", "area_m2", "square", "floorSize", "totalArea"),
+            "rooms": ("rooms", "roomCount", "numberOfRooms", "roomsCount"), "floor": ("floor", "floorNumber"),
+            "floorsTotal": ("floors", "floorsTotal", "floorCount", "numberOfFloors"),
+            "yearBuilt": ("year", "buildYear", "buildingYear", "yearBuilt"),
+            "mortgageSupported": ("mortgageSupported", "mortgage_supported", "isMortgageAvailable"),
+            "bathroomsCount": ("bathroomsCount", "bathrooms_count", "numberOfBathroomsTotal", "numberOfBathrooms"),
+            "repairCondition": ("repairCondition", "repair_condition", "renovation"), "buildingType": ("buildingType", "houseType", "wallMaterial"),
+            "districtName": ("district", "districtName", "areaName", "addressRegion"),
+            "complexName": ("complexName", "residentialComplex", "housingComplex", "residentialComplexName"),
+            "sellerName": ("sellerName", "ownerName", "advertiserName"), "sellerType": ("sellerType", "ownerType", "advertiserType"),
+            "description": ("description", "descriptionText"), "title": ("title", "name", "headline"),
+        }
+        for target, keys in aliases.items():
+            value = scalar(first(*keys))
+            if value is not None and not isinstance(value, (dict, list)):
+                row[target] = value
+        offers = item.get("offers")
+        if not row.get("price") and isinstance(offers, dict):
+            if str(offers.get("priceCurrency") or "KZT").upper() == "KZT":
+                row["price"] = scalar(offers.get("price"))
+        if str(first("priceCurrency", "currency") or "KZT").upper() not in {"KZT", "₸", "ТГ"}:
+            row.pop("price", None)
+        address = first("address", "streetAddress", "formattedAddress", "fullAddress", "addressLine", "displayAddress")
+        if (location := _valid_property_address(_text_value(address))):
+            row["address"] = location
+        city = first("city", "addressLocality")
+        if isinstance(city, dict):
+            city = city.get("name")
+        if not city and isinstance(address, dict):
+            city = address.get("addressLocality")
+        if isinstance(city, str):
+            row["city"] = city
+        if isinstance(address, dict) and not row.get("districtName"):
+            row["districtName"] = address.get("addressRegion")
+        geo = item.get("geo") if isinstance(item.get("geo"), dict) else item
+        for target, keys in (("latitude", ("latitude", "lat", "geoLatitude", "geoLat")), ("longitude", ("longitude", "lng", "lon", "geoLongitude", "geoLon"))):
+            row[target] = next((geo[key] for key in keys if geo.get(key) is not None), None)
+        seller = first("seller", "author", "owner")
+        if isinstance(seller, dict):
+            if not row.get("sellerName") and isinstance(seller.get("name"), str):
+                row["sellerName"] = seller["name"]
+            if not row.get("sellerType"):
+                row["sellerType"] = seller.get("sellerType") or seller.get("role")
+        for key in ("image", "images", "photo", "photos", "photoUrls", "imageUrls", "gallery", "pictures"):
+            if key in item:
+                row[key] = item[key]
+        for key in ("krisha_district_price_per_m2", "krisha_city_price_per_m2", "krisha_comparison_district"):
+            if key in item:
+                row[key] = item[key]
+        properties = _json_property_details(item)
+        for key, value in properties.items():
+            details.setdefault(key, value)
+        for label, field in (("Площадь", "area"), ("Общая площадь", "area"), ("Количество комнат", "rooms"),
+                             ("Год постройки", "yearBuilt"), ("Состояние квартиры", "repairCondition")):
+            if not row.get(field) and properties.get(label):
+                row[field] = properties[label]
+        description = row.get("description")
+        has_description = isinstance(description, str) and len(description.strip()) >= 30
+        has_photos = any(row.get(key) for key in ("image", "images", "photos", "photoUrls", "gallery"))
+        rich = rich or (len(properties) >= 3 and (has_description or bool(row.get("sellerName")))) or (
+            has_description and has_photos and bool(row.get("sellerName"))
+            and bool(row.get("repairCondition")) and row.get("bathroomsCount") is not None)
+        normalized.append(row)
+    return normalized, details, rich
 
 
 def _walk(value: Any):
@@ -345,6 +574,8 @@ def _walk(value: Any):
 
 
 def _number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     if isinstance(value, (int, float)) and value > 0:
         return float(value)
     if isinstance(value, str):
@@ -535,6 +766,28 @@ def _coordinates_from_html(html: str) -> tuple[float | None, float | None]:
     return latitude, longitude
 
 
+def _visible_coordinate_pair(parser: _BathroomFieldHTMLParser) -> tuple[float | None, float | None]:
+    for node in parser.visible_nodes():
+        current, unrelated = node, False
+        while current is not None:
+            markers = (current.attrs.get("class") or "").split()
+            if current.tag == "aside" or any(re.match(r"^(?:recommend|similar|related|ad-banner)", marker, re.I) for marker in markers):
+                unrelated = True
+                break
+            current = current.parent
+        if unrelated:
+            continue
+        for key in ("href", "src"):
+            pair = _coordinates_from_html(str(node.attrs.get(key) or ""))
+            if _is_astana_coordinate_pair(*pair):
+                return pair
+        latitude = _coordinate(node.attrs.get("data-latitude") or node.attrs.get("data-lat"))
+        longitude = _coordinate(node.attrs.get("data-longitude") or node.attrs.get("data-lng"))
+        if _is_astana_coordinate_pair(latitude, longitude):
+            return latitude, longitude
+    return None, None
+
+
 def _find_image_urls(data: list[Any]) -> list[str]:
     image_keys = {
         "image",
@@ -577,6 +830,7 @@ def _embedded_number(html: str, keys: set[str], minimum: float, maximum: float) 
 
 
 async def import_krisha_listing(source_url: str) -> ListingCreate:
+    source_url = normalize_krisha_import_url(source_url) or ""
     parsed = urlparse(source_url)
     host = (parsed.hostname or "").lower()
     if parsed.scheme not in {"http", "https"} or not _is_krisha_host(host):
@@ -609,23 +863,38 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
         )
     if response.status_code != 200:
         raise ListingImportError(f"Источник вернул HTTP {response.status_code}")
+    final_source = normalize_krisha_import_url(str(response.url))
+    if final_source is None or _listing_number(final_source) != _listing_number(source_url):
+        raise ListingImportError("Источник перенаправил запрос с выбранного объявления. Проверьте открытую страницу в браузере")
 
     html = response.text
-    lowered_html = html.lower()
-    if "captcha" in lowered_html or "проверка безопасности" in lowered_html:
+    detail_parser, visible_details = _public_details(html)
+    page_title = re.search(r"<title\b[^>]*>(.*?)</title\s*>", html, re.I | re.S)
+    headings = [node.text() for node in detail_parser.visible_nodes() if node.tag == "h1"]
+    titles = headings + ([unescape(page_title.group(1))] if page_title else [])
+    verification = r"проверка\s+(?:безопасности|браузера)|подтвердите.{0,30}(?:человек|робот)|checking\s+your\s+browser|are\s+you\s+(?:a\s+)?robot|(?:^|\W)(?:captcha|recaptcha)(?:$|\W)|^(?:403|429|468)(?:\s*$|\s+(?:Forbidden|Too Many Requests))|HTTP(?:\s+Error)?\s*[:—-]?\s*(?:403|429|468)"
+    if any(re.search(verification, value, re.I) for value in titles):
         raise ListingImportError("Источник запросил проверку безопасности. Введите данные вручную")
 
-    title = _extract_meta(html, "og:title") or _extract_meta(html, "twitter:title")
+    raw_data = _json_scripts(html)
+    scoped_data = _scoped_json(raw_data, source_url)
+    data, json_details, rich_json = _normalized_json(scoped_data)
+    property_details = {}
+    aliases = {"ремонт": "Состояние квартиры", "в ипотеку": "Ипотека", "общая площадь": "Площадь", "санузлы": "Санузел"}
+    for label, value in [*json_details.items(), *visible_details.items()]:
+        property_details[aliases.get(label.casefold(), label)] = value
+    title = (headings[0] if headings else None) or _extract_meta(html, "og:title") or _extract_meta(html, "twitter:title") or _find_text(data, {"title"})
     description = _extract_meta(html, "og:description") or _extract_meta(html, "description") or ""
     meta_images = [
         value
         for name in ("og:image", "twitter:image")
         if (value := _extract_meta(html, name))
     ]
-    data = _json_scripts(html)
-    detail_parser, property_details = _public_details(html)
-    description = _advert_description(detail_parser) or description
+    description = _advert_description(detail_parser) or _find_text(data, {"description"}) or description
     bathrooms_count, bathrooms_lower_bound = _bathrooms_fields(html, data)
+    explicit_bathroom = _property_value(property_details, "Санузел", "Санузлы")
+    if explicit_bathroom is not None:
+        bathrooms_count, bathrooms_lower_bound = _bathroom_field_value(explicit_bathroom)
 
     price = _find_numeric(data, {"price", "price_kzt", "amount", "value"}, 500_000, 2_000_000_000)
     area = _find_numeric(data, {"area", "area_m2", "square", "squaremeter", "floorSize", "totalArea"}, 10, 1000)
@@ -634,22 +903,18 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
     total_floors = _find_numeric(data, {"floors", "floorsTotal", "floorCount", "numberOfFloors"}, 1, 200)
     year = _find_numeric(data, {"year", "buildYear", "buildingYear", "yearBuilt"}, 1900, 2100)
 
-    price = price or _embedded_number(html, {"price", "priceKzt", "amount"}, 500_000, 2_000_000_000)
-    area = area or _embedded_number(html, {"area", "areaM2", "square", "totalArea"}, 10, 1000)
-    rooms = rooms or _embedded_number(html, {"rooms", "roomCount", "numberOfRooms"}, 1, 20)
-    floor = floor or _embedded_number(html, {"floor", "floorNumber"}, 1, 200)
-    total_floors = total_floors or _embedded_number(html, {"floorsTotal", "floorCount"}, 1, 200)
-    year = year or _embedded_number(html, {"buildYear", "buildingYear", "yearBuilt"}, 1900, 2100)
-
-    plain_text = unescape(re.sub(r"<[^>]+>", " ", html[:800_000]))
+    # Raw script scraping can read another advert's numbers. Only visible prose
+    # and an explicitly matched JSON object may supply fallbacks.
+    plain_text = "" if raw_data else detail_parser.root.text()
     plain_text = re.sub(r"\s+", " ", plain_text)
     combined = " ".join(filter(None, [title, description, plain_text]))
+    core_text = (title or "") if raw_data else combined
 
-    price_match = _PRICE_RE.search(combined)
-    area_match = _AREA_RE.search(combined)
-    rooms_match = _ROOMS_RE.search(combined)
-    floor_match = _FLOOR_RE.search(combined)
-    year_match = _YEAR_RE.search(combined)
+    price_match = _PRICE_RE.search(core_text)
+    area_match = _AREA_RE.search(core_text)
+    rooms_match = _ROOMS_RE.search(core_text)
+    floor_match = _FLOOR_RE.search(core_text)
+    year_match = _YEAR_RE.search(core_text)
 
     price = int(price or (_clean_number(price_match.group("price")) if price_match else 0)) or None
     area = float(area or (area_match.group("area").replace(",", ".") if area_match else 0)) or None
@@ -657,12 +922,37 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
     floor = int(floor or (floor_match.group("floor") if floor_match else 0)) or None
     total_floors = int(total_floors or (floor_match.group("total") if floor_match else 0)) or None
     year = int(year or (year_match.group("year") if year_match else 0)) or None
+    headline = headings[0] if headings else ""
+    if match := _AREA_RE.search(headline):
+        area = float(match.group("area").replace(",", "."))
+    if match := _ROOMS_RE.search(headline):
+        rooms = int(match.group("rooms"))
+    if match := re.search(r"(\d{1,3})\s*(?:из|/)\s*(\d{1,3})\s*(?:этаж|эт\.)", headline, re.I):
+        floor, total_floors = int(match.group(1)), int(match.group(2))
+    visible_price = _number(_property_value(visible_details, "Цена", "Стоимость"))
+    if visible_price is not None and 500_000 <= visible_price <= 2_000_000_000:
+        price = int(visible_price)
+    for node in detail_parser.visible_nodes():
+        if ("offer__price" in (node.attrs.get("class") or "").split()
+                or node.attrs.get("data-testid") == "price" or node.attrs.get("itemprop") == "price"):
+            visible_price = _number(node.attrs.get("content") or node.text())
+            if visible_price is not None and 500_000 <= visible_price <= 2_000_000_000:
+                price = int(visible_price)
+                break
+    visible_area = _property_value(visible_details, "Площадь", "Общая площадь")
+    if visible_area and (match := re.match(r"^(\d+(?:[.,]\d+)?)", visible_area)):
+        area = float(match.group(1).replace(",", "."))
+    visible_rooms = _property_value(visible_details, "Количество комнат", "Комнат")
+    if visible_rooms and (match := re.match(r"^(\d+)", visible_rooms)):
+        rooms = int(match.group(1))
     visible_floor = _property_value(property_details, "Этаж")
     if visible_floor and (match := re.fullmatch(r"(\d{1,3})\s*(?:из|/)\s*(\d{1,3})(?:\s*этаж)?", visible_floor, re.I)):
         floor, total_floors = int(match.group(1)), int(match.group(2))
     visible_year = _property_value(property_details, "Год постройки")
     if visible_year and re.fullmatch(r"(?:19|20)\d{2}", visible_year):
         year = int(visible_year)
+    if floor and total_floors and floor > total_floors:
+        floor = total_floors = None
 
     if not price or not area or not rooms:
         missing = []
@@ -675,7 +965,7 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
         raise ListingImportError("Не удалось определить " + ", ".join(missing) + ". Заполните форму вручную")
 
     building_type = None
-    explicit_building_type = _property_value(property_details, "Тип дома", "Материал стен")
+    explicit_building_type = _property_value(property_details, "Тип дома", "Материал стен") or _find_text(data, {"buildingType"})
     lowered = (explicit_building_type or combined).lower()
     if "кирпич" in lowered:
         building_type = "brick"
@@ -689,7 +979,7 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
     visible_city = _property_value(property_details, "Город")
     if visible_city:
         visible_city = re.sub(r"\s*показать на карте.*$", "", visible_city, flags=re.I).strip()
-    city = re.split(r",", visible_city)[0].strip() if visible_city else "Астана"
+    city = re.split(r",", visible_city)[0].strip() if visible_city else (_find_text(data, {"city"}) or "Астана")
     district = _property_value(property_details, "Район") or (_find_district([], visible_city) if visible_city else None) or _find_district(data, combined)
     residential_complex = _find_text(
         data,
@@ -700,16 +990,17 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
         complex_match = re.search(r"ЖК\s*[«\"]?([^»\".,;]{2,100})", combined, re.IGNORECASE)
         residential_complex = complex_match.group(1).strip() if complex_match else None
     address = _valid_property_address(_property_value(property_details, "Адрес")) or _find_address(data) or _address_from_text(combined)
-    latitude = _find_coordinate(data, {"latitude", "lat", "geoLatitude", "geoLat"}, -90, 90)
-    longitude = _find_coordinate(data, {"longitude", "lng", "lon", "geoLongitude", "geoLon"}, -180, 180)
-    html_latitude, html_longitude = _coordinates_from_html(html)
-    latitude = latitude or _find_html_coordinate(html, {"latitude", "geoLatitude", "geoLat"}, -90, 90)
-    longitude = longitude or _find_html_coordinate(html, {"longitude", "geoLongitude", "geoLon"}, -180, 180)
-    latitude = latitude or html_latitude
-    longitude = longitude or html_longitude
+    # Coordinates form an indivisible observation. Never combine one coordinate
+    # from one JSON object with another object or a later DOM observation.
+    latitude, longitude = _visible_coordinate_pair(detail_parser)
     if not _is_astana_coordinate_pair(latitude, longitude):
-        latitude = None
-        longitude = None
+        latitude = longitude = None
+        for row in data:
+            pair = (_find_coordinate([row], {"latitude"}, -90, 90),
+                    _find_coordinate([row], {"longitude"}, -180, 180))
+            if _is_astana_coordinate_pair(*pair):
+                latitude, longitude = pair
+                break
     photo_urls = meta_images + _find_image_urls(data)
     photo_urls = list(dict.fromkeys(photo_urls))[:30]
     normalized_source_url = urlunparse(
@@ -717,6 +1008,11 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
     )
     seller_name, seller_type = _seller_fields(detail_parser, data)
     comparison_fields = _krisha_comparison_fields(detail_parser)
+    for key in ("krisha_district_price_per_m2", "krisha_city_price_per_m2"):
+        if comparison_fields[key] is None:
+            value = _find_numeric(data, {key}, 1, 1_000_000_000)
+            comparison_fields[key] = int(value) if value is not None else None
+    comparison_fields["krisha_comparison_district"] = comparison_fields["krisha_comparison_district"] or _find_text(data, {"krisha_comparison_district"})
 
     return ListingCreate(
         source="krisha-import",
@@ -734,9 +1030,9 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
         rooms=rooms,
         bathrooms_count=bathrooms_count,
         bathrooms_count_is_lower_bound=bathrooms_lower_bound,
-        repair_condition=_property_value(property_details, "Состояние квартиры", "Ремонт"),
+        repair_condition=_property_value(property_details, "Состояние квартиры", "Ремонт") or _find_text(data, {"repairCondition"}),
         property_details=property_details,
-        details_extracted=bool(property_details or _advert_description(detail_parser)),
+        details_extracted=bool(visible_details or _advert_description(detail_parser) or rich_json),
         floor=floor,
         floors_total=total_floors,
         building_year=year,

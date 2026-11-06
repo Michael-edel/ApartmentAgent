@@ -86,7 +86,7 @@ async def test_server_full_import_uses_explicit_public_details_and_advert_descri
     html = '''
     <meta property="og:title" content="4-комнатная квартира, Астана">
     <meta property="og:description" content="Короткая мета-строка">
-    <script type="application/ld+json">{"price":38000000,"area":96,"rooms":4,"floor":1,
+    <script type="application/ld+json">{"id":123,"price":38000000,"area":96,"rooms":4,"floor":1,
       "floorsTotal":5,"yearBuilt":1990,"mortgageSupported":true,"districtName":"Старый район"}</script>
     <dl><dt>Город</dt><dd>Астана, Алматы р-н</dd><dt>Адрес</dt><dd>Кудайбердыулы 36/3</dd>
     <dt>Этаж</dt><dd>3 из 9</dd><dt>Год постройки</dt><dd>2011</dd>

@@ -147,7 +147,9 @@ function renderBathroomCheck(state) {
     if (Number.isFinite(criteria.min_area_m2) && Number.isFinite(criteria.max_area_m2)) parts.push(`${number.format(criteria.min_area_m2)}–${number.format(criteria.max_area_m2)} м²`);
     if (Number.isSafeInteger(criteria.max_price_kzt) && criteria.max_price_kzt > 0) parts.push(`до ${money.format(criteria.max_price_kzt)}`);
     bathroomCheckCriteria.hidden = !state.job_id || parts.length === 0;
-    bathroomCheckCriteria.textContent = state.job_id && parts.length ? `Проверяются квартиры: ${parts.join(', ')}. Критерии сохранены при запуске проверки.` : '';
+    bathroomCheckCriteria.textContent = criteria.manual_import
+      ? 'Импорт выбранного объявления по номеру. Поисковые фильтры не ограничивают его сохранение.'
+      : state.job_id && parts.length ? `Проверяются квартиры: ${parts.join(', ')}. Критерии сохранены при запуске проверки.` : '';
   }
   if (bathroomCheckCounts) bathroomCheckCounts.textContent = total
     ? detailsMode
@@ -704,14 +706,31 @@ runChecksButton?.addEventListener('click', async () => {
 
 importForm?.addEventListener('submit', async event => {
   event.preventDefault();
-  if (importMessage) importMessage.textContent = 'Загружаю объявление и определяю параметры…';
-  const button = importForm.querySelector('button[type="submit"]');
-  button.disabled = true;
+  const browserImport = event.submitter?.id !== 'serverImportButton';
+  if (browserImport && bathroomCheckBusy) return;
+  if (browserImport) { bathroomCheckRevision += 1; bathroomCheckBusy = true; }
+  if (importMessage) importMessage.textContent = browserImport ? 'Ставлю объявление в очередь импорта…' : 'Загружаю объявление и определяю параметры…';
+  const buttons = [...importForm.querySelectorAll('button[type="submit"]')];
+  buttons.forEach(button => { button.disabled = true; });
   const data = new FormData(importForm);
   try {
-    const response = await fetch('/api/v1/listings/import', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({source_url:data.get('source_url')})});
+    const response = await fetch(browserImport ? `${bathroomCheckApi}/start` : '/api/v1/listings/import', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({source_url:String(data.get('source_url') || '').trim(), ...(browserImport ? {mode:'details'} : {})})
+    });
     const body = await readJson(response);
-    if (!response.ok) throw new Error(body.detail || 'Не удалось импортировать объявление');
+    if (!response.ok) {
+      const detail = typeof body.detail === 'string' ? body.detail
+        : Array.isArray(body.detail) ? body.detail.map(item => item.msg || 'Некорректный номер или ссылка').join('; ') : '';
+      throw new Error(detail || 'Не удалось импортировать объявление');
+    }
+    if (browserImport) {
+      updateBathroomCheck(body);
+      window.postMessage({type:'apartment-agent-bathroom-queue'}, location.origin);
+      if (importMessage) importMessage.textContent = 'Объявление поставлено в очередь. Карточка появится после подтверждения сохранения расширением; прогресс — в блоке «Автопроверка объявлений».';
+      importForm.reset();
+      return;
+    }
     if (importMessage) importMessage.textContent = `Готово: ${money.format(body.price_kzt)}, ${number.format(body.area_m2)} м², рейтинг ${body.assessment.score}/100.`;
     importForm.reset();
     if (filter) filter.value = '0';
@@ -719,7 +738,13 @@ importForm?.addEventListener('submit', async event => {
     await loadSearchResults();
   } catch (error) {
     if (importMessage) importMessage.textContent = error.message;
-  } finally { button.disabled = false; }
+  } finally {
+    buttons.forEach(button => { button.disabled = false; });
+    if (browserImport) {
+      bathroomCheckBusy = false;
+      if (bathroomCheckState) renderBathroomCheck(bathroomCheckState);
+    }
+  }
 });
 
 form?.addEventListener('submit', async event => {

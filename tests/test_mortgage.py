@@ -47,7 +47,7 @@ def test_refusal_lowers_both_scores_without_hiding_listing():
 
 @pytest.mark.asyncio
 async def test_server_import_reads_description_refusal(monkeypatch):
-    html = '<meta property="og:description" content="Ипотека жоқ"><script type="application/ld+json">{"price":25000000,"area":60,"rooms":2}</script>'
+    html = '<meta property="og:description" content="Ипотека жоқ"><script type="application/ld+json">{"id":123,"price":25000000,"area":60,"rooms":2}</script>'
     class Client:
         def __init__(self, **kwargs): pass
         async def __aenter__(self): return self
