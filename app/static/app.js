@@ -370,20 +370,19 @@ async function loadSearchResults() {
     ]);
     if (!response.ok) throw new Error('Не удалось загрузить найденные ссылки');
     if (!statusResponse.ok) throw new Error('Не удалось получить параметры поиска');
-    const items = await readJson(response);
+    const results = await readJson(response);
     const status = await readJson(statusResponse);
-    let unconfirmed = [];
-    if (status.min_bathrooms === 2) {
-      const unconfirmedResponse = await fetch('/api/v1/search/results?limit=200&only_new=false&include_unconfirmed=true');
-      if (!unconfirmedResponse.ok) throw new Error('Не удалось загрузить объявления с неподтверждёнными санузлами');
-      unconfirmed = (await readJson(unconfirmedResponse)).map(item => ({...item, bathroomsUnconfirmed:true}));
-    }
-    const allItems = [...items, ...unconfirmed];
-    if (!allItems.length) {
-      searchResults.innerHTML = '<section class="empty card"><strong>Новых ссылок пока нет</strong><p>Новые объявления появятся после следующей публикации на Krisha.</p></section>';
+    const strictBathrooms = status.min_bathrooms === 2;
+    const items = strictBathrooms
+      ? results.filter(item => Number.isInteger(item.analysis?.bathrooms_count) && item.analysis.bathrooms_count >= 2)
+      : results;
+    if (!items.length) {
+      searchResults.innerHTML = strictBathrooms
+        ? '<section class="empty card"><strong>Квартир с подтверждёнными двумя санузлами пока нет</strong><p>При отборе «От 2 санузлов» объявления без подтверждённого количества скрыты. Подходящие квартиры появятся после получения данных объявления.</p></section>'
+        : '<section class="empty card"><strong>Новых ссылок пока нет</strong><p>Новые объявления появятся после следующей публикации на Krisha.</p></section>';
       return;
     }
-    searchResults.innerHTML = allItems.map((item, index) => {
+    searchResults.innerHTML = items.map(item => {
       const sourceUrl = safeExternalUrl(item.url);
       const a = item.analysis || {};
       const facts = [
@@ -400,11 +399,8 @@ async function loadSearchResults() {
       const importStatus = item.import_status || 'pending';
       const imported = importStatus === 'imported' || isSaved;
       const importLabel = imported ? 'Сохранено в карточку' : importStatus === 'queued' ? 'Мониторинг запущен' : importStatus === 'blocked' ? 'Источник ограничил импорт' : importStatus === 'error' ? 'Импорт не удался — повторить' : 'Сохранить объявление';
-      const seenLabel = item.bathroomsUnconfirmed ? 'Санузлы: требуется проверить' : item.status === 'seen' ? 'Просмотрено' : priorityLabel(item.priority);
-      const unconfirmedTotal = Number(status.bathrooms_unconfirmed_results) || 0;
-      const truncated = unconfirmedTotal > unconfirmed.length ? ` Показаны первые ${unconfirmed.length} из ${unconfirmedTotal}.` : '';
-      const sectionTitle = item.bathroomsUnconfirmed && index === items.length ? `<div class="unconfirmed-heading"><b>Санузлы не подтверждены</b><p>Эти объявления подходят по известным данным. Проверьте число санузлов и цену в объявлении.${escapeHtml(truncated)}</p></div>` : '';
-      return `${sectionTitle}<article class="listing card ${item.bathroomsUnconfirmed ? 'priority-normal' : priorityClass(item.priority)} ${item.status === 'seen' ? 'result-seen' : ''}">
+      const seenLabel = item.status === 'seen' ? 'Просмотрено' : priorityLabel(item.priority);
+      return `<article class="listing card ${priorityClass(item.priority)} ${item.status === 'seen' ? 'result-seen' : ''}">
         <div class="listing-top">
           <div><span class="verdict">${escapeHtml(seenLabel)}</span><h3>${escapeHtml(cleanSearchTitle(item.title))}</h3></div>
           <div class="rating ${a.score < 85 ? 'medium' : ''}">${a.score ?? '—'}</div>
@@ -478,7 +474,7 @@ async function loadSearchStatus() {
     document.querySelector('#importedCount').textContent = status.imported_results || 0;
     const providers = (status.providers || []).join(', ') || 'нет';
     const lastRun = status.last_run ? dateTime.format(new Date(status.last_run)) : 'ещё не выполнялся';
-    if (searchMeta) searchMeta.textContent = `Источники: ${providers}. Запросов за запуск: ${status.queries_per_run}. Последний поиск: ${lastRun}.${status.min_bathrooms === 2 ? ` Требуют проверки санузлов: ${Number(status.bathrooms_unconfirmed_results) || 0}.` : ''}`;
+    if (searchMeta) searchMeta.textContent = `Источники: ${providers}. Запросов за запуск: ${status.queries_per_run}. Последний поиск: ${lastRun}.${status.min_bathrooms === 2 ? ` Скрыто объявлений без данных о санузлах: ${Number(status.bathrooms_unconfirmed_results) || 0}.` : ''}`;
     const telegram = await fetch('/api/v1/notifications/status').then(readJson);
     const telegramNode = document.querySelector('#telegramStatus');
     if (telegramNode) telegramNode.textContent = telegram.configured ? `Telegram: подключён · отправлено ${telegram.sent_notifications || 0}` : 'Telegram: добавьте TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID для уведомлений';
