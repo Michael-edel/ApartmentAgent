@@ -149,7 +149,8 @@ function renderBathroomCheck(state) {
     bathroomCheckProgress.max = Math.max(total, 1);
     bathroomCheckProgress.value = Math.min(checked, total);
   }
-  if (bathroomCheckMessage) bathroomCheckMessage.textContent = `${labels[state.status] || 'Состояние проверки неизвестно'}.${state.message ? ` ${state.message}` : ''}`;
+  const phase = running && checked === 0 && !state.current_url ? 'Ожидается подключение расширения' : labels[state.status];
+  if (bathroomCheckMessage) bathroomCheckMessage.textContent = `${phase || 'Состояние проверки неизвестно'}.${state.message ? ` ${state.message}` : ''}`;
   if (bathroomCheckCurrent) {
     const currentUrl = safeExternalUrl(state.current_url);
     bathroomCheckCurrent.hidden = !currentUrl;

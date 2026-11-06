@@ -21,9 +21,18 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
       onAlarm:{addListener:handler => {env.handlers.alarm = handler;}},
     },
     tabs:{
-      async get(id) {if (!env.tabs.has(id)) throw new Error('No tab'); return clone(env.tabs.get(id));},
-      async query() {return [...env.tabs.values()].map(clone);},
-      async create(value) {const tab = {id:env.nextTab++,...value}; if (env.pendingCreate) {tab.pendingUrl = tab.url; tab.url = 'about:blank';} env.tabs.set(tab.id,tab); env.created.push(clone(tab)); return clone(tab);},
+      async get(id) {
+        if (!env.tabs.has(id)) throw new Error('No tab');
+        const tab = env.tabs.get(id);
+        if (env.now < (env.addressReadyAt || 0)) {
+          if (env.permissionReadError) throw new Error('Missing permission to read tab URL');
+          return {id,...(env.temporaryBlank ? {url:'about:blank'} : {})};
+        }
+        if (env.placeholderAddress && ['', 'about:blank'].includes(tab.url || '')) tab.url = env.placeholderAddress;
+        return clone(tab);
+      },
+      async query(info) {assert.equal(info.url, 'chrome-extension://fixture/queue-tab.html', 'only query our own placeholder URL'); return [...env.tabs.values()].filter(tab => (tab.pendingUrl || tab.url || '').split('#')[0] === info.url).map(clone);},
+      async create(value) {const tab = {id:env.nextTab++,...value}; if (env.pendingCreate) {tab.pendingUrl = tab.url; tab.url = 'about:blank';} if (env.addressReadyAt) {env.placeholderAddress = value.url; tab.url = env.temporaryBlank ? 'about:blank' : ''; delete tab.pendingUrl;} env.tabs.set(tab.id,tab); env.created.push(clone(tab)); return clone(tab);},
       async update(id, value) {const tab = env.tabs.get(id); if (!tab) throw new Error('No tab'); Object.assign(tab,value); delete tab.pendingUrl; return clone(tab);},
       async remove(id) {env.tabs.delete(id); env.removed.push(id); env.handlers.removed?.(id);},
       async reload(id) {env.reloaded.push(id);},
@@ -53,7 +62,7 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   };
   env.worker = () => {
     env.handlers = {};
-    const context = {chrome,fetch,crypto:{randomUUID:() => 'persistent-worker'},URL,Date:{now:() => env.now}};
+    const context = {chrome,fetch,crypto:{randomUUID:() => 'persistent-worker'},URL,Date:{now:() => env.now},setTimeout(callback,delay) {env.now += delay; callback();}};
     vm.runInNewContext(source, context);
     return context.ApartmentAgentBathroomQueue;
   };
@@ -81,6 +90,30 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   assert.match(pendingCreation.created[0].pendingUrl, /^chrome-extension:/);
   assert.equal(pendingCreation.outcomes.length, 0, 'pending placeholder is owned, not a redirect');
   assert.equal(pendingCreation.tabs.get(pendingCreation.state().task.tab_id).url, 'https://krisha.kz/a/show/100');
+
+  for (const mode of ['missing URL', 'temporary about:blank', 'permission read error']) {
+    const transient = environment();
+    transient.addressReadyAt = transient.now + 750;
+    transient.temporaryBlank = mode === 'temporary about:blank';
+    transient.permissionReadError = mode === 'permission read error';
+    const transientWorker = transient.worker();
+    await transientWorker.start();
+    assert.equal(transient.created.length, 1, mode);
+    assert.equal(transient.outcomes.length, 0, `${mode}: wait for the owned placeholder address`);
+    assert.equal(transient.tabs.get(transient.state().task.tab_id).url, 'https://krisha.kz/a/show/100', mode);
+  }
+  for (const permissionReadError of [false,true]) {
+    const noAddress = environment();
+    noAddress.addressReadyAt = Infinity;
+    noAddress.permissionReadError = permissionReadError;
+    const noAddressWorker = noAddress.worker();
+    await noAddressWorker.start();
+    assert.equal(noAddress.now, 105000, 'wait no longer than five seconds for placeholder URL access');
+    assert.deepEqual(noAddress.outcomes, ['blocked']);
+    assert.equal(noAddress.status, 'paused');
+    assert.match(noAddress.requests.find(item => item.path === '/complete').body.error, /Нет доступа к адресу служебной вкладки/);
+    assert.equal(noAddress.tabs.size, 1, 'keep the placeholder for diagnostics');
+  }
 
   // A worker restart recovers the same lease and existing tab.
   worker = env.worker();

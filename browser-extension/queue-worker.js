@@ -51,12 +51,36 @@
     await chrome.alarms.create(WAKE, {when:state.next_wake});
   };
   const getTab = async id => {
-    try { return await chrome.tabs.get(id); } catch (_) { return null; }
+    try { return await chrome.tabs.get(id); } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/no tab with id|^no tab$|no tab found|invalid tab id|tab.*not found/i.test(message)) return null;
+      // Permission/transient read failures are unknown addresses, not proof
+      // that the user closed or navigated the extension-owned tab.
+      return {id};
+    }
   };
   const placeholder = () => `${chrome.runtime.getURL('queue-tab.html')}#${encodeURIComponent(state.worker_id)}`;
   // Chrome can report the previous URL while a new navigation is pending.
   const effectiveURL = tab => tab?.pendingUrl || tab?.url || '';
   const ownedUnchanged = (tab, task) => !!tab && (canonical(effectiveURL(tab)) === task.url || effectiveURL(tab) === placeholder());
+  const waitForTabAddress = async (task, tab) => {
+    if (!task.placeholder_wait_until) {
+      task.placeholder_wait_until = Date.now() + 5000;
+      await save();
+    }
+    while (tab && ['', 'about:blank'].includes(effectiveURL(tab)) && Date.now() < task.placeholder_wait_until) {
+      await new Promise(resolve => setTimeout(resolve, 250));
+      tab = await getTab(task.tab_id);
+    }
+    return tab;
+  };
+  const addressFailure = tab => {
+    const address = effectiveURL(tab);
+    if (!address || address === 'about:blank') return 'Нет доступа к адресу служебной вкладки. Обновите расширение и разрешения для вкладок.';
+    let origin = '';
+    try { const url = new URL(address); origin = `${url.protocol}//${url.host}`; } catch (_) {}
+    return `Адрес вкладки изменился${origin ? ` (${origin})` : ''}. Проверьте страницу вручную.`;
+  };
   const closeOwned = async task => {
     if (!task?.tab_id) return;
     const tab = await getTab(task.tab_id);
@@ -104,16 +128,19 @@
     if (!task.tab_id) {
       // Recover only our extension placeholder after a worker crash between
       // creation and storage. Never claim an existing user-owned Krisha tab.
-      tab = (await chrome.tabs.query({})).find(candidate => effectiveURL(candidate) === placeholder());
+      // Only inspect our placeholder page, never enumerate user browsing URLs.
+      tab = (await chrome.tabs.query({url:chrome.runtime.getURL('queue-tab.html')})).find(candidate => effectiveURL(candidate) === placeholder());
       if (!tab) tab = await chrome.tabs.create({url:placeholder(), active:false});
       task.tab_id = tab.id;
+      task.placeholder_wait_until = Date.now() + 5000;
       await save();
     }
+    tab = await waitForTabAddress(task, tab);
     if (!tab) { await complete('blocked', 'Вкладка проверки была закрыта. Продолжение требует пользователя.'); return; }
-    if (!ownedUnchanged(tab, task)) { await complete('blocked', 'Адрес вкладки изменился. Проверьте страницу вручную.'); return; }
+    if (!ownedUnchanged(tab, task)) { await complete('blocked', addressFailure(tab)); return; }
     if (effectiveURL(tab) === placeholder()) {
-      const latest = await getTab(tab.id);
-      if (!ownedUnchanged(latest, task)) { await complete('blocked', 'Адрес вкладки изменился перед открытием объявления'); return; }
+      const latest = await waitForTabAddress(task, await getTab(tab.id));
+      if (!ownedUnchanged(latest, task)) { await complete('blocked', addressFailure(latest)); return; }
       if (effectiveURL(latest) === placeholder()) await chrome.tabs.update(tab.id, {url:task.url, active:false});
     }
     await schedule(Math.max(0, task.started_at + TIMEOUT - Date.now()));
