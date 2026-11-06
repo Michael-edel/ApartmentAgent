@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai_service import analyze_listing
@@ -12,6 +12,7 @@ from app.database import SessionLocal
 from app.models import Listing, PriceSnapshot, SearchResult
 from app.krisha_search import normalize_krisha_listing_url
 from app.schemas import ListingCreate
+from app.repair import parse_repair_description
 from app.scoring import assess_listing
 from app.telegram import notify_listing
 from app.twogis import lookup_twogis
@@ -41,6 +42,48 @@ def _values(payload: ListingCreate) -> dict[str, object]:
     raw_url = str(payload.source_url)
     values["source_url"] = normalize_krisha_listing_url(raw_url) or raw_url
     return values
+
+
+_REPAIR_FIELDS = ("repair_condition", "repair_source_kind", "repair_evidence")
+
+
+def _repair_snapshot(condition, source_kind, description, details, source):
+    def explicit(value):
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        if (not value or value.casefold() in {"-", "—", "не указано", "не важно", "неизвестно", "нет данных", "n/a"}
+                or value.replace(".", "", 1).isdigit()):
+            return None
+        return value[:500]
+    condition = explicit(condition)
+    if condition and source_kind != "description":
+        return condition, "manual" if source == "manual" or source_kind == "manual" else "field", None
+    details = details if isinstance(details, dict) else {}
+    for label in ("Состояние квартиры", "Ремонт"):
+        value = explicit(details.get(label))
+        if value:
+            return value, "manual" if source == "manual" else "field", None
+    found = parse_repair_description(description or "")
+    return (found[0], "description", found[1]) if found else (None, None, None)
+
+
+async def backfill_repair_descriptions() -> int:
+    """Re-read only locally stored descriptions; never contact a source site."""
+    changed = 0
+    async with SessionLocal() as session:
+        rows = (await session.scalars(select(Listing).where(or_(
+            Listing.repair_condition.is_(None), Listing.repair_source_kind == "description"
+        )))).all()
+        for row in rows:
+            snapshot = _repair_snapshot(row.repair_condition, row.repair_source_kind,
+                                        row.description, row.property_details, row.source)
+            if snapshot != tuple(getattr(row, key) for key in _REPAIR_FIELDS):
+                for key, value in zip(_REPAIR_FIELDS, snapshot):
+                    setattr(row, key, value)
+                changed += 1
+        await session.commit()
+    return changed
 
 
 async def _find_listing(session: AsyncSession, source_url: str) -> Listing | None:
@@ -178,6 +221,9 @@ async def persist_listing(
 ) -> PersistedListing:
     now = datetime.now(UTC)
     payload, twogis_checked, replace_twogis = await _enrich_twogis(payload, now=now)
+    repair = _repair_snapshot(payload.repair_condition, payload.repair_source_kind,
+                              payload.description, payload.property_details, payload.source)
+    payload = payload.model_copy(update=dict(zip(_REPAIR_FIELDS, repair)))
     values = _values(payload)
     if payload.details_extracted:
         values["details_imported_at"] = now
@@ -207,7 +253,16 @@ async def persist_listing(
             if not allow_existing:
                 raise ListingAlreadyExists("Listing with this URL already exists")
             old_price = row.price_kzt
-            protect_full_details = row.details_imported_at is not None and not payload.details_extracted and payload.source != "manual"
+            protect_full_details = (row.details_imported_at is not None or row.repair_source_kind == "description") and not payload.details_extracted and payload.source != "manual"
+            if repair[0] is not None:
+                trusted_existing = bool(row.repair_condition and row.repair_source_kind != "description")
+                if repair[1] != "description" or not (trusted_existing or protect_full_details):
+                    for key, value in zip(_REPAIR_FIELDS, repair):
+                        setattr(row, key, value)
+            elif (row.repair_source_kind == "description" and payload.description is not None
+                  and (payload.details_extracted or payload.source == "manual")):
+                for key in _REPAIR_FIELDS:
+                    setattr(row, key, None)
             complex_changed = bool(payload.residential_complex) and (
                 (payload.residential_complex or '').strip().casefold()
                 != (row.residential_complex or '').strip().casefold()
@@ -234,6 +289,8 @@ async def persist_listing(
                 row.twogis_review_count = payload.twogis_review_count
                 row.twogis_url = payload.twogis_url
             for key, value in values.items():
+                if key in _REPAIR_FIELDS:
+                    continue
                 if key.startswith('complex_description'):
                     continue
                 if key == "krisha_comparison_district" and not has_krisha_comparison:

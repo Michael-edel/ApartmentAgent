@@ -35,6 +35,8 @@ class ListingCreate(BaseModel):
     title: str = Field(min_length=3, max_length=300)
     description: str | None = Field(default=None, max_length=20_000)
     repair_condition: str | None = Field(default=None, max_length=500)
+    repair_source_kind: Literal["field", "description", "manual"] | None = None
+    repair_evidence: str | None = Field(default=None, max_length=500)
     property_details: dict[str, str] = Field(default_factory=dict, max_length=60)
     details_extracted: bool = Field(default=False, exclude=True)
     city: str = "Астана"
@@ -101,6 +103,8 @@ class ListingCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_floor(self) -> "ListingCreate":
+        if self.repair_source_kind == "description" and (not self.repair_condition or not self.repair_evidence):
+            raise ValueError("Для ремонта из описания нужны значение и цитата")
         if self.complex_description is not None:
             self.complex_description = self.complex_description.strip() or None
         if self.complex_description:

@@ -18,7 +18,7 @@ function fixture() {
     caches: {
       async open() {return {async put(request, response) {stored.push(request.url); cache.set(request.url, response);}, async addAll() {}};},
       async match(request) {const found = cache.get(typeof request === 'string' ? request : request.url); return found?.clone();},
-      async keys() {return ['apartment-agent-v1','another-app-cache','apartment-agent-v46','apartment-agent-v47'];},
+      async keys() {return ['apartment-agent-v1','another-app-cache','apartment-agent-v46','apartment-agent-v47','apartment-agent-v48'];},
       async delete(key) {removed.push(key);},
     },
     async fetch(request, options) {
@@ -59,6 +59,6 @@ function fixture() {
   const waits=[];
   env.handlers.activate({waitUntil(promise) {waits.push(promise);}});
   await Promise.all(waits);
-  assert.deepEqual(env.removed,['apartment-agent-v1','apartment-agent-v46']);
+  assert.deepEqual(env.removed,['apartment-agent-v1','apartment-agent-v46','apartment-agent-v47']);
   console.log('Panel service worker checks passed');
 })().catch(error => {console.error(error); process.exitCode=1;});

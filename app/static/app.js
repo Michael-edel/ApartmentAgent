@@ -284,6 +284,15 @@ function bathroomBadge(item, search = false) {
   return `<span class="bathroom-badge${confirmed ? ' bathrooms-confirmed' : ''}">${confirmed ? '✓ ' : ''}${escapeHtml(text)}</span>`;
 }
 
+function repairDetails(item) {
+  const known = typeof item.repair_condition === 'string' && item.repair_condition.trim();
+  const kind = known ? item.repair_source_kind : null;
+  const source = kind === 'description' ? 'По описанию автора' : kind === 'field' ? 'Поле объявления' : kind === 'manual' ? 'Ручной ввод' : '';
+  const evidence = known && kind === 'description' && typeof item.repair_evidence === 'string'
+    ? item.repair_evidence : '';
+  return `<div class="repair-condition"><b>Состояние / ремонт:</b> ${known ? escapeHtml(item.repair_condition) : 'Не указано'}${source ? `<small class="repair-source">${source}</small>` : ''}${evidence.trim() ? `<details class="repair-evidence" data-details-key="repair-evidence"><summary>Цитата из описания</summary><blockquote>${escapeHtml(evidence)}</blockquote></details>` : ''}</div>`;
+}
+
 function sortListings(listings) {
   const items = [...listings];
   const sort = listingSort?.value || 'newest';
@@ -414,7 +423,7 @@ function render(listings) {
       ${mapWidgetUrl ? `<div class="listing-map"><iframe src="${escapeHtml(mapWidgetUrl)}" title="Расположение квартиры: ${escapeHtml(title)}" loading="lazy" allowfullscreen></iframe></div>` : ''}
       ${mapUrl ? `<a class="location-link" href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener noreferrer">${hasCoordinates ? 'Открыть большую карту' : 'Найти адрес на карте'} →</a>${hasCoordinates ? '<p class="meta map-fallback">Если карта не загрузилась, воспользуйтесь ссылкой выше.</p>' : '<p class="meta">Координаты не получены. Карта найдёт дом по указанному адресу.</p>'}` : ''}
       ${locationMissing ? '<div class="meta location-missing">Адрес и координаты не указаны</div>' : ''}
-      <div class="listing-details"><div>${bathroomBadge(item)}</div><div><b>Состояние / ремонт:</b> ${escapeHtml(item.repair_condition || 'Не указано')}</div><div><b>Ипотека:</b> ${mortgage}</div><div><b>Автор объявления:</b> ${escapeHtml(seller)}</div></div>
+      <div class="listing-details"><div>${bathroomBadge(item)}</div>${repairDetails(item)}<div><b>Ипотека:</b> ${mortgage}</div><div><b>Автор объявления:</b> ${escapeHtml(seller)}</div></div>
       ${item.building_year || item.building_type ? `<div class="meta">${item.building_year ? `Построен ${item.building_year}` : ''}${item.building_year && item.building_type ? ' · ' : ''}${escapeHtml(item.building_type || '')}</div>` : ''}
       ${twogisLine}
       <details class="seller-description" data-details-key="seller-description"><summary>Описание объявления</summary>${item.description ? `<p class="seller-description-text">${escapeHtml(item.description)}</p>` : '<p class="meta">Описание объявления не получено.</p>'}</details>
