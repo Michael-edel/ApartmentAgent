@@ -11,6 +11,7 @@ from app.importer import ListingImportError, import_krisha_listing
 from app.krisha_search import KrishaSearchBlocked
 from app.listing_service import persist_listing
 from app.models import Listing, SearchHistory, SearchPreference, SearchResult
+from app.mortgage import parse_mortgage_text
 from app.search_analysis import analyze_search_result, is_target_search_result, parse_bathrooms_count, bathrooms_is_lower_bound
 from app.search_providers import PROVIDERS, SearchItem
 
@@ -41,7 +42,7 @@ class SearchImportCandidate:
     url: str
 
 
-def _priority(title: str, snippet: str | None) -> str:
+def _priority(title: str, snippet: str | None, mortgage_supported: bool | None = None) -> str:
     result = analyze_search_result(
         title,
         snippet,
@@ -49,6 +50,7 @@ def _priority(title: str, snippet: str | None) -> str:
         min_area=settings.min_area_m2,
         max_area=settings.max_area_m2,
         target_rooms=settings.target_rooms,
+        mortgage_supported=mortgage_supported,
     )
     if result["score"] >= 85:
         return "urgent"
@@ -117,10 +119,13 @@ async def _save_items(
         for item in accepted_items:
             existing = await session.scalar(select(SearchResult).where(SearchResult.url == item.url))
             bathrooms_count = parse_bathrooms_count(f"{item.title or ''} {item.snippet or ''}")
+            mortgage_supported = parse_mortgage_text(f"{item.title or ''} {item.snippet or ''}")
             if existing:
                 existing.last_seen = now
                 existing.title = item.title or existing.title
                 existing.snippet = item.snippet or existing.snippet
+                if mortgage_supported is not None:
+                    existing.mortgage_supported = mortgage_supported
                 if bathrooms_count is not None:
                     existing.bathrooms_count = bathrooms_count
                     existing.bathrooms_count_is_lower_bound = bathrooms_is_lower_bound(f"{item.title or ''} {item.snippet or ''}")
@@ -134,6 +139,7 @@ async def _save_items(
                 title=item.title,
                 snippet=item.snippet,
                 bathrooms_count=bathrooms_count,
+                mortgage_supported=mortgage_supported,
                 bathrooms_count_is_lower_bound=bathrooms_is_lower_bound(f"{item.title or ''} {item.snippet or ''}"),
                 status=f"new:{_priority(item.title, item.snippet)}",
             )
@@ -361,7 +367,7 @@ async def get_search_status() -> dict[str, object]:
             imported_total += int(row.import_status == "imported")
             found_hour += int(row.first_seen >= hour_ago)
             found_today += int(row.first_seen >= day_start)
-            urgent += int(is_new and _priority(row.title or "", row.snippet) == "urgent")
+            urgent += int(is_new and _priority(row.title or "", row.snippet, getattr(row, 'mortgage_supported', None)) == "urgent")
             engine_counts[row.search_engine] = engine_counts.get(row.search_engine, 0) + 1
         last_run = await session.scalar(select(func.max(SearchHistory.searched_at)))
         latest_history = (

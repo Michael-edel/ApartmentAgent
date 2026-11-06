@@ -110,16 +110,22 @@
     if (typeof value !== 'string') return null;
     const normalized = clean(value).toLowerCase();
     if (['да', 'true'].includes(normalized)) return true;
-    if (['нет', 'false'].includes(normalized)) return false;
+    if (['нет', 'жоқ', 'жок', 'false'].includes(normalized)) return false;
+    return mortgageTextValue(normalized);
+  };
+  const mortgageTextValue = text => {
+    const value = clean(text);
+    if (/(?:ипотек(?:а|и|у|ой|е)\s*[:—–-]?\s*(?:нет|жоқ|жок)(?=$|[\s.,;!?])(?!\s+(?:емес|проблем|ограничений|трудностей))|ипотека\s+не\s+(?:рассматривается|проходит|подходит|предусмотрена)|не\s+прода[её]тся\s+в\s+ипотеку)/i.test(value)) return false;
+    if (/(?:ипотека\s*[:—–-]\s*да|(?:можно|возможна\s+покупка)\s+в\s+ипотеку|ипотека\s+(?:возможна|доступна)|подходит\s+под\s+ипотеку)/i.test(value)) return true;
     return null;
   };
   const mortgageSupported = () => {
     const structured = findValue(['mortgageSupported', 'mortgage_supported', 'isMortgageAvailable'], mortgageValue);
-    if (structured !== null) return structured;
     const fieldText = [...document.querySelectorAll('[data-testid="mortgage"], [data-testid="mortgage-status"], [data-property="mortgage"]')].map(node => clean(node.textContent)).join(' ');
-    if (/(?:ипотека\s*[:—-]\s*нет|ипотека\s+не\s+рассматривается|не\s+прода[её]тся\s+в\s+ипотеку)/i.test(fieldText)) return false;
-    if (/(?:ипотека\s*[:—-]\s*да|(?:можно|возможна\s+покупка)\s+в\s+ипотеку)/i.test(fieldText)) return true;
-    return null;
+    const descriptionText = [...document.querySelectorAll('.offer__description, [data-testid="description"], [data-testid="advert-description"], [itemprop="description"]')].map(node => clean(node.textContent)).join(' ');
+    const values = [structured, mortgageTextValue(fieldText), mortgageTextValue(descriptionText), mortgageTextValue(meta('og:description') || meta('description'))];
+    if (values.includes(false)) return false;
+    return values.includes(true) ? true : null;
   };
   const addressFromText = value => {
     const normalized = clean(value);

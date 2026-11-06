@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from app.mortgage import parse_mortgage_text
 
 _PRICE_PATTERNS = (
     re.compile(r"(?<!\d)(?P<value>(?:\d{1,3}(?:[\s\u00a0]\d{3}){2,3}|\d{6,11}))\s*(?:₸|тг|тенге)", re.IGNORECASE),
@@ -39,9 +40,10 @@ def _parse_price(text: str) -> tuple[int | None, bool]:
     return None, False
 
 
-def analyze_search_result(title: str, snippet: str | None, *, max_price: int, min_area: float, max_area: float, target_rooms: int = 2) -> dict[str, Any]:
+def analyze_search_result(title: str, snippet: str | None, *, max_price: int, min_area: float, max_area: float, target_rooms: int = 2, mortgage_supported: bool | None = None) -> dict[str, Any]:
     text = f"{title} {snippet or ''}".replace("\u00a0", " ")
     lower = text.lower()
+    mortgage_supported = mortgage_supported if mortgage_supported is not None else parse_mortgage_text(text)
 
     parsed_price, price_is_lower_bound = _parse_price(text)
     price = None if price_is_lower_bound else parsed_price
@@ -102,6 +104,9 @@ def analyze_search_result(title: str, snippet: str | None, *, max_price: int, mi
         score += 5
         reasons.append("предпочтительный материал дома")
 
+    if mortgage_supported is False:
+        score -= 25
+        reasons.append("В объявлении указано: ипотека недоступна")
     score = max(0, min(100, score))
     if score >= 85:
         verdict = "СРОЧНО ПОСМОТРЕТЬ"
@@ -119,6 +124,7 @@ def analyze_search_result(title: str, snippet: str | None, *, max_price: int, mi
         "price_lower_bound_kzt": price_lower_bound,
         "area_m2": area,
         "rooms": rooms,
+        "mortgage_supported": mortgage_supported,
         "bathrooms_count": parse_bathrooms_count(text),
         "bathrooms_count_is_lower_bound": bathrooms_is_lower_bound(text),
         "floor": floor,

@@ -8,6 +8,7 @@ import httpx
 from pydantic import HttpUrl
 
 from app.schemas import ListingCreate
+from app.mortgage import mortgage_from_html, mortgage_value, parse_mortgage_text
 from app.search_analysis import parse_bathrooms_count, bathrooms_is_lower_bound
 
 
@@ -37,6 +38,19 @@ def _bathrooms_fields(html: str, data: list[Any]) -> tuple[int | None, bool]:
             if count is not None:
                 return count, bathrooms_is_lower_bound(text)
     return None, False
+
+
+def _mortgage_fields(html: str, data: list[Any], description: str = "") -> bool | None:
+    values = []
+    for root in data:
+        for item in _walk(root):
+            for key, value in item.items():
+                if str(key).casefold() in {"mortgagesupported", "mortgage_supported", "ismortgageavailable"}:
+                    values.append(mortgage_value(value))
+    values.extend([mortgage_from_html(html), parse_mortgage_text(description)])
+    if any(value is False for value in values):
+        return False
+    return True if any(value is True for value in values) else None
 
 _PRICE_RE = re.compile(r"(?P<price>\d[\d\s\u00a0]{5,})\s*(?:₸|тг|тенге)", re.IGNORECASE)
 _AREA_RE = re.compile(r"(?P<area>\d{2,3}(?:[.,]\d+)?)\s*м(?:²|2)", re.IGNORECASE)
@@ -456,6 +470,6 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
         building_year=year,
         building_type=building_type,
         is_full_two_room=rooms == 2,
-        mortgage_supported=None,
+        mortgage_supported=_mortgage_fields(html, data, description),
         photo_urls=photo_urls,
     )

@@ -71,6 +71,8 @@ async def _sync_search_results(session: AsyncSession, listing: Listing, now: dat
         result.imported_listing_id = listing.id
         result.import_error = None
         result.imported_at = now
+        if listing.mortgage_supported is not None:
+            result.mortgage_supported = listing.mortgage_supported
         if listing.bathrooms_count is not None:
             result.bathrooms_count = listing.bathrooms_count
             result.bathrooms_count_is_lower_bound = listing.bathrooms_count_is_lower_bound

@@ -62,6 +62,7 @@ const searchMeta = document.querySelector('#searchMeta');
 const searchResults = document.querySelector('#searchResults');
 const reloadSearchResults = document.querySelector('#refreshSearchButton');
 let savedUrls = new Set();
+let savedListingIds = new Map();
 
 function escapeHtml(value='') {
   return String(value).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#039;','"':'&quot;'}[ch]));
@@ -100,7 +101,7 @@ async function readJson(response) {
 }
 
 function normalizeUrl(value='') {
-  try { const u = new URL(value, location.origin); return `${u.origin}${u.pathname.replace(/\/$/, '')}`; }
+  try { const u = new URL(value, location.origin); const origin = ['krisha.kz', 'www.krisha.kz'].includes(u.hostname.toLowerCase()) ? 'https://krisha.kz' : u.origin; return `${origin}${u.pathname.replace(/\/$/, '')}`; }
   catch { return String(value).replace(/\/$/, ''); }
 }
 
@@ -113,14 +114,24 @@ function cleanSearchTitle(title='') {
 
 function priorityLabel(priority) {
   if (priority === 'urgent') return 'Срочно посмотреть';
-  if (priority === 'good') return 'Хороший вариант';
-  return 'Новая ссылка';
+  if (priority === 'good') return 'Проверить';
+  return 'Низкий приоритет';
 }
 
 function priorityClass(priority) {
   if (priority === 'urgent') return 'priority-urgent';
   if (priority === 'good') return 'priority-good';
   return 'priority-normal';
+}
+
+function bathroomBadge(item, search = false) {
+  const count = item.bathrooms_count;
+  const known = Number.isInteger(count);
+  const confirmed = known && count >= 2;
+  const text = known
+    ? `Санузлов: ${item.bathrooms_count_is_lower_bound ? 'не менее ' : ''}${count}`
+    : search ? 'Санузел не подтверждён' : 'Санузлы: не указано';
+  return `<span class="bathroom-badge${confirmed ? ' bathrooms-confirmed' : ''}">${confirmed ? '✓ ' : ''}${escapeHtml(text)}</span>`;
 }
 
 function sortListings(listings) {
@@ -197,6 +208,7 @@ async function loadComparisons() {
 
 function render(listings) {
   savedUrls = new Set(listings.map(item => normalizeUrl(item.source_url)));
+  savedListingIds = new Map(listings.map(item => [normalizeUrl(item.source_url), item.id]));
   const minScore = Number(filter?.value || 0);
   const visible = sortListings(listings).filter(item => item.assessment.score >= minScore);
   const strong = listings.filter(item => item.assessment.score >= 85);
@@ -230,7 +242,7 @@ function render(listings) {
     const twogisRating = Number(item.twogis_rating);
     const twogisReviews = Number(item.twogis_review_count || 0);
     const twogisLine = item.twogis_name ? `<div class="twogis-review"><b>2GIS</b> ${Number.isFinite(twogisRating) && twogisReviews ? `★ ${twogisRating.toFixed(1)}/5 · ${twogisReviews} отзывов` : 'оценка и отзывы не опубликованы'}${item.twogis_url ? ` · <a href="${escapeHtml(item.twogis_url)}" target="_blank" rel="noopener noreferrer">Открыть в 2GIS →</a>` : ''}</div>` : '';
-    return `<article class="listing card">
+    return `<article class="listing card" id="listing-${item.id}" tabindex="-1" aria-label="Карточка квартиры: ${escapeHtml(title)}">
       ${photos.length ? `<div class="listing-photos">${photos.map((photo, index) => `<img class="listing-photo ${index ? 'thumbnail' : ''}" src="${escapeHtml(photo)}" alt="Фото квартиры ${index + 1}" loading="lazy" referrerpolicy="no-referrer">`).join('')}</div>` : ''}
       <div class="listing-top"><div><h3>${escapeHtml(title)}</h3><div class="meta">${escapeHtml(location)}</div></div><div class="rating ${scoreClass}">${item.assessment.score}</div></div>
       <div class="price">${money.format(item.price_kzt)}</div>
@@ -238,7 +250,7 @@ function render(listings) {
       <section class="price-comparison" data-listing-id="${Number(item.id)}" aria-label="Сравнение цены за квадратный метр">Загружаю сравнение цены…</section>
       ${mapUrl ? `<a class="location-link" href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener noreferrer">${hasCoordinates ? 'Открыть координаты на карте' : 'Найти адрес на карте (местоположение приблизительное)'} →</a>` : ''}
       ${locationMissing ? '<div class="meta location-missing">Адрес и координаты не указаны</div>' : ''}
-      <div class="listing-details"><div><b>Санузлы:</b> ${Number.isInteger(item.bathrooms_count) ? `${item.bathrooms_count_is_lower_bound ? 'не менее ' : ''}${item.bathrooms_count}` : 'Не указано'}</div><div><b>Ипотека:</b> ${mortgage}</div><div><b>Автор объявления:</b> ${escapeHtml(seller)}</div></div>
+      <div class="listing-details"><div>${bathroomBadge(item)}</div><div><b>Ипотека:</b> ${mortgage}</div><div><b>Автор объявления:</b> ${escapeHtml(seller)}</div></div>
       ${item.building_year || item.building_type ? `<div class="meta">${item.building_year ? `Построен ${item.building_year}` : ''}${item.building_year && item.building_type ? ' · ' : ''}${escapeHtml(item.building_type || '')}</div>` : ''}
       ${twogisLine}
       <details class="complex-description"><summary>Описание ЖК</summary>${item.complex_description ? `<p style="white-space:pre-wrap">${escapeHtml(item.complex_description)}</p><p class="meta">${escapeHtml(complexDescriptionSource)}${complexDescriptionUrl ? ` · <a href="${escapeHtml(complexDescriptionUrl)}" target="_blank" rel="noopener noreferrer">Источник →</a>` : ''}${item.complex_description_observed_at ? ` · получено ${escapeHtml(dateTime.format(new Date(item.complex_description_observed_at)))}` : ''}</p>` : '<p class="meta">Описание ЖК не получено. Его можно добавить из объявления, сайта застройщика или вручную.</p>'}</details>
@@ -279,16 +291,44 @@ async function loadListings() {
     const response = await fetch('/api/v1/listings');
     if (!response.ok) throw new Error('Не удалось загрузить квартиры');
     render(await readJson(response));
-    void loadComparisons();
+    await loadComparisons();
     grid?.querySelectorAll('.check-listing').forEach(button => {
       button.addEventListener('click', () => checkListingNow(Number(button.dataset.listingId), button));
     });
+    return true;
   } catch (error) {
     if (message) message.textContent = error.message;
+    return false;
   } finally {
     if (refreshButton) refreshButton.disabled = false;
   }
 }
+
+async function openSavedListingFromHash() {
+  const match = /^#listing-([1-9]\d*)$/.exec(location.hash);
+  if (!match) return;
+  // A direct link must also reveal a card hidden by the rating filter.
+  if (filter) filter.value = '';
+  if (!await loadListings()) return;
+  const card = document.getElementById(`listing-${match[1]}`);
+  if (!card) {
+    if (searchMessage) searchMessage.textContent = 'Сохранённая карточка не найдена. Обновите результаты поиска.';
+    return;
+  }
+  const history = card.querySelector('.price-history');
+  if (history) history.open = true;
+  card.focus({preventScroll:true});
+  card.scrollIntoView({behavior:'auto', block:'start'});
+}
+
+window.addEventListener('hashchange', () => { void openSavedListingFromHash(); });
+searchResults?.addEventListener('click', event => {
+  const link = event.target.closest('a.open-saved-card');
+  if (!link || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  if (location.hash !== link.hash) history.pushState(null, '', link.hash);
+  void openSavedListingFromHash();
+});
 
 async function markSeen(id) { await fetch(`/api/v1/search/results/${id}/seen`, {method:'POST'}); }
 
@@ -307,6 +347,7 @@ async function importSearchResult(url, button) {
     button.textContent = response.status === 409 ? 'Уже сохранено' : `Сохранено · ${body.assessment?.score || '—'}/100`;
     button.classList.add('saved');
     await loadListings();
+    await loadSearchResults();
   } catch (error) {
     button.textContent = error.message;
     button.classList.add('button-error');
@@ -342,12 +383,14 @@ async function loadSearchResults() {
       const facts = [
         a.price_is_lower_bound ? `от ${money.format(a.price_lower_bound_kzt)} · точная цена не подтверждена` : a.price_kzt ? money.format(a.price_kzt) : 'Цена не подтверждена',
         a.area_m2 ? `${number.format(a.area_m2)} м²` : null,
-        Number.isInteger(a.bathrooms_count) ? `Санузлов: ${a.bathrooms_count_is_lower_bound ? 'не менее ' : ''}${a.bathrooms_count}` : 'Санузел не подтверждён',
+        a.mortgage_supported === false ? 'Ипотека: недоступна' : null,
         a.price_per_m2 ? `${a.price_is_lower_bound ? 'от ' : ''}${money.format(a.price_per_m2)}/м²` : null,
         a.floor ? `${a.floor}/${a.floors_total || '—'} этаж` : null
       ].filter(Boolean);
       const reasons = (a.reasons || []).slice(0, 3).map(reason => `<li>✓ ${escapeHtml(reason)}</li>`).join('');
       const isSaved = savedUrls.has(normalizeUrl(item.url));
+      const savedId = savedListingIds.get(normalizeUrl(item.url)) || item.imported_listing_id;
+      const hasSavedCard = Number.isSafeInteger(savedId) && savedId > 0;
       const importStatus = item.import_status || 'pending';
       const imported = importStatus === 'imported' || isSaved;
       const importLabel = imported ? 'Сохранено в карточку' : importStatus === 'queued' ? 'Мониторинг запущен' : importStatus === 'blocked' ? 'Источник ограничил импорт' : importStatus === 'error' ? 'Импорт не удался — повторить' : 'Сохранить объявление';
@@ -360,11 +403,11 @@ async function loadSearchResults() {
           <div><span class="verdict">${escapeHtml(seenLabel)}</span><h3>${escapeHtml(cleanSearchTitle(item.title))}</h3></div>
           <div class="rating ${a.score < 85 ? 'medium' : ''}">${a.score ?? '—'}</div>
         </div>
-        ${facts.length ? `<div class="search-facts">${facts.map(value => `<span>${escapeHtml(value)}</span>`).join('')}</div>` : ''}
+        <div class="search-facts">${facts.map(value => `<span>${escapeHtml(value)}</span>`).join('')}${bathroomBadge(a, true)}</div>
         ${reasons ? `<ul class="reason-list">${reasons}</ul>` : `<p class="meta">${escapeHtml(item.snippet || 'Откройте объявление для проверки параметров.')}</p>`}
         <div class="meta source-meta">Источник: ${escapeHtml(item.search_engine)} · обнаружено ${dateTime.format(new Date(item.first_seen))}</div>
         <div class="card-actions">
-          <button class="enrich-result primary secondary-action ${imported ? 'saved' : ''}" data-url="${escapeHtml(item.url)}" type="button" ${imported ? 'disabled' : ''}>${importLabel}</button>
+          ${imported && hasSavedCard ? `<a class="open-saved-card secondary-action" href="#listing-${savedId}">Открыть карточку →</a>` : `<button class="enrich-result primary secondary-action ${imported ? 'saved' : ''}" data-url="${escapeHtml(item.url)}" type="button" ${imported ? 'disabled' : ''}>${importLabel}</button>`}
           ${sourceUrl ? `<a class="search-open" data-result-id="${item.id}" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">Открыть и мониторить →</a>` : ''}
         </div>
       </article>`;
@@ -434,6 +477,8 @@ async function loadSearchStatus() {
     const telegramNode = document.querySelector('#telegramStatus');
     if (telegramNode) telegramNode.textContent = telegram.configured ? `Telegram: подключён · отправлено ${telegram.sent_notifications || 0}` : 'Telegram: добавьте TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID для уведомлений';
     const health = await fetch('/health').then(readJson);
+    const versionLabel = document.querySelector('#appVersion');
+    if (versionLabel && typeof health.version === 'string') versionLabel.textContent = ` · v${health.version}`;
     const twogisNode = document.querySelector('#twogisStatus');
     if (twogisNode) twogisNode.textContent = health.twogis_configured ? '2GIS: автоматический поиск ЖК и отзывов включён' : '2GIS: добавьте TWOGIS_API_KEY для автоматического рейтинга ЖК';
   } catch (error) {
@@ -559,4 +604,4 @@ function refreshAfterReturn() {
 document.addEventListener('visibilitychange', refreshAfterReturn);
 window.addEventListener('focus', refreshAfterReturn);
 if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/service-worker.js'));
-(async () => { await loadListings(); await Promise.all([loadSearchStatus(), loadSearchResults()]); })();
+(async () => { if (/^#listing-[1-9]\d*$/.test(location.hash)) await openSavedListingFromHash(); else await loadListings(); await Promise.all([loadSearchStatus(), loadSearchResults()]); })();

@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
-function extract(file, text, data = null, mortgageField = null, bathroomField = null, comparisonCells = null, comparisonHeading = 'Цена м² в похожих квартирах', complexBlock = null) {
+function extract(file, text, data = null, mortgageField = null, bathroomField = null, comparisonCells = null, comparisonHeading = 'Цена м² в похожих квартирах', complexBlock = null, descriptionText = null) {
   let posted;
   const body = {innerText: text, appendChild() {}};
   const document = {
@@ -10,6 +10,7 @@ function extract(file, text, data = null, mortgageField = null, bathroomField = 
     currentScript: {src: 'http://localhost:8000/static/browser-import.js'},
     querySelector() { return null; },
     querySelectorAll(selector) {
+      if (descriptionText && selector.startsWith('.offer__description')) return [{textContent:descriptionText}];
       if (complexBlock && selector === 'h2, h3, h4') return [{textContent:complexBlock.heading, nextElementSibling:{tagName:'P', textContent:complexBlock.text, nextElementSibling:null}}];
       if (comparisonCells && selector === 'section, article, div') return [{textContent: comparisonHeading + ' ' + comparisonCells.join(' '), querySelectorAll() { return comparisonCells.map(textContent => ({textContent})); }}];
       if (data && selector.startsWith('script[')) return [{textContent: JSON.stringify(data)}];
@@ -40,6 +41,15 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
   assert.equal(extract(file, common, null, 'Ипотека: нет').mortgage_supported, false, file);
   assert.equal(extract(file, common, null, 'Можно в ипотеку').mortgage_supported, true, file);
   assert.equal(extract(file, `${common} Реклама: ипотека: да`).mortgage_supported, null, file);
+  for (const phrase of ['Ипотеки нет', 'Ипотека жоқ', 'Ипотека жок']) {
+    assert.equal(extract(file, common, null, phrase).mortgage_supported, false, file);
+    assert.equal(extract(file, common, null, null, null, null, undefined, null, phrase).mortgage_supported, false, file);
+    assert.equal(extract(file, `${common} Реклама: ${phrase}`).mortgage_supported, null, file);
+  }
+  for (const phrase of ['Рассчитать ипотеку', 'Квартира без ипотеки', 'С ипотекой нет проблем', 'Ипотека жоқ емес']) {
+    assert.equal(extract(file, common, null, null, null, null, undefined, null, phrase).mortgage_supported, null, file);
+  }
+  assert.equal(extract(file, common, null, 'Можно в ипотеку и без ипотеки').mortgage_supported, true, file);
   const structured = extract(file, common, {sellerName: 'Иван', sellerType: 'Хозяин', mortgageSupported: false, latitude: 51.15, longitude: 71.45});
   assert.equal(extract(file, common, {bathroomsCount: 2}).bathrooms_count, 2, file);
   assert.equal(extract(file, common, {bathroomsCount: 'раздельный'}).bathrooms_count, null, file);

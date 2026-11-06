@@ -128,6 +128,7 @@ class SearchResult(Base):
     query: Mapped[str] = mapped_column(Text)
     title: Mapped[str] = mapped_column(String(500))
     snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mortgage_supported: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     bathrooms_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     bathrooms_count_is_lower_bound: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     status: Mapped[str] = mapped_column(String(30), default="new", index=True)

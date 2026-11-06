@@ -35,6 +35,7 @@ _COLUMNS: dict[str, dict[str, str]] = {
     },
     "price_snapshots": {"price_per_m2": "BIGINT"},
     "search_results": {
+        "mortgage_supported": "BOOLEAN",
         "bathrooms_count": "INTEGER",
         "bathrooms_count_is_lower_bound": "BOOLEAN NOT NULL DEFAULT FALSE",
         "import_status": "VARCHAR(30) DEFAULT 'pending'",
@@ -62,6 +63,11 @@ def ensure_legacy_columns(connection: Connection) -> None:
                     "ON search_results (import_status)"
                 )
             )
+    connection.execute(text(
+        "UPDATE search_results SET mortgage_supported = "
+        "(SELECT mortgage_supported FROM listings WHERE listings.id = search_results.imported_listing_id) "
+        "WHERE mortgage_supported IS NULL AND imported_listing_id IS NOT NULL"
+    ))
     # Older browser imports could mistake a map default like (0, 0) for the
     # listing location. Clear only implausible coordinates; the app searches Astana.
     connection.execute(

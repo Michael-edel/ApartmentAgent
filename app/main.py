@@ -13,6 +13,7 @@ from typing import Literal
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from app import __version__
 from app.ai_service import analyze_listing, current_analysis
 from app.checker import ListingNotFound, check_all_listings, check_listing, periodic_checker
 from app.config import get_settings
@@ -45,7 +46,7 @@ async def lifespan(_: FastAPI):
     await engine.dispose()
 
 
-app = FastAPI(title=settings.app_name, version="0.12.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https://([a-z0-9-]+\.)*krisha\.kz$",
@@ -76,7 +77,7 @@ async def health() -> dict[str, object]:
     return {
         "status": "ok",
         "service": settings.app_name,
-        "version": "0.12.0",
+        "version": app.version,
         "storage": "postgresql",
         "automatic_check_minutes": max(settings.check_interval_minutes, 15),
         "search_enabled": settings.search_enabled,
@@ -392,6 +393,7 @@ async def search_results(limit: int = 50, only_new: bool = False, include_unconf
             min_area=settings.min_area_m2,
             max_area=settings.max_area_m2,
             target_rooms=settings.target_rooms,
+            mortgage_supported=getattr(row, "mortgage_supported", None),
         )
         analysis["bathrooms_count"] = bathrooms_for_row(row)
         analysis["bathrooms_count_is_lower_bound"] = row.bathrooms_count_is_lower_bound or analysis["bathrooms_count_is_lower_bound"]
