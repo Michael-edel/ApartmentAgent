@@ -676,6 +676,28 @@ def _valid_property_address(value: str | None) -> str | None:
     return None
 
 
+def clean_listing_address(value: str | None) -> str | None:
+    """Remove only a leading floor caption already mixed into an address.
+
+    This does not geocode, guess a house number or reinterpret numeric street
+    names.  A candidate consisting only of numbers/coordinates is left alone.
+    """
+    if not isinstance(value, str):
+        return None
+    address = re.sub(r"\s+", " ", value).strip()
+    if not address:
+        return None
+    prefix = re.match(
+        r"^\d{1,3}(?:\s*(?:из|/)\s*\d{1,3})?\s*(?:этаж|эт\.)\s*,\s*(?P<address>.+)$",
+        address, re.IGNORECASE,
+    )
+    if prefix:
+        candidate = prefix.group("address").strip()
+        if _valid_property_address(candidate) and re.search(r"[^\W\d_]", candidate, re.UNICODE):
+            return candidate
+    return address
+
+
 def _find_address(data: list[Any]) -> str | None:
     keys = {"address", "streetaddress", "formattedaddress", "fulladdress", "addressline", "displayaddress"}
     for root in data:
@@ -715,7 +737,7 @@ def _address_from_text(value: str) -> str | None:
     patterns = (
         re.compile(
             r"\d+(?:[.,]\d+)?\s*м(?:²|2)\s*[·,]\s*"
-            r"(?:(?:\d{1,3}\s*(?:из|/)\s*\d{1,3}\s*(?:этаж|эт\.)\s*,\s*))?"
+            r"(?:(?:\d{1,3}(?:\s*(?:из|/)\s*\d{1,3})?\s*(?:этаж|эт\.)\s*,\s*))?"
             r"(?P<address>[^—–\n]{3,180}?)(?:\s*[—–]|$)",
             re.IGNORECASE,
         ),
@@ -734,9 +756,9 @@ def _address_from_text(value: str) -> str | None:
     for index, pattern in enumerate(patterns):
         match = pattern.search(value)
         if match:
-            address = re.sub(r"\s+", " ", match.group("address")).strip(" ,.-")
+            address = clean_listing_address(match.group("address").strip(" ,.-")) or ""
             if (5 <= len(address) <= 180 and (index != 0 or re.search(r"\d", address))
-                    and not re.fullmatch(r"\d{1,3}\s*(?:из|/)\s*\d{1,3}\s*(?:этаж|эт\.)", address, re.I)):
+                    and not re.fullmatch(r"\d{1,3}(?:\s*(?:из|/)\s*\d{1,3})?\s*(?:этаж|эт\.)", address, re.I)):
                 return address
     return None
 

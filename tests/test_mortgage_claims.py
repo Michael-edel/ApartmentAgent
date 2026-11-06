@@ -1,0 +1,81 @@
+import pytest
+
+from app.mortgage import mortgage_value, parse_mortgage_claim, parse_mortgage_text
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("можно под ипотеку.", True),
+    ("Ипотеку рассматриваем!", True),
+    ("Рассмотрим ипотеку. Звоните, чтобы записаться на просмотр!", True),
+    ("Ипотеку рассмотрим.", True),
+    ("Без долгов, ипотека рассматривается.", True),
+    ("✨ Документы в порядке можно в ипотеку!", True),
+    ("Жилье реализуется за наличный расчет, также возможно оформление любого вида партнерской ипотеки или рассрочки от застройщика.", True),
+    ("- Наличный расчет\n- Ипотека, Документы есть", True),
+    ("Ипотека: да", True),
+    ("Ипотека:да", True),
+    ("Ипотека да.", True),
+    ("Ипотека доступна.", True),
+    ("Возможна ипотека.", True),
+    ("Квартира подходит под ипотеку.", True),
+    ("Продажа в ипотеку.", True),
+    ("Только за наличный расчет", False),
+    ("ДОКУМЕНТЫ ДДУ это ТОЛЬКО ЗА НАЛИЧНЫЕ РАСЧЕТ ИЛИ ОБМЕН НА КВАРТИРУ или на ДОМ возле Астаны.", False),
+    ("Только наличными.", False),
+    ("Ипотеки нет", False),
+    ("Ипотека жоқ", False),
+    ("Ипотека ЖОК!", False),
+    ("Ипотеку не рассматриваем.", False),
+    ("Не рассматриваем ипотеку.", False),
+    ("Ипотека недоступна.", False),
+    ("Не подходит под ипотеку.", False),
+    ("Ипотеки нет. Консультация по ипотеке бесплатная.", False),
+    ("Ипотеки нет. Можно в ипотеку.", False),
+])
+def test_explicit_seller_claims_have_literal_evidence(text, expected):
+    result = parse_mortgage_claim(text)
+    assert result is not None and result[0] is expected
+    assert result[1] in text and 0 < len(result[1]) <= 500
+    assert parse_mortgage_text(text) is expected
+
+
+@pytest.mark.parametrize("text", [
+    None, "", "Бесплатная консультация по ипотеке", "Рассчитать ипотеку", "Ипотека",
+    "За наличные расчёт - мощный ТОРГ.", "Продажа за наличный расчет.",
+    "Квартира без ипотеки", "С ипотекой нет проблем", "Ипотека жоқ емес",
+    "По ипотеке нет информации.", "По ипотеке нет решения.",
+    "Не только за наличные расчёт.", "Скидка только за наличные.",
+    "Первоначальный взнос только наличными.", "Комиссия агента только наличными.",
+    "Ипотека возможна?", "Не уверен, что квартира подходит под ипотеку.",
+    "Ипотека возможна после оформления документов.",
+    "Консультация: можно в ипотеку.", "Калькулятор: ипотека доступна.",
+    "Возможно оформление любого вида партнерской ипотеки.",
+    "Не всегда подходит под ипотеку.",
+    "Только наличный расчёт. Ипотека возможна.",
+    "Только за наличные, также можно под ипотеку.",
+])
+def test_services_promotions_questions_and_conflicts_stay_unknown(text):
+    assert parse_mortgage_claim(text) is None
+    assert parse_mortgage_text(text) is None
+
+
+def test_nonexclusive_cash_does_not_override_a_positive_option():
+    text = "Не только наличный расчет. Ипотека возможна."
+    assert parse_mortgage_claim(text)[0] is True
+    assert parse_mortgage_text("Можно в ипотеку и без ипотеки") is True
+    assert parse_mortgage_text("Первый взнос только наличными, ипотека возможна.") is True
+
+
+def test_long_evidence_is_bounded_and_is_not_invented():
+    text = "Квартира " + "просторная " * 70 + "можно под ипотеку."
+    found = parse_mortgage_claim(text)
+    assert found and found[0] is True and found[1] in text and len(found[1]) <= 500
+
+
+def test_explicit_field_values_keep_their_boolean_contract():
+    assert mortgage_value(True) is True
+    assert mortgage_value(False) is False
+    assert mortgage_value("Да") is True
+    assert mortgage_value("Нет") is False
+    assert mortgage_value("Можно под ипотеку") is True
+    assert mortgage_value("1") is None

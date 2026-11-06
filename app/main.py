@@ -100,6 +100,8 @@ def _payload_from_row(row: Listing) -> ListingCreate:
         repair_condition=row.repair_condition,
         repair_source_kind=row.repair_source_kind,
         repair_evidence=row.repair_evidence,
+        mortgage_source_kind=row.mortgage_source_kind,
+        mortgage_evidence=row.mortgage_evidence,
         property_details=row.property_details or {},
         details_extracted=row.details_imported_at is not None,
         city=row.city,

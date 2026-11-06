@@ -43,6 +43,8 @@ class Listing(Base):
     repair_condition: Mapped[str | None] = mapped_column(String(500), nullable=True)
     repair_source_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
     repair_evidence: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    mortgage_source_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    mortgage_evidence: Mapped[str | None] = mapped_column(String(500), nullable=True)
     property_details: Mapped[dict[str, str]] = mapped_column(JSON, default=dict, server_default="{}", nullable=False)
     details_imported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     city: Mapped[str] = mapped_column(String(100), default="Астана")

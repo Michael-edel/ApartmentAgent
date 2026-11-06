@@ -21,6 +21,8 @@ _COLUMNS: dict[str, dict[str, str]] = {
         "repair_condition": "VARCHAR(500)",
         "repair_source_kind": "VARCHAR(20)",
         "repair_evidence": "VARCHAR(500)",
+        "mortgage_source_kind": "VARCHAR(20)",
+        "mortgage_evidence": "VARCHAR(500)",
         "property_details": "JSON NOT NULL DEFAULT '{}'",
         "details_imported_at": "TIMESTAMP WITH TIME ZONE",
         "seller_name": "VARCHAR(200)",

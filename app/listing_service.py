@@ -13,6 +13,8 @@ from app.models import Listing, PriceSnapshot, SearchResult
 from app.krisha_search import normalize_krisha_listing_url
 from app.schemas import ListingCreate
 from app.repair import parse_repair_description
+from app.mortgage import mortgage_value, parse_mortgage_claim
+from app.importer import clean_listing_address
 from app.scoring import assess_listing
 from app.telegram import notify_listing
 from app.twogis import lookup_twogis
@@ -45,6 +47,8 @@ def _values(payload: ListingCreate) -> dict[str, object]:
 
 
 _REPAIR_FIELDS = ("repair_condition", "repair_source_kind", "repair_evidence")
+_MORTGAGE_FIELDS = ("mortgage_supported", "mortgage_source_kind", "mortgage_evidence")
+_TEXT_MORTGAGE_SOURCES = {"description", "title"}
 
 
 def _repair_snapshot(condition, source_kind, description, details, source):
@@ -86,6 +90,45 @@ async def backfill_repair_descriptions() -> int:
     return changed
 
 
+def _mortgage_snapshot(value, source_kind, description, title, details, source):
+    if value is not None and source_kind not in _TEXT_MORTGAGE_SOURCES:
+        return value, "manual" if source == "manual" or source_kind == "manual" else "field", None
+    details = details if isinstance(details, dict) else {}
+    for label in ("Ипотека", "В ипотеку"):
+        explicit = mortgage_value(details.get(label))
+        if explicit is not None:
+            return explicit, "manual" if source == "manual" else "field", None
+    description, title = description or "", title or ""
+    found = parse_mortgage_claim(description + "\n" + title)
+    if found:
+        kind = "description" if found[1] in description else "title" if found[1] in title else None
+        if kind:
+            return found[0], kind, found[1]
+    return None, None, None
+
+
+async def backfill_mortgage_and_addresses() -> dict[str, int]:
+    """Enrich stored facts only; no source requests and no price observations."""
+    counts = {"mortgage": 0, "address": 0}
+    async with SessionLocal() as session:
+        for row in (await session.scalars(select(Listing))).all():
+            if row.mortgage_supported is None or row.mortgage_source_kind in _TEXT_MORTGAGE_SOURCES:
+                snapshot = _mortgage_snapshot(row.mortgage_supported, row.mortgage_source_kind,
+                                              row.description, row.title, row.property_details, row.source)
+                if snapshot != tuple(getattr(row, key) for key in _MORTGAGE_FIELDS):
+                    for key, value in zip(_MORTGAGE_FIELDS, snapshot):
+                        setattr(row, key, value)
+                    counts["mortgage"] += 1
+                    await _sync_search_results(session, row, row.last_imported_at or row.created_at or datetime.now(UTC),
+                                               clear_unknown_mortgage=snapshot[0] is None)
+            address = clean_listing_address(row.address)
+            if address != row.address:
+                row.address = address
+                counts["address"] += 1
+        await session.commit()
+    return counts
+
+
 async def _find_listing(session: AsyncSession, source_url: str) -> Listing | None:
     canonical = normalize_krisha_listing_url(source_url)
     exact = await session.scalar(select(Listing).where(Listing.source_url == (canonical or source_url)))
@@ -98,7 +141,7 @@ async def _find_listing(session: AsyncSession, source_url: str) -> Listing | Non
     return next((row for row in candidates if normalize_krisha_listing_url(row.source_url) == canonical), None)
 
 
-def sync_search_result_facts(result: SearchResult, listing: Listing) -> None:
+def sync_search_result_facts(result: SearchResult, listing: Listing, *, clear_unknown_mortgage: bool = False) -> None:
     """Replace discovery facts with the currently saved listing's facts."""
     parts = [f"{listing.rooms}-комнатная квартира", f"{listing.area_m2:g} м²"]
     if listing.floor is not None and listing.floors_total is not None:
@@ -112,14 +155,14 @@ def sync_search_result_facts(result: SearchResult, listing: Listing) -> None:
     if listing.building_type:
         extras.append(listing.building_type)
     result.snippet = ", ".join(extras) or None
-    if listing.mortgage_supported is not None:
+    if listing.mortgage_supported is not None or clear_unknown_mortgage:
         result.mortgage_supported = listing.mortgage_supported
     if listing.bathrooms_count is not None:
         result.bathrooms_count = listing.bathrooms_count
         result.bathrooms_count_is_lower_bound = listing.bathrooms_count_is_lower_bound
 
 
-async def _sync_search_results(session: AsyncSession, listing: Listing, now: datetime) -> None:
+async def _sync_search_results(session: AsyncSession, listing: Listing, now: datetime, *, clear_unknown_mortgage: bool = False) -> None:
     """Make every import path expose saved, confirmed fields in search results."""
     canonical = normalize_krisha_listing_url(listing.source_url)
     query = select(SearchResult)
@@ -135,7 +178,7 @@ async def _sync_search_results(session: AsyncSession, listing: Listing, now: dat
         result.imported_listing_id = listing.id
         result.import_error = None
         result.imported_at = now
-        sync_search_result_facts(result, listing)
+        sync_search_result_facts(result, listing, clear_unknown_mortgage=clear_unknown_mortgage)
 
 
 async def _enrich_twogis(
@@ -223,7 +266,10 @@ async def persist_listing(
     payload, twogis_checked, replace_twogis = await _enrich_twogis(payload, now=now)
     repair = _repair_snapshot(payload.repair_condition, payload.repair_source_kind,
                               payload.description, payload.property_details, payload.source)
-    payload = payload.model_copy(update=dict(zip(_REPAIR_FIELDS, repair)))
+    mortgage = _mortgage_snapshot(payload.mortgage_supported, payload.mortgage_source_kind,
+                                  payload.description, payload.title, payload.property_details, payload.source)
+    payload = payload.model_copy(update={**dict(zip(_REPAIR_FIELDS, repair)), **dict(zip(_MORTGAGE_FIELDS, mortgage)),
+                                         "address": clean_listing_address(payload.address)})
     values = _values(payload)
     if payload.details_extracted:
         values["details_imported_at"] = now
@@ -238,6 +284,7 @@ async def persist_listing(
         values["krisha_comparison_observed_at"] = now
         values["krisha_comparison_source"] = "krisha_listing_page"
     price_change: tuple[int, int] | None = None
+    mortgage_cleared = False
     if twogis_checked:
         values["twogis_checked_at"] = now
 
@@ -253,7 +300,8 @@ async def persist_listing(
             if not allow_existing:
                 raise ListingAlreadyExists("Listing with this URL already exists")
             old_price = row.price_kzt
-            protect_full_details = (row.details_imported_at is not None or row.repair_source_kind == "description") and not payload.details_extracted and payload.source != "manual"
+            protect_full_details = (row.details_imported_at is not None or row.repair_source_kind == "description"
+                                    or row.mortgage_source_kind in _TEXT_MORTGAGE_SOURCES) and not payload.details_extracted and payload.source != "manual"
             if repair[0] is not None:
                 trusted_existing = bool(row.repair_condition and row.repair_source_kind != "description")
                 if repair[1] != "description" or not (trusted_existing or protect_full_details):
@@ -263,6 +311,17 @@ async def persist_listing(
                   and (payload.details_extracted or payload.source == "manual")):
                 for key in _REPAIR_FIELDS:
                     setattr(row, key, None)
+            if mortgage[0] is not None:
+                trusted_existing = row.mortgage_supported is not None and row.mortgage_source_kind not in _TEXT_MORTGAGE_SOURCES
+                if mortgage[1] not in _TEXT_MORTGAGE_SOURCES or not (trusted_existing or protect_full_details):
+                    for key, value in zip(_MORTGAGE_FIELDS, mortgage):
+                        setattr(row, key, value)
+            elif (row.mortgage_source_kind in _TEXT_MORTGAGE_SOURCES
+                  and (payload.description is not None or row.mortgage_source_kind == "title")
+                  and (payload.details_extracted or payload.source == "manual")):
+                for key in _MORTGAGE_FIELDS:
+                    setattr(row, key, None)
+                mortgage_cleared = True
             complex_changed = bool(payload.residential_complex) and (
                 (payload.residential_complex or '').strip().casefold()
                 != (row.residential_complex or '').strip().casefold()
@@ -289,7 +348,7 @@ async def persist_listing(
                 row.twogis_review_count = payload.twogis_review_count
                 row.twogis_url = payload.twogis_url
             for key, value in values.items():
-                if key in _REPAIR_FIELDS:
+                if key in _REPAIR_FIELDS or key in _MORTGAGE_FIELDS:
                     continue
                 if key.startswith('complex_description'):
                     continue
@@ -300,6 +359,8 @@ async def persist_listing(
                 if key == "property_details" and not value:
                     continue
                 if key == "description" and protect_full_details:
+                    continue
+                if key == "title" and protect_full_details and row.mortgage_source_kind == "title":
                     continue
                 if key in {"source_url", "photo_urls", "twogis_checked_at"}:
                     continue
@@ -313,10 +374,11 @@ async def persist_listing(
             if old_price != payload.price_kzt:
                 price_change = (old_price, payload.price_kzt)
                 session.add(_snapshot(row.id, payload.price_kzt, payload.area_m2))
-        await _sync_search_results(session, row, now)
+        await _sync_search_results(session, row, now, clear_unknown_mortgage=mortgage_cleared)
         await session.commit()
         await session.refresh(row)
 
+    payload = payload.model_copy(update={key: getattr(row, key) for key in (*_REPAIR_FIELDS, *_MORTGAGE_FIELDS)})
     assessment = assess_listing(payload, get_settings())
     if refresh_ai:
         analysis = await analyze_listing(payload, assessment)

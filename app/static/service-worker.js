@@ -1,5 +1,5 @@
-const CACHE = 'apartment-agent-v48';
-const ASSETS = ['/', '/static/styles.css?v=142', '/static/app.js?v=157', '/static/icon.svg', '/manifest.webmanifest'];
+const CACHE = 'apartment-agent-v49';
+const ASSETS = ['/', '/static/styles.css?v=143', '/static/app.js?v=158', '/static/icon.svg', '/manifest.webmanifest'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS.map(url => new Request(url, {cache:'reload'})))));
