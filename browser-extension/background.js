@@ -16,7 +16,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message?.type === 'apartment-agent-queue-finished') {
-    ApartmentAgentBathroomQueue.finished(sender, message.outcome, message.error).then(() => sendResponse({ok:true}));
+    ApartmentAgentBathroomQueue.finished(sender, message.outcome, message.error, message.reason).then(() => sendResponse({ok:true}));
     return true;
   }
   if (message?.type !== 'apartment-agent-import') return false;

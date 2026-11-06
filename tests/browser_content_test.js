@@ -5,12 +5,14 @@ const vm = require('node:vm');
 const extractorSource = fs.readFileSync('browser-extension/extractor.js', 'utf8');
 const contentSource = fs.readFileSync('browser-extension/content.js', 'utf8');
 
-function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyAt = 0, failures = 0, respond = true} = {}) {
+function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyAt = 0, failures = 0, respond = true, failureMessage = 'Сервер недоступен'} = {}) {
   let now = 0;
   let sequence = 0;
   const tasks = [];
   const posted = [];
   const outcomes = [];
+  const reasons = [];
+  const errors = [];
   const messages = [];
   const notices = [];
   const setTimeout = (callback, delay) => tasks.push({at: now + delay, sequence:sequence++, callback});
@@ -27,10 +29,10 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
     createElement() {return {dataset:{}, style:{}, remove(){this.removed = true;}};},
   };
   const chrome = {runtime:{sendMessage(message, callback) {
-    if (message.type === 'apartment-agent-queue-finished') { outcomes.push(message.outcome); callback?.({ok:true}); return; }
+    if (message.type === 'apartment-agent-queue-finished') { outcomes.push(message.outcome); reasons.push(message.reason || ''); errors.push(message.error || ''); callback?.({ok:true}); return; }
     posted.push(JSON.parse(JSON.stringify(message.payload)));
     if (respond) setTimeout(() => callback(posted.length <= failures
-      ? {ok:false, error:'Сервер недоступен'}
+      ? {ok:false, error:failureMessage}
       : {ok:true, listing:{assessment:{score:95}}}), 50);
   }}};
   const context = {
@@ -52,7 +54,7 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
     }
     now = target;
   };
-  return {run, advance, extract, posted, messages, outcomes, document};
+  return {run, advance, extract, posted, messages, outcomes, reasons, errors, document};
 }
 
 // Repeated extractor calls read the DOM at call time without reinjecting code.
@@ -109,11 +111,21 @@ assert.equal(failed.posted.length, 3, 'network failures have a bounded retry cou
 assert.match(failed.messages.at(-1), /Сервер недоступен/);
 assert.deepEqual(failed.outcomes, ['error']);
 
+const apiDenied = fixture({failures:100,failureMessage:'API HTTP 403'});
+apiDenied.run();
+apiDenied.advance(14000);
+assert.deepEqual(apiDenied.outcomes, ['error'], 'our own API error banner must not be mistaken for a site CAPTCHA');
+assert.match(apiDenied.messages.at(-1), /API HTTP 403/);
+
 const missing = fixture({readyAt:20000});
 missing.run();
 missing.advance(14000);
 assert.equal(missing.posted.length, 0);
 assert.match(missing.messages.at(-1), /не удалось определить price_kzt/);
+assert.deepEqual(missing.outcomes, ['unknown']);
+assert.deepEqual(missing.reasons, ['unreadable']);
+assert.match(missing.errors[0], /Не удалось прочитать: price_kzt/);
+assert.match(missing.errors[0], /Заголовок: 4-комнатная квартира 100 м²/);
 
 const noResponse = fixture({respond:false});
 noResponse.run();
@@ -121,7 +133,7 @@ noResponse.advance(14000);
 assert.equal(noResponse.posted.length, 1, 'an in-flight request is not duplicated');
 assert.match(noResponse.messages.at(-1), /подтверждение сохранения не получено/);
 
-for (const title of ['Проверка безопасности', 'Captcha', 'Are you a robot?']) {
+for (const title of ['Проверка безопасности', 'Captcha', 'Are you a robot?', '403 Forbidden', 'HTTP 429 Too Many Requests', '468', 'Access denied']) {
   const challenge = fixture();
   challenge.document.title = title;
   challenge.run();
@@ -129,6 +141,16 @@ for (const title of ['Проверка безопасности', 'Captcha', 'Ar
   assert.equal(challenge.posted.length, 0, 'never import or solve a browser challenge');
   assert.deepEqual(challenge.outcomes, ['blocked']);
   assert.match(challenge.messages.at(-1), /самостоятельно/);
+}
+
+for (const title of ['Объявление неактуально', 'Это объявление было удалено', 'Объявление в архиве', 'Объявление больше не актуально', 'Объявление уже неактивно', 'Архивное объявление']) {
+  const unavailable = fixture();
+  unavailable.document.title = title;
+  unavailable.run();
+  unavailable.advance(14000);
+  assert.equal(unavailable.posted.length, 0);
+  assert.deepEqual(unavailable.outcomes, ['unknown']);
+  assert.deepEqual(unavailable.reasons, ['unavailable']);
 }
 
 console.log('Browser content lifecycle checks passed');

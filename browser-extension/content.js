@@ -27,16 +27,29 @@
   let savedMessage = '';
   let queueNotified = false;
   let lastSavedBathrooms = null;
-  const notifyQueue = (outcome, error = '') => {
+  const notifyQueue = (outcome, error = '', reason = '') => {
     if (queueNotified) return;
     queueNotified = true;
-    chrome.runtime.sendMessage({type:'apartment-agent-queue-finished', outcome, error}, () => { void chrome.runtime.lastError; });
+    chrome.runtime.sendMessage({type:'apartment-agent-queue-finished', outcome, error, reason}, () => { void chrome.runtime.lastError; });
+  };
+  const pageText = () => {
+    let text = String(document.body?.innerText || '');
+    for (const notice of document.querySelectorAll('[data-apartment-agent-extension-message], [data-apartment-agent-message]')) {
+      text = text.replace(notice.innerText || notice.textContent || '', '');
+    }
+    return text;
   };
   const challengeDetected = () => {
     const title = String(document.title || '');
-    const text = String(document.body?.innerText || '');
+    const text = pageText();
     const check = /captcha|проверка\s+(?:безопасности|браузера)|подтвердите.{0,30}(?:человек|робот)|checking\s+your\s+browser|are\s+you\s+(?:a\s+)?robot|robot\s+check|доступ\s+ограничен/i;
-    return check.test(title) || text.length < 5000 && check.test(text);
+    const httpBlock = /\b(?:Forbidden|Access\s+denied|Too\s+many\s+requests)\b|(?:HTTP(?:\s+Error)?|Error|Ошибка)\s*[:—-]?\s*(?:403|429|468)(?!\d)|(?:^|\n)\s*(?:403|429|468)(?=\s|:|$)/i;
+    return check.test(title) || httpBlock.test(title)
+      || text.length < 5000 && (check.test(text) || httpBlock.test(text));
+  };
+  const unavailableDetected = () => {
+    const text = `${document.title || ''} ${pageText()}`;
+    return /объявление(?:\s+(?:было|больше|уже|сейчас))?\s+(?:не\s*актуально|не\s*активно|удалено|снято\s+с\s+публикации|в\s+архиве|перенесено\s+в\s+архив|не\s+найдено)|архивное\s+объявление|такое\s+объявление\s+не\s+существует/i.test(text);
   };
   const bathroomLabel = payload => Number.isInteger(payload.bathrooms_count)
     ? `Санузлов: ${payload.bathrooms_count_is_lower_bound ? 'не менее ' : ''}${payload.bathrooms_count}.`
@@ -53,13 +66,20 @@
       if (!Number.isInteger(lastSavedBathrooms)) notifyQueue('unknown');
     } else {
       show(`ApartmentAgent: не удалось определить ${missing.length ? missing.join(', ') : 'данные объявления'}. Обновите страницу или используйте ручной ввод.`, true);
-      notifyQueue('error', 'Не удалось прочитать обязательные данные объявления');
+      const fields = missing.length ? missing.join(', ') : 'price_kzt, area_m2, rooms (данные недоступны)';
+      const title = String(document.title || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+      notifyQueue('unknown', `Не удалось прочитать: ${fields}.${title ? ` Заголовок: ${title}` : ''}`, 'unreadable');
     }
   };
   const observe = () => {
     if (challengeDetected()) {
       show('ApartmentAgent: сайт запросил проверку браузера. Пройдите её самостоятельно и продолжите очередь в приложении.', true);
       notifyQueue('blocked', 'Сайт запросил проверку браузера');
+      return;
+    }
+    if (unavailableDetected()) {
+      show('ApartmentAgent: объявление удалено или неактуально. Очередь пропускает эту страницу.');
+      notifyQueue('unknown', 'Объявление удалено или неактуально', 'unavailable');
       return;
     }
     if (Date.now() >= deadline) { finish(); return; }

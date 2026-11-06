@@ -113,7 +113,6 @@
       state.kept_tab_url = task.url;
       state.next_wake = 0;
       await save();
-      if (outcome === 'error') await api('/pause', {});
       await chrome.alarms.clear(WAKE);
       return;
     }
@@ -176,13 +175,18 @@
       await chrome.alarms.clear(WAKE);
       return;
     }
-    if (state.halted) return;
-    if (state.job_id && status.job_id !== state.job_id) {
+    if (status.job_id !== state.job_id) {
       const oldTask = state.task;
       state.task = null;
+      state.unreadable_streak = 0;
+      state.halted = false;
+      state.message = '';
+      state.next_wake = 0;
+      state.job_id = status.job_id;
       await save();
       await closeOwned(oldTask);
     }
+    if (state.halted) return;
     state.job_id = status.job_id;
     await save();
     if (state.task) {
@@ -209,8 +213,10 @@
     }
     const url = canonical(claim.task.url);
     if (!url) {
-      await api('/pause', {});
-      await halt('Сервер вернул неподдерживаемый адрес объявления');
+      state.job_id = claim.job_id;
+      state.task = {...claim.task, tab_id:null, started_at:Date.now()};
+      await save();
+      await complete('error', 'Сервер вернул неподдерживаемый адрес объявления');
       return;
     }
     state.job_id = claim.job_id;
@@ -247,11 +253,21 @@
       if (!senderIsTask(sender) || !Number.isInteger(payload?.bathrooms_count) || payload.bathrooms_count < 0) return;
       const tab = await getTab(state.task.tab_id);
       if (!tab || canonical(effectiveURL(tab)) !== state.task.url) { await complete('blocked', 'Адрес вкладки изменился во время импорта'); return; }
+      state.unreadable_streak = 0;
+      await save();
       await complete('imported');
     }),
-    finished: (sender, outcome, error) => run(async () => {
+    finished: (sender, outcome, error, reason) => run(async () => {
       if (!senderIsTask(sender)) return;
-      if (outcome === 'unknown') await complete('unknown');
+      if (outcome === 'unknown') {
+        state.unreadable_streak = reason === 'unreadable' ? (state.unreadable_streak || 0) + 1 : 0;
+        await save();
+        if (state.unreadable_streak >= 3) {
+          const detail = String(error || '').slice(0, 600);
+          await complete('error', `Три страницы подряд не передали обязательные данные. Проверьте доступ к объявлениям и настройки расширения.${detail ? ` Последняя страница: ${detail}` : ''}`);
+        }
+        else await complete('unknown', String(error || '').slice(0, 1000));
+      }
       else await complete(outcome === 'blocked' ? 'blocked' : 'error', String(error || 'Не удалось прочитать объявление').slice(0, 1000));
     }),
     removed: id => run(async () => {
@@ -264,13 +280,13 @@
     start: () => run(async () => {
       await chrome.alarms.create(HEARTBEAT, {periodInMinutes:1});
       if (state.next_wake) await chrome.alarms.create(WAKE, {when:Math.max(Date.now() + 30000, state.next_wake)});
-      if (!state.halted) await poll();
+      await poll();
     }),
     canonical,
   };
   globalThis.ApartmentAgentBathroomQueue = worker;
   chrome.alarms.onAlarm.addListener(alarm => {
-    if ([HEARTBEAT, WAKE].includes(alarm.name)) void run(async () => { if (!state.halted) await poll(); });
+    if ([HEARTBEAT, WAKE].includes(alarm.name)) void run(poll);
   });
   chrome.tabs.onRemoved.addListener(id => { void worker.removed(id); });
   chrome.tabs.onUpdated.addListener((id, change) => { void worker.updated(id, change); });

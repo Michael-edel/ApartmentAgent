@@ -185,7 +185,13 @@ async function loadBathroomCheckStatus() {
     const response = await fetch(bathroomCheckApi, {cache:'no-store'});
     const state = await readJson(response);
     if (!response.ok) throw new Error(state.detail || 'Не удалось получить состояние автопроверки');
-    if (revision === bathroomCheckRevision && !bathroomCheckBusy) updateBathroomCheck(state);
+    if (revision === bathroomCheckRevision && !bathroomCheckBusy) {
+      const reconnect = bathroomCheckSignature === null && state.status === 'running';
+      updateBathroomCheck(state);
+      if (reconnect) window.setTimeout(() => {
+        if (bathroomCheckState?.status === 'running') window.postMessage({type:'apartment-agent-bathroom-queue'}, location.origin);
+      }, 1500);
+    }
   } catch (error) {
     if (bathroomCheckMessage) bathroomCheckMessage.textContent = error.message;
   } finally {

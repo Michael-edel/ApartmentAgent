@@ -55,7 +55,7 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
       assert.equal(body.lease_token, env.lease.lease_token);
       env.outcomes.push(body.outcome);
       env.lease = null;
-      if (body.outcome === 'blocked') env.status = 'paused';
+      if (['blocked', 'error'].includes(body.outcome)) env.status = 'paused';
       result.status = env.status;
     } else if (path === '/pause') {env.status = 'paused'; result.status = 'paused';}
     return {ok:true,async json() {return result;}};
@@ -241,8 +241,79 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   await invalidWorker.start();
   assert.equal(malicious.created.length, 0);
   assert.equal(malicious.status, 'paused');
+  assert.deepEqual(malicious.outcomes, ['error']);
+  assert.equal(malicious.requests.some(item => item.path === '/pause'), false, 'invalid URL preserves its real cause through complete(error)');
   for (const url of ['http://krisha.kz/a/show/1','https://krisha.kz/a/show/nope','https://krisha.kz:444/a/show/1','https://user:password@krisha.kz/a/show/1','https://example.com/a/show/1']) assert.equal(invalidWorker.canonical(url), null);
   assert.equal(invalidWorker.canonical('https://www.krisha.kz/a/show/123/?from=search#photos'), 'https://krisha.kz/a/show/123');
+
+  const unreadable = environment(['https://krisha.kz/a/show/100','https://krisha.kz/a/show/200','https://krisha.kz/a/show/300','https://krisha.kz/a/show/400']);
+  let unreadableWorker = unreadable.worker();
+  await unreadableWorker.start();
+  for (let index = 0; index < 3; index++) {
+    await unreadableWorker.finished({tab:{id:unreadable.state().task.tab_id}}, 'unknown', 'Не удалось прочитать обязательные данные объявления', 'unreadable');
+    assert.equal(unreadable.state().unreadable_streak, index + 1);
+    if (index < 2) {
+      assert.equal(unreadable.status, 'running', 'one unreadable page must not pause the queue');
+      unreadableWorker = unreadable.worker(); // The streak survives an MV3 restart.
+      await unreadableWorker.start();
+      unreadable.now += 30000;
+      await unreadableWorker.kick(appSender);
+    }
+  }
+  assert.deepEqual(unreadable.outcomes, ['unknown','unknown','error']);
+  assert.equal(unreadable.status, 'paused');
+  assert.equal(unreadable.created.length, 3);
+  assert.equal(unreadable.requests.some(item => item.path === '/pause'), false, 'do not overwrite the automatic error cause with a user-pause message');
+  assert.match(unreadable.requests.filter(item => item.path === '/complete').at(-1).body.error, /Три страницы подряд/);
+  assert.match(unreadable.state().message, /Три страницы подряд/);
+
+  for (const oldStatus of ['running','paused']) {
+    const staleHalted = environment();
+    staleHalted.storage[KEY] = {worker_id:'persistent-worker',job_id:1,task:null,next_wake:0,halted:true,message:'Old error',unreadable_streak:3};
+    staleHalted.status = oldStatus;
+    const sameWorker = staleHalted.worker();
+    await sameWorker.start();
+    assert.equal(staleHalted.requests.filter(item => item.path === '/claim').length, 0, 'never automatically resume the same halted/paused job');
+    assert.equal(staleHalted.created.length, 0);
+    staleHalted.jobId = 2;
+    staleHalted.status = 'running'; // New job explicitly started by the user.
+    const newJobWorker = staleHalted.worker();
+    await newJobWorker.start();
+    assert.equal(staleHalted.requests.filter(item => item.path === '/claim').length, 1, 'extension reload discovers the newly started job despite old local halt');
+    assert.equal(staleHalted.created.length, 1);
+    assert.equal(staleHalted.state().job_id, 2);
+    assert.equal(staleHalted.state().halted, false);
+    assert.equal(staleHalted.state().unreadable_streak, 0);
+    assert.equal(staleHalted.state().message, '');
+  }
+
+  const detailed = environment(['https://krisha.kz/a/show/100']);
+  detailed.storage[KEY] = {worker_id:'persistent-worker',job_id:1,task:null,next_wake:0,halted:false,unreadable_streak:2};
+  const detailedWorker = detailed.worker();
+  await detailedWorker.start();
+  await detailedWorker.finished({tab:{id:detailed.state().task.tab_id}}, 'unknown', 'Не удалось прочитать: price_kzt, area_m2. Заголовок: Продажа - №1010095181', 'unreadable');
+  const diagnostic = detailed.requests.filter(item => item.path === '/complete').at(-1).body.error;
+  assert.match(diagnostic, /price_kzt, area_m2/);
+  assert.match(diagnostic, /Продажа - №1010095181/);
+
+  for (const resetReason of ['unavailable','']) {
+    const reset = environment(['https://krisha.kz/a/show/100','https://krisha.kz/a/show/200','https://krisha.kz/a/show/300']);
+    const resetWorker = reset.worker();
+    await resetWorker.start();
+    await resetWorker.finished({tab:{id:reset.state().task.tab_id}}, 'unknown', '', 'unreadable');
+    reset.now += 30000;
+    await resetWorker.kick(appSender);
+    await resetWorker.finished({tab:{id:reset.state().task.tab_id}}, 'unknown', '', resetReason);
+    assert.equal(reset.state().unreadable_streak, 0, 'unavailable/complete unknown pages reset the unreadable streak');
+    reset.now += 30000;
+    await resetWorker.kick(appSender);
+    reset.storage[KEY].unreadable_streak = 2;
+    // Reload stored state to exercise reset by a successful known import.
+    const knownWorker = reset.worker();
+    await knownWorker.start();
+    await knownWorker.imported({tab:{id:reset.state().task.tab_id}}, {bathrooms_count:2});
+    assert.equal(reset.state().unreadable_streak, 0);
+  }
 
   const recovered = environment();
   recovered.storage[KEY] = {worker_id:'persistent-worker',job_id:1,task:{id:1,url:'https://krisha.kz/a/show/100',lease_token:'lease-1',tab_id:null,started_at:recovered.now},next_wake:0,halted:false};
