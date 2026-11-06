@@ -103,11 +103,12 @@
   const complete = async (outcome, error = '') => {
     const task = state.task;
     if (!task) return;
-    await api('/complete', {worker_id:state.worker_id, task_id:task.id, lease_token:task.lease_token, outcome, ...(error ? {error} : {})});
+    const result = await api('/complete', {worker_id:state.worker_id, task_id:task.id, lease_token:task.lease_token, outcome, ...(error ? {error} : {})});
     state.task = null;
-    state.message = error;
-    if (outcome === 'blocked' || outcome === 'error') {
-      // Keep the real browser page open for the user. Never retry a challenge.
+    state.message = result.message || error;
+    if (result.status === 'paused' || outcome === 'blocked' || outcome === 'error') {
+      // The server can also pause an unknown details result. Keep its page for
+      // the user instead of closing the evidence and scheduling the next task.
       state.halted = true;
       state.kept_tab_id = task.tab_id;
       state.kept_tab_url = task.url;

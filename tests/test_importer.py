@@ -7,6 +7,7 @@ from app.importer import (
     _coordinates_from_html,
     _embedded_number,
     _find_coordinate,
+    _find_address,
     _find_district,
     _find_numeric,
     _find_text,
@@ -79,6 +80,34 @@ def test_reads_address_and_coordinates_from_nested_data() -> None:
     assert _find_text(data, {"address"}) == "ул. Кенен Азербаев, 6, Астана"
     assert _find_coordinate(data, {"latitude"}, -90, 90) == 51.128
     assert _find_coordinate(data, {"longitude"}, -180, 180) == 71.43
+
+
+def test_employer_caption_is_skipped_before_a_structured_apartment_address():
+    assert _find_address([{"seller": {"address": "Работает в компании Royal Invest"},
+                           "listing": {"streetAddress": "Кудайбердыулы 36/3"}}]) == "Кудайбердыулы 36/3"
+    assert _find_address([{"address": "Работает в компании Royal Invest"}]) is None
+
+
+@pytest.mark.parametrize("explicit_address, expected", [(None, "Кудайбердыулы 36/3"),
+                                                       ("Кенен Азербаев 6б", "Кенен Азербаев 6б")])
+async def test_employer_address_does_not_override_apartment_location(monkeypatch, explicit_address, expected):
+    html = '''<meta property="og:title" content="Продажа 4-комнатной квартиры №123: Кудайбердыулы 36/3, Астана">
+    <script type="application/ld+json">{"price":45000000,"area":106.4,"rooms":4,
+    "seller":{"address":"Работает в компании Royal Invest"}}</script>
+    <div class="seller-address">Работает в компании Royal Invest</div>'''
+    if explicit_address:
+        html += f"<dl><dt>Адрес</dt><dd>{explicit_address}</dd></dl>"
+
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url):
+            return httpx.Response(200, text=html, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    result = await import_krisha_listing("https://krisha.kz/a/show/123")
+    assert result.address == expected
 
 
 def test_falls_back_to_visible_title_and_map_coordinates() -> None:

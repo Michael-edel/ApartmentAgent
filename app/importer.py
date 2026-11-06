@@ -438,6 +438,25 @@ def _find_text(data: list[Any], keys: set[str]) -> str | None:
     return None
 
 
+def _valid_property_address(value: str | None) -> str | None:
+    text = re.sub(r"\s+", " ", value or "").strip()
+    if 5 <= len(text) <= 500 and not re.search(r"работает\s+в\s+компании", text, re.I):
+        return text
+    return None
+
+
+def _find_address(data: list[Any]) -> str | None:
+    keys = {"address", "streetaddress", "formattedaddress", "fulladdress", "addressline", "displayaddress"}
+    for root in data:
+        for item in _walk(root):
+            for key, value in item.items():
+                if str(key).lower() in keys:
+                    candidate = _valid_property_address(_text_value(value))
+                    if candidate:
+                        return candidate
+    return None
+
+
 def _find_district(data: list[Any], combined: str) -> str | None:
     names = r"Есильский|Нура|Алматы|Сарыарка|Байконур"
 
@@ -680,10 +699,7 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
     if not residential_complex:
         complex_match = re.search(r"ЖК\s*[«\"]?([^»\".,;]{2,100})", combined, re.IGNORECASE)
         residential_complex = complex_match.group(1).strip() if complex_match else None
-    address = _property_value(property_details, "Адрес") or _find_text(
-        data,
-        {"address", "streetAddress", "formattedAddress", "fullAddress", "addressLine", "displayAddress"},
-    ) or _address_from_text(combined)
+    address = _valid_property_address(_property_value(property_details, "Адрес")) or _find_address(data) or _address_from_text(combined)
     latitude = _find_coordinate(data, {"latitude", "lat", "geoLatitude", "geoLat"}, -90, 90)
     longitude = _find_coordinate(data, {"longitude", "lng", "lon", "geoLongitude", "geoLon"}, -180, 180)
     html_latitude, html_longitude = _coordinates_from_html(html)

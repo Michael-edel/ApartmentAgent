@@ -370,7 +370,10 @@ async def bathroom_check_complete(request: CompleteRequest) -> dict:
                 count = None
                 job.status = "paused"
                 job.message = "Подробные данные объявления не получены. Проверьте расширение и нажмите «Продолжить»."
+                if request.error:
+                    job.message += " Причина: " + request.error[:500]
             task.status = "unknown" if count is None else "confirmed" if count >= 2 else "rejected"
+            task.error = request.error if task.status == "unknown" else None
         task.completed_at = now
         task.last_outcome = request.outcome
         job.next_claim_at = now + timedelta(seconds=GAP_SECONDS)

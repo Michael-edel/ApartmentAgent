@@ -167,6 +167,24 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
   assert.equal(full.seller_name,'Айгуль',file);
   assert.equal(full.seller_type,'Хозяин недвижимости',file);
   assert.equal(full.address,'Кудайбердыулы 36/3',file);
+  const employerNode = {className:'seller-address',textContent:'Работает в компании Royal Invest'};
+  const exactHeadline = '4-комнатная квартира · 106.4 м² · 3/9 этаж, Кудайбердыулы 36/3 — Район Встречи';
+  const employerBeforeHeadline = extract(file, common,null,null,null,null,undefined,null,null,{
+    heading:exactHeadline,nodes:{'[itemprop="streetAddress"]':[employerNode]},
+  });
+  assert.equal(employerBeforeHeadline.address,'Кудайбердыулы 36/3',`${file}: seller employer must not override the apartment address`);
+  const employerOnly = extract(file, common,{address:'Работает в компании Royal Invest'},null,null,null,undefined,null,null,{
+    nodes:{'[itemprop="streetAddress"]':[employerNode]},
+  });
+  assert.equal(employerOnly.address,null,`${file}: employer alone is not an apartment address`);
+  const explicitAddress = extract(file, common,null,null,null,null,undefined,null,null,{
+    heading:exactHeadline,nodes:{'.offer__info-item':[property('Адрес','Кенен Азербаев 6б')],'[itemprop="streetAddress"]':[employerNode]},
+  });
+  assert.equal(explicitAddress.address,'Кенен Азербаев 6б',`${file}: an explicit apartment address is retained`);
+  const structuredAddress = extract(file, common,{seller:{address:'Работает в компании Royal Invest'},listing:{streetAddress:'Кудайбердыулы 36/3'}},null,null,null,undefined,null,null,{
+    nodes:{'[itemprop="streetAddress"]':[employerNode]},
+  });
+  assert.equal(structuredAddress.address,'Кудайбердыулы 36/3',`${file}: skip the seller employer and keep looking in structured data`);
   assert.equal(full.district,'Байконур район',file);
   assert.equal(full.area_m2,106.4,file);
   assert.equal(full.rooms,4,file);

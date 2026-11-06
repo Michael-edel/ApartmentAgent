@@ -56,7 +56,9 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
       env.outcomes.push(body.outcome);
       env.lease = null;
       if (['blocked', 'error'].includes(body.outcome)) env.status = 'paused';
+      if (env.completeStatus) env.status = env.completeStatus;
       result.status = env.status;
+      if (env.completeMessage) result.message = env.completeMessage;
     } else if (path === '/pause') {env.status = 'paused'; result.status = 'paused';}
     return {ok:true,async json() {return result;}};
   };
@@ -162,9 +164,46 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   const unknown = environment();
   const unknownWorker = unknown.worker();
   await unknownWorker.start();
-  await unknownWorker.finished({tab:{id:unknown.state().task.tab_id}}, 'unknown');
+  const unknownId = unknown.state().task.tab_id;
+  await unknownWorker.finished({tab:{id:unknownId}}, 'unknown');
   assert.deepEqual(unknown.outcomes, ['unknown']);
   assert.equal(unknown.created.length, 1);
+  assert.equal(unknown.tabs.has(unknownId), false, 'an unknown result closes its own tab when the server keeps running');
+  assert.ok(unknown.alarms.has('apartment-agent-bathroom-wake'));
+
+  // A missing full details snapshot pauses on the server, even for outcome
+  // "unknown". Preserve that page and require an explicit user continuation.
+  for (const userNavigated of [false, true]) {
+    const serverPaused = environment();
+    serverPaused.mode = 'details';
+    serverPaused.completeStatus = 'paused';
+    serverPaused.completeMessage = 'Подробные данные объявления не получены. Проверьте вкладку.';
+    let serverPausedWorker = serverPaused.worker();
+    await serverPausedWorker.start();
+    const id = serverPaused.state().task.tab_id;
+    if (userNavigated) serverPaused.tabs.get(id).pendingUrl = 'https://example.com/user-page';
+    await serverPausedWorker.finished({tab:{id}}, 'unknown', 'Не удалось прочитать полный блок', 'unreadable');
+    assert.deepEqual(serverPaused.outcomes, ['unknown']);
+    assert.equal(serverPaused.state().task, null);
+    assert.equal(serverPaused.state().halted, true);
+    assert.equal(serverPaused.state().message, serverPaused.completeMessage);
+    assert.equal(serverPaused.state().kept_tab_id, id);
+    assert.equal(serverPaused.state().next_wake, 0);
+    assert.equal(serverPaused.alarms.has('apartment-agent-bathroom-wake'), false);
+    assert.ok(serverPaused.tabs.has(id), 'keep the problem page, including a user-initiated pending navigation');
+    serverPaused.now += 120000;
+    serverPausedWorker = serverPaused.worker();
+    await serverPausedWorker.start();
+    assert.equal(serverPaused.created.length, 1, 'worker restart never resumes a server-paused result');
+    assert.equal(serverPaused.requests.filter(item => item.path === '/claim').length, 1);
+    serverPaused.jobId = 2;
+    serverPaused.status = 'running'; // A new job was explicitly started in the app.
+    await serverPausedWorker.start();
+    assert.equal(serverPaused.state().halted, false);
+    assert.equal(serverPaused.state().job_id, 2);
+    assert.equal(serverPaused.created.length, 2);
+    assert.ok(serverPaused.tabs.has(id), 'a new job must not close the preserved/user-navigated page');
+  }
 
   // CAPTCHA/redirect is a human handoff. No automatic continuation or tab close.
   for (const reason of ['content challenge', 'redirect', 'timeout', 'closed']) {

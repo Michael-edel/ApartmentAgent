@@ -260,6 +260,12 @@
     }
     return null;
   };
+  const validPropertyAddress = value => {
+    const text = clean(value);
+    // Some seller cards use an "address" class for the employer caption.
+    // That caption is not the apartment's location, even when it precedes h1.
+    return text.length >= 5 && text.length <= 500 && !/работает\s+в\s+компании/i.test(text) ? text : null;
+  };
   const coordinate = (value, minimum, maximum) => {
     const parsed = typeof value === 'number' ? value : Number(clean(value).replace(',', '.').replace(/[^0-9+-.]/g, ''));
     return Number.isFinite(parsed) && parsed >= minimum && parsed <= maximum ? parsed : null;
@@ -368,8 +374,8 @@
   const description = domDescription || clean(meta('og:description') || meta('description')).slice(0,20000) || null;
   const cityText = clean(propertyDetails['Город'] || findText(['city', 'addressLocality']));
   const city = cityText ? cityText.split(',')[0].replace(/^Город\s+/i,'').replace(/\s+(?:р\s*-\s*н|район)\s+.*$/i,'').trim().slice(0,100) : 'Астана';
-  const address = propertyDetails['Адрес'] || listingNodes('[itemprop="streetAddress"], [data-testid*="address" i], [class*="address" i]').map(propertyText).find(value => value.length >= 5 && value.length <= 180)
-    || addressFromText(headline) || findText(['streetAddress', 'formattedAddress', 'fullAddress', 'addressLine', 'displayAddress', 'address']) || addressFromText(fullText);
+  const address = validPropertyAddress(propertyDetails['Адрес']) || listingNodes('[itemprop="streetAddress"], [data-testid*="address" i], [class*="address" i]').map(propertyText).find(value => value.length <= 180 && validPropertyAddress(value))
+    || addressFromText(headline) || findValue(['streetAddress', 'formattedAddress', 'fullAddress', 'addressLine', 'displayAddress', 'address'], value => validPropertyAddress(textValue(value))) || addressFromText(fullText);
   const complex = propertyDetails['Жилой комплекс'] || findText(['complexName', 'residentialComplex', 'housingComplex', 'residentialComplexName']) || (headline.match(/ЖК\s*[«"]?([^»".,;]{2,100})/i)?.[1]?.trim() || null);
   const coordinates = pageCoordinates();
   const dataLatitude = findValue(['latitude', 'lat', 'geoLatitude', 'geoLat'], value => coordinate(value, -90, 90));

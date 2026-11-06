@@ -61,7 +61,7 @@ app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 @app.get("/", include_in_schema=False)
 async def web_app() -> FileResponse:
-    return FileResponse(_static_dir / "index.html")
+    return FileResponse(_static_dir / "index.html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/manifest.webmanifest", include_in_schema=False)
@@ -71,7 +71,8 @@ async def manifest() -> FileResponse:
 
 @app.get("/service-worker.js", include_in_schema=False)
 async def service_worker() -> FileResponse:
-    return FileResponse(_static_dir / "service-worker.js", media_type="application/javascript")
+    return FileResponse(_static_dir / "service-worker.js", media_type="application/javascript",
+                        headers={"Cache-Control": "no-store"})
 
 
 @app.get("/health")

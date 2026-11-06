@@ -768,5 +768,8 @@ function refreshAfterReturn() {
 }
 document.addEventListener('visibilitychange', refreshAfterReturn);
 window.addEventListener('focus', refreshAfterReturn);
-if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/service-worker.js'));
+if ('serviceWorker' in navigator) window.addEventListener('load', () => {
+  void navigator.serviceWorker.register('/service-worker.js', {updateViaCache:'none'})
+    .then(registration => registration.update()).catch(() => {});
+});
 (async () => { if (/^#listing-[1-9]\d*$/.test(location.hash)) await openSavedListingFromHash(); else await loadListings(); await Promise.all([loadSearchStatus(), loadSearchResults()]); })();

@@ -111,6 +111,18 @@ async def test_completion_uses_saved_database_count_and_is_idempotent(env, count
 
 
 @pytest.mark.asyncio
+async def test_unknown_completion_keeps_diagnostic_without_becoming_save_failure(env):
+    await seed(env)
+    await queue.bathroom_check_start()
+    leased = await claim()
+    result = await complete(leased, "unknown", error="Не удалось прочитать: price_kzt")
+    assert result["unknown"] == 1 and result["failed"] == 0
+    async with env.sessions() as session:
+        task = await session.get(BathroomCheckTask, leased["task"]["id"])
+        assert task.error == "Не удалось прочитать: price_kzt"
+
+
+@pytest.mark.asyncio
 async def test_claim_spacing_and_snapshot_do_not_depend_on_changed_search_settings(env):
     await seed(env, ("https://krisha.kz/a/show/100", "https://krisha.kz/a/show/200"))
     await queue.bathroom_check_start()
@@ -321,6 +333,16 @@ async def test_details_timestamp_older_than_claim_cannot_confirm_new_task(env):
         await session.commit()
     result = await complete(leased)
     assert result["status"] == "paused" and result["enriched"] == result["confirmed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_details_pause_explains_unreadable_fields(env):
+    await seed(env)
+    await queue.bathroom_check_start(queue.StartRequest(mode="details"))
+    leased = await queue.bathroom_check_claim(queue.ClaimRequest(worker_id="browser-1", extension_version="0.2.1"))
+    result = await complete(leased, "unknown", error="Не удалось прочитать: price_kzt")
+    assert result["status"] == "paused" and result["enriched"] == 0
+    assert "Причина: Не удалось прочитать: price_kzt" in result["message"]
 
 
 @pytest.mark.asyncio
