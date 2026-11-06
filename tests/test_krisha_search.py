@@ -41,5 +41,23 @@ def test_parse_search_page_collects_and_deduplicates_links() -> None:
     assert items[0].title == "2-комнатная квартира, 60 м²"
 
 
+def test_search_cards_pair_title_with_their_own_price() -> None:
+    html = '''
+    <div class="a-card__main-info"><div class="a-card__header-left">
+      <a href="/a/show/111" class="a-card__title">3-комнатная квартира · 80 м²</a>
+    </div><div class="a-card__price">34&nbsp;000&nbsp;000&nbsp;<span>₸</span></div></div>
+    <div class="a-card__main-info"><div><a class="a-card__title" href="/a/show/222">
+      3-комнатная квартира · 100 м²</a></div><div class="a-card__price">45&nbsp;000&nbsp;000 <span>₸</span></div></div>
+    <div class="a-card__title-info"><div class="a-card__price">от 39&nbsp;000&nbsp;000 <span>₸</span></div>
+      <a href="/a/show/333" class="a-card__title link">3-комнатная квартира · 77 м²</a></div>
+    '''
+    items = parse_krisha_search_page(html)
+    assert [(item.url, item.snippet) for item in items] == [
+        ("https://krisha.kz/a/show/111", "34 000 000 ₸"),
+        ("https://krisha.kz/a/show/222", "45 000 000 ₸"),
+        ("https://krisha.kz/a/show/333", "от 39 000 000 ₸"),
+    ]
+
+
 def test_search_provider_rejects_lookalike_host() -> None:
     assert is_allowed_listing_url("https://notkrisha.kz/a/show/123") is False

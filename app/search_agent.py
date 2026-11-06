@@ -10,24 +10,15 @@ from app.database import SessionLocal
 from app.importer import ListingImportError, import_krisha_listing
 from app.krisha_search import KrishaSearchBlocked
 from app.listing_service import persist_listing
-from app.models import SearchHistory, SearchResult
-from app.search_analysis import analyze_search_result, is_target_search_result
+from app.models import Listing, SearchHistory, SearchPreference, SearchResult
+from app.search_analysis import analyze_search_result, is_target_search_result, parse_bathrooms_count, bathrooms_is_lower_bound
 from app.search_providers import PROVIDERS, SearchItem
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
+_search_lock = asyncio.Lock()
 
 DISTRICTS = ["Есильский район", "Нура район", "Алматы район", "Сарыарка район", "Байконур район"]
-BASE_QUERIES = [
-    "Астана купить 2-комнатную квартиру krisha.kz",
-    "Астана 2-комнатная квартира продажа krisha.kz",
-    "Астана двухкомнатная квартира krisha.kz",
-    "Астана полноценная 2-комнатная квартира krisha.kz",
-    "Астана квартира 2 комнаты до 30 млн krisha.kz",
-]
-SEARCH_QUERIES = BASE_QUERIES + [
-    f"Астана 2-комнатная квартира {district} krisha.kz" for district in DISTRICTS
-]
 QUERYLESS_PROVIDERS = {"krisha_direct"}
 
 
@@ -57,6 +48,7 @@ def _priority(title: str, snippet: str | None) -> str:
         max_price=settings.max_price_kzt,
         min_area=settings.min_area_m2,
         max_area=settings.max_area_m2,
+        target_rooms=settings.target_rooms,
     )
     if result["score"] >= 85:
         return "urgent"
@@ -72,24 +64,40 @@ def _matches_target(item: SearchItem) -> bool:
         max_price=settings.max_price_kzt,
         min_area=settings.min_area_m2,
         max_area=settings.max_area_m2,
+        target_rooms=settings.target_rooms,
     )
 
 
+def bathrooms_for_row(row: SearchResult) -> int | None:
+    count = getattr(row, 'bathrooms_count', None)
+    return count if count is not None else parse_bathrooms_count(f"{row.title or ''} {row.snippet or ''}")
+
+
 def _row_matches_target(row: SearchResult) -> bool:
+    bathrooms = bathrooms_for_row(row)
+    return _row_matches_basic(row) and (not settings.min_bathrooms or (
+        bathrooms is not None and bathrooms >= settings.min_bathrooms
+    ))
+
+
+def _row_matches_basic(row: SearchResult) -> bool:
     return is_target_search_result(
         row.title,
         row.snippet,
         max_price=settings.max_price_kzt,
         min_area=settings.min_area_m2,
         max_area=settings.max_area_m2,
+        target_rooms=settings.target_rooms,
     )
 
 
 def _rotated_queries() -> list[str]:
-    count = min(max(settings.search_queries_per_run, 1), len(SEARCH_QUERIES))
+    rooms = settings.target_rooms
+    queries = [f"Астана {rooms}-комнатная квартира продажа krisha.kz"] + [f"Астана {rooms}-комнатная квартира {district} krisha.kz" for district in DISTRICTS]
+    count = min(max(settings.search_queries_per_run, 1), len(queries))
     slot = int(datetime.now(UTC).timestamp() // (max(settings.search_interval_minutes, 15) * 60))
-    start = (slot * count) % len(SEARCH_QUERIES)
-    return [SEARCH_QUERIES[(start + offset) % len(SEARCH_QUERIES)] for offset in range(count)]
+    start = (slot * count) % len(queries)
+    return [queries[(start + offset) % len(queries)] for offset in range(count)]
 
 
 async def _save_items(
@@ -106,19 +114,16 @@ async def _save_items(
     candidates: list[SearchImportCandidate] = []
     now = datetime.now(UTC)
     async with SessionLocal() as session:
-        old_rows = (await session.scalars(select(SearchResult))).all()
-        removed_old = 0
-        for row in old_rows:
-            if not _row_matches_target(row):
-                await session.delete(row)
-                removed_old += 1
-
         for item in accepted_items:
             existing = await session.scalar(select(SearchResult).where(SearchResult.url == item.url))
+            bathrooms_count = parse_bathrooms_count(f"{item.title or ''} {item.snippet or ''}")
             if existing:
                 existing.last_seen = now
                 existing.title = item.title or existing.title
                 existing.snippet = item.snippet or existing.snippet
+                if bathrooms_count is not None:
+                    existing.bathrooms_count = bathrooms_count
+                    existing.bathrooms_count_is_lower_bound = bathrooms_is_lower_bound(f"{item.title or ''} {item.snippet or ''}")
                 if existing.import_status != "imported" or existing.imported_listing_id is None:
                     candidates.append(SearchImportCandidate(result_id=existing.id, url=existing.url))
                 continue
@@ -128,6 +133,8 @@ async def _save_items(
                 query=query,
                 title=item.title,
                 snippet=item.snippet,
+                bathrooms_count=bathrooms_count,
+                bathrooms_count_is_lower_bound=bathrooms_is_lower_bound(f"{item.title or ''} {item.snippet or ''}"),
                 status=f"new:{_priority(item.title, item.snippet)}",
             )
             session.add(row)
@@ -143,7 +150,7 @@ async def _save_items(
                 status="ok",
                 message=(
                     f"Отфильтровано в текущей выдаче: {len(items) - len(accepted_items)}; "
-                    f"принято: {len(accepted_items)}; удалено старых неподходящих: {removed_old}"
+                    f"принято: {len(accepted_items)}"
                 ),
             )
         )
@@ -165,6 +172,11 @@ async def _mark_import_result(
         row.import_status = import_status
         row.import_error = error[:500] if error else None
         row.imported_listing_id = listing_id
+        if listing_id is not None:
+            listing = await session.get(Listing, listing_id)
+            if listing is not None and listing.bathrooms_count is not None:
+                row.bathrooms_count = listing.bathrooms_count
+                row.bathrooms_count_is_lower_bound = listing.bathrooms_count_is_lower_bound
         row.imported_at = datetime.now(UTC) if import_status == "imported" else None
         await session.commit()
 
@@ -244,7 +256,16 @@ async def _fetch_one(
         return provider_name, query, None, exc
 
 
-async def run_search() -> SearchSummary:
+async def run_search(rooms: int | None = None, max_price_kzt: int | None = None,
+                     min_area_m2: float | None = None, max_area_m2: float | None = None,
+                     min_bathrooms: int | None = None) -> SearchSummary:
+    async with _search_lock:
+        if rooms is not None or max_price_kzt is not None or min_area_m2 is not None or max_area_m2 is not None or min_bathrooms is not None:
+            await save_search_preference(rooms, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms)
+        return await _run_search()
+
+
+async def _run_search() -> SearchSummary:
     summary = SearchSummary()
     if not settings.search_enabled:
         return summary
@@ -254,7 +275,7 @@ async def run_search() -> SearchSummary:
     jobs: list[tuple[str, str]] = []
 
     for provider_name in enabled_providers:
-        provider_queries = ["direct filters"] if provider_name in QUERYLESS_PROVIDERS else queries
+        provider_queries = [str(settings.target_rooms)] if provider_name in QUERYLESS_PROVIDERS else queries
         summary.providers[provider_name] = {
             "queries": len(provider_queries),
             "found": 0,
@@ -326,30 +347,23 @@ async def get_search_status() -> dict[str, object]:
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     async with SessionLocal() as session:
-        total = await session.scalar(select(func.count(SearchResult.id))) or 0
-        new_total = await session.scalar(
-            select(func.count(SearchResult.id)).where(SearchResult.status.like("new:%"))
-        ) or 0
-        imported_total = await session.scalar(
-            select(func.count(SearchResult.id)).where(SearchResult.import_status == "imported")
-        ) or 0
-        found_hour = await session.scalar(
-            select(func.count(SearchResult.id)).where(SearchResult.first_seen >= hour_ago)
-        ) or 0
-        found_today = await session.scalar(
-            select(func.count(SearchResult.id)).where(SearchResult.first_seen >= day_start)
-        ) or 0
-        urgent = await session.scalar(
-            select(func.count(SearchResult.id)).where(SearchResult.status == "new:urgent")
-        ) or 0
+        total = new_total = imported_total = found_hour = found_today = urgent = bathrooms_unconfirmed = 0
+        engine_counts: dict[str, int] = {}
+        matching_rows = await session.stream_scalars(select(SearchResult))
+        async for row in matching_rows:
+            if settings.min_bathrooms and _row_matches_basic(row) and bathrooms_for_row(row) is None:
+                bathrooms_unconfirmed += 1
+            if not _row_matches_target(row):
+                continue
+            total += 1
+            is_new = row.status.startswith("new:")
+            new_total += int(is_new)
+            imported_total += int(row.import_status == "imported")
+            found_hour += int(row.first_seen >= hour_ago)
+            found_today += int(row.first_seen >= day_start)
+            urgent += int(is_new and _priority(row.title or "", row.snippet) == "urgent")
+            engine_counts[row.search_engine] = engine_counts.get(row.search_engine, 0) + 1
         last_run = await session.scalar(select(func.max(SearchHistory.searched_at)))
-        engine_rows = (
-            await session.execute(
-                select(SearchResult.search_engine, func.count(SearchResult.id))
-                .group_by(SearchResult.search_engine)
-                .order_by(SearchResult.search_engine)
-            )
-        ).all()
         latest_history = (
             await session.scalars(
                 select(SearchHistory).order_by(SearchHistory.searched_at.desc()).limit(100)
@@ -378,6 +392,12 @@ async def get_search_status() -> dict[str, object]:
         }
 
     return {
+        "rooms": settings.target_rooms,
+        "max_price_kzt": settings.max_price_kzt,
+        "min_area_m2": settings.min_area_m2,
+        "max_area_m2": settings.max_area_m2,
+        "min_bathrooms": settings.min_bathrooms,
+        "bathrooms_unconfirmed_results": bathrooms_unconfirmed,
         "enabled": settings.search_enabled,
         "providers": settings.search_providers,
         "provider_status": provider_status,
@@ -393,5 +413,48 @@ async def get_search_status() -> dict[str, object]:
         "found_last_hour": found_hour,
         "found_today": found_today,
         "last_run": last_run,
-        "by_provider": {name: count for name, count in engine_rows},
+        "by_provider": engine_counts,
     }
+
+
+async def load_search_preference() -> None:
+    async with SessionLocal() as session:
+        preference = await session.get(SearchPreference, 1)
+        if preference and preference.rooms in (2, 3, 4):
+            settings.target_rooms = preference.rooms
+        if preference and preference.max_price_kzt is not None:
+            settings.max_price_kzt = preference.max_price_kzt
+        if preference and preference.min_area_m2 is not None and preference.max_area_m2 is not None:
+            settings.min_area_m2 = preference.min_area_m2
+            settings.max_area_m2 = preference.max_area_m2
+        if preference and preference.min_bathrooms in (0, 2):
+            settings.min_bathrooms = preference.min_bathrooms
+
+
+async def save_search_preference(rooms: int | None, max_price_kzt: int | None = None,
+                                 min_area_m2: float | None = None, max_area_m2: float | None = None,
+                                 min_bathrooms: int | None = None) -> None:
+    async with SessionLocal() as session:
+        preference = await session.get(SearchPreference, 1)
+        if preference is None:
+            preference = SearchPreference(id=1, rooms=rooms or settings.target_rooms)
+            session.add(preference)
+        elif rooms is not None:
+            preference.rooms = rooms
+        if max_price_kzt is not None:
+            preference.max_price_kzt = max_price_kzt
+        if min_area_m2 is not None and max_area_m2 is not None:
+            preference.min_area_m2 = min_area_m2
+            preference.max_area_m2 = max_area_m2
+        if min_bathrooms is not None:
+            preference.min_bathrooms = min_bathrooms
+        await session.commit()
+    if rooms is not None:
+        settings.target_rooms = rooms
+    if max_price_kzt is not None:
+        settings.max_price_kzt = max_price_kzt
+    if min_bathrooms is not None:
+        settings.min_bathrooms = min_bathrooms
+    if min_area_m2 is not None and max_area_m2 is not None:
+        settings.min_area_m2 = min_area_m2
+        settings.max_area_m2 = max_area_m2

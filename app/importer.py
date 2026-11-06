@@ -8,6 +8,35 @@ import httpx
 from pydantic import HttpUrl
 
 from app.schemas import ListingCreate
+from app.search_analysis import parse_bathrooms_count, bathrooms_is_lower_bound
+
+
+def _bathrooms_fields(html: str, data: list[Any]) -> tuple[int | None, bool]:
+    keys = {"bathroomscount", "bathrooms_count", "numberofbathroomstotal", "numberofbathrooms"}
+    for root in data:
+        for item in _walk(root):
+            for key, raw in item.items():
+                if str(key).lower() not in keys or isinstance(raw, bool):
+                    continue
+                value = str(raw).strip()
+                if re.fullmatch(r"\d{1,2}", value) and int(value) <= 20:
+                    return int(value), False
+                if not re.fullmatch(r"\d{1,2}(?:\s*с\s*/\s*у)?\s*(?:и\s+более|и\s+больше|\+)?", value, re.I):
+                    continue
+                text = f"Санузел: {value}"
+                count = parse_bathrooms_count(text)
+                if count is not None:
+                    return count, bathrooms_is_lower_bound(text)
+    # Only labelled property fields, not arbitrary page numbers or ads.
+    for raw in re.findall(r'<(?:div|li)[^>]+class=["\'][^"\']*a-list__item[^"\']*["\'][^>]*>(.*?)</(?:div|li)>', html, re.I | re.S):
+        text = re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", raw))).strip()
+        if re.match(r"^(?:Санузел|Санузлы|с\s*/\s*у)\b", text, re.I):
+            # HTML labels normally do not contain a colon.
+            text = re.sub(r"^(Санузел|Санузлы|с\s*/\s*у)\s+(?=\d)", r"\1: ", text, flags=re.I)
+            count = parse_bathrooms_count(text)
+            if count is not None:
+                return count, bathrooms_is_lower_bound(text)
+    return None, False
 
 _PRICE_RE = re.compile(r"(?P<price>\d[\d\s\u00a0]{5,})\s*(?:₸|тг|тенге)", re.IGNORECASE)
 _AREA_RE = re.compile(r"(?P<area>\d{2,3}(?:[.,]\d+)?)\s*м(?:²|2)", re.IGNORECASE)
@@ -305,8 +334,11 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
             f"Krisha перенаправила запрос на внешний домен {final_host or 'неизвестен'}. "
             "Откройте объявление в Safari, скопируйте конечный адрес и вставьте его снова"
         )
-    if response.status_code in {403, 429}:
-        raise ListingImportError("Источник ограничил автоматический доступ. Введите данные вручную")
+    if response.status_code in {403, 429, 468}:
+        raise ListingImportError(
+            f"Источник ограничил автоматический доступ (HTTP {response.status_code}). "
+            "Откройте объявление в браузере и используйте браузерный импорт или введите данные вручную"
+        )
     if response.status_code != 200:
         raise ListingImportError(f"Источник вернул HTTP {response.status_code}")
 
@@ -323,6 +355,7 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
         if (value := _extract_meta(html, name))
     ]
     data = _json_scripts(html)
+    bathrooms_count, bathrooms_lower_bound = _bathrooms_fields(html, data)
 
     price = _find_numeric(data, {"price", "price_kzt", "amount", "value"}, 500_000, 2_000_000_000)
     area = _find_numeric(data, {"area", "area_m2", "square", "squaremeter", "floorSize", "totalArea"}, 10, 1000)
@@ -416,6 +449,8 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
         price_kzt=price,
         area_m2=area,
         rooms=rooms,
+        bathrooms_count=bathrooms_count,
+        bathrooms_count_is_lower_bound=bathrooms_lower_bound,
         floor=floor,
         floors_total=total_floors,
         building_year=year,

@@ -19,9 +19,15 @@ def build_local_analysis(listing: ListingCreate, assessment: ListingAssessment) 
     strengths: list[str] = []
     risks: list[str] = []
 
-    if listing.rooms == 2 and listing.is_full_two_room:
-        strengths.append("Формат полноценной двухкомнатной квартиры соответствует цели поиска")
-    if listing.area_m2 >= 55 and listing.area_m2 <= 70:
+    if get_settings().min_bathrooms:
+        if listing.bathrooms_count is None:
+            risks.append("Количество санузлов не подтверждено; требуется проверка")
+        elif listing.bathrooms_count < get_settings().min_bathrooms:
+            risks.append("Количество санузлов меньше выбранного минимума")
+
+    if listing.rooms == get_settings().target_rooms and (listing.rooms != 2 or listing.is_full_two_room):
+        strengths.append(f"Количество комнат ({listing.rooms}) соответствует цели поиска")
+    if get_settings().min_area_m2 <= listing.area_m2 <= get_settings().max_area_m2:
         strengths.append(f"Площадь {listing.area_m2:g} м² попадает в целевой диапазон")
     if listing.price_kzt <= get_settings().max_price_kzt:
         strengths.append("Цена укладывается в установленный бюджет")
@@ -79,6 +85,10 @@ def build_local_analysis(listing: ListingCreate, assessment: ListingAssessment) 
 
     return {
         "provider": "local-rules-ai",
+        "target_rooms": get_settings().target_rooms,
+        "max_price_kzt": get_settings().max_price_kzt,
+        "min_area_m2": get_settings().min_area_m2,
+        "max_area_m2": get_settings().max_area_m2,
         "generated_at": datetime.now(UTC).isoformat(),
         "summary": summary,
         "recommendation": assessment.verdict,
@@ -92,6 +102,26 @@ def build_local_analysis(listing: ListingCreate, assessment: ListingAssessment) 
             "Уточнить возможность ипотеки и итоговую цену сделки",
         ],
     }
+
+
+def current_analysis(
+    listing: ListingCreate, assessment: ListingAssessment, stored: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Keep a displayed analysis aligned with the current search criteria without network calls."""
+    if stored is None:
+        return None
+    if (
+        stored.get("provider") == "remote-ai"
+        and stored.get("target_rooms") == get_settings().target_rooms
+        and stored.get("max_price_kzt") == get_settings().max_price_kzt
+        and stored.get("min_area_m2") == get_settings().min_area_m2
+        and stored.get("max_area_m2") == get_settings().max_area_m2
+        and stored.get("min_bathrooms") == get_settings().min_bathrooms
+        and stored.get("score") == assessment.score
+        and stored.get("recommendation") == assessment.verdict
+    ):
+        return stored
+    return build_local_analysis(listing, assessment)
 
 
 def _remote_prompt(listing: ListingCreate, assessment: ListingAssessment) -> str:
@@ -179,6 +209,10 @@ async def analyze_listing(listing: ListingCreate, assessment: ListingAssessment)
             response = await client.post(f"{base_url}/chat/completions", headers=headers, json=body)
             response.raise_for_status()
             remote = _parse_remote_content(response.json())
+            if remote is not None:
+                remote.update(target_rooms=settings.target_rooms, max_price_kzt=settings.max_price_kzt,
+                              min_area_m2=settings.min_area_m2, max_area_m2=settings.max_area_m2, min_bathrooms=settings.min_bathrooms, score=assessment.score,
+                              recommendation=assessment.verdict)
             return remote or local
     except (httpx.HTTPError, ValueError, TypeError):
         return local

@@ -8,13 +8,21 @@ def assess_listing(listing: ListingCreate, settings: Settings) -> ListingAssessm
     score = 100
     reasons: list[str] = []
 
+    if settings.min_bathrooms:
+        if listing.bathrooms_count is None:
+            score -= 15
+            reasons.append("Количество санузлов не подтверждено; требуется проверка")
+        elif listing.bathrooms_count < settings.min_bathrooms:
+            score -= 35
+            reasons.append(f"Санузлов меньше установленного минимума: {settings.min_bathrooms}")
+
     if listing.city.strip().lower() not in {"астана", "astana"}:
         score -= 40
         reasons.append("Объект находится не в Астане")
 
-    if listing.rooms != 2 or not listing.is_full_two_room:
+    if listing.rooms != settings.target_rooms or (settings.target_rooms == 2 and not listing.is_full_two_room):
         score -= 35
-        reasons.append("Не является полноценной двухкомнатной квартирой")
+        reasons.append(f"Не соответствует критерию: {settings.target_rooms} комнат")
 
     if listing.price_kzt > settings.max_price_kzt:
         over_percent = (listing.price_kzt / settings.max_price_kzt - 1) * 100
@@ -23,7 +31,7 @@ def assess_listing(listing: ListingCreate, settings: Settings) -> ListingAssessm
 
     if not settings.min_area_m2 <= listing.area_m2 <= settings.max_area_m2:
         score -= 20
-        reasons.append("Площадь вне целевого диапазона 55–70 м²")
+        reasons.append(f"Площадь вне целевого диапазона {settings.min_area_m2:g}–{settings.max_area_m2:g} м²")
 
     if listing.floor == 1:
         score -= 15
@@ -80,6 +88,10 @@ def assess_listing(listing: ListingCreate, settings: Settings) -> ListingAssessm
             )
 
     score = max(0, min(100, score))
+    if settings.min_bathrooms and listing.bathrooms_count is None:
+        score = min(score, 89)
+    elif settings.min_bathrooms and listing.bathrooms_count < settings.min_bathrooms:
+        score = min(score, 74)
     price_per_m2 = round(listing.price_kzt / listing.area_m2)
 
     verdict: Literal["ПОКУПАТЬ", "СМОТРЕТЬ", "НЕ РЕКОМЕНДУЮ"]

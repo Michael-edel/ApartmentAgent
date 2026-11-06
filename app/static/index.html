@@ -8,8 +8,9 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="Квартиры">
   <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
   <link rel="apple-touch-icon" href="/static/icon.svg">
-  <link rel="stylesheet" href="/static/styles.css?v=131">
+  <link rel="stylesheet" href="/static/styles.css?v=135">
   <style>.bookmarklet-code{width:100%;min-height:96px;resize:vertical;border:1px solid #d8e2ec;border-radius:12px;background:#f8fafc;color:#142033;padding:12px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}</style>
   <title>ApartmentAgent</title>
 </head>
@@ -26,8 +27,8 @@
     <section class="hero card">
       <div>
         <p class="muted">Ваши критерии</p>
-        <h2>Полноценная 2-комнатная</h2>
-        <p>Астана · 55–70 м² · до 30 000 000 ₸</p>
+        <h2 id="criteriaRooms">2-комнатная квартира</h2>
+        <p>Астана · <span id="criteriaArea">55–70</span> м² · до <span id="criteriaPrice">30 000 000 ₸</span></p>
       </div>
       <div class="score-badge">85+</div>
     </section>
@@ -48,6 +49,26 @@
         <article class="stat"><span>Срочных</span><strong id="urgentCount">0</strong></article>
         <article class="stat"><span>Автоимпорт</span><strong id="importedCount">0</strong></article>
       </div>
+      <label class="search-room-control">Количество комнат
+        <select id="searchRooms">
+          <option value="2">2 комнаты</option>
+          <option value="3">3 комнаты</option>
+          <option value="4">4 комнаты</option>
+        </select>
+      </label>
+      <label class="search-price-control">Максимальная цена, ₸
+        <input id="searchMaxPrice" type="number" min="1" max="10000000000" step="1" value="30000000" inputmode="numeric" required>
+      </label>
+      <div class="form-grid search-price-control">
+        <label>Минимальная площадь, м²
+          <input id="searchMinArea" type="number" min="0.1" max="10000" step="0.1" value="55" inputmode="decimal" required>
+        </label>
+        <label>Максимальная площадь, м²
+          <input id="searchMaxArea" type="number" min="0.1" max="10000" step="0.1" value="70" inputmode="decimal" required>
+        </label>
+      </div>
+      <label class="checkbox search-price-control"><input id="searchBathrooms" type="checkbox"> От 2 санузлов</label>
+      <p class="microcopy">Выберите критерии и нажмите «Искать сейчас». Настройки сохраняются для последующих автоматических поисков. Для фильтра санузлов подходят только объявления с подтверждённым количеством.</p>
       <button id="runSearchButton" type="button">Искать сейчас</button>
       <p id="searchMessage" class="form-message" aria-live="polite"></p>
       <p id="searchMeta" class="microcopy"></p>
@@ -104,9 +125,9 @@
           <option value="price">Цена</option>
         </select>
         <select id="scoreFilter" aria-label="Минимальный рейтинг">
-          <option value="">Все</option>
+          <option value="" selected>Все</option>
           <option value="65">65+</option>
-          <option value="85" selected>85+</option>
+          <option value="85">85+</option>
         </select>
       </div>
     </section>
@@ -124,14 +145,21 @@
         <div class="form-grid">
           <label>Цена, ₸<input name="price_kzt" type="number" required></label>
           <label>Площадь, м²<input name="area_m2" type="number" step="0.1" required></label>
-          <label>Комнат<input name="rooms" type="number" value="2" required></label>
+          <label>Комнат<input name="rooms" type="number" value="2" min="1" step="1" required></label>
+          <label>Количество санузлов<input name="bathrooms_count" type="number" min="0" max="20" step="1" placeholder="Если известно"></label>
           <label>Этаж<input name="floor" type="number"></label>
           <label>Этажей в доме<input name="floors_total" type="number"></label>
           <label>Год постройки<input name="building_year" type="number"></label>
         </div>
         <label>Район<input name="district"></label>
         <label>ЖК<input name="residential_complex"></label>
+        <label>Описание ЖК<textarea name="complex_description" maxlength="5000" placeholder="Сведения о жилом комплексе, а не описание квартиры"></textarea></label>
+        <label>Источник описания ЖК<select name="complex_description_source_kind"><option value="manual">Ручной ввод</option><option value="listing">Объявление</option><option value="developer">Сайт застройщика</option></select></label>
+        <label>Ссылка на источник описания ЖК<input name="complex_description_source_url" type="url" placeholder="https://..."></label>
         <label>Адрес или ориентир<input name="address" placeholder="Улица, дом, ЖК"></label>
+        <label>Автор объявления<input name="seller_name" maxlength="200" placeholder="Если указан в объявлении"></label>
+        <label>Тип автора<input name="seller_type" maxlength="100" placeholder="Например, хозяин или агент"></label>
+        <label>Ипотека<select name="mortgage_supported"><option value="">Не указано</option><option value="true">Доступна</option><option value="false">Не доступна</option></select></label>
         <div class="form-grid">
           <label>Широта<input name="latitude" type="number" step="any" min="-90" max="90" placeholder="51.128"></label>
           <label>Долгота<input name="longitude" type="number" step="any" min="-180" max="180" placeholder="71.430"></label>
@@ -152,6 +180,6 @@
     <a href="#listingGrid">★<span>Лучшие</span></a>
   </nav>
 
-  <script src="/static/app.js?v=131" defer></script>
+  <script src="/static/app.js?v=143" defer></script>
 </body>
 </html>

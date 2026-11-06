@@ -134,8 +134,8 @@ async def search_brave(query: str) -> list[SearchItem]:
     return items
 
 
-async def search_krisha_direct(_: str) -> list[SearchItem]:
-    items = await fetch_krisha_direct()
+async def search_krisha_direct(query: str) -> list[SearchItem]:
+    items = await fetch_krisha_direct(int(query) if query in {"2", "3", "4"} else 2)
     return [SearchItem(title=item.title, url=item.url, snippet=item.snippet) for item in items]
 
 

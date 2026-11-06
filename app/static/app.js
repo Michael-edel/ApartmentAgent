@@ -7,6 +7,11 @@ const filter = document.querySelector('#scoreFilter');
 const listingSort = document.querySelector('#listingSort');
 const refreshButton = document.querySelector('#refreshButton');
 const form = document.querySelector('#listingForm');
+const manualRooms = form?.querySelector('[name="rooms"]');
+const fullTwoRoom = form?.querySelector('[name="is_full_two_room"]');
+manualRooms?.addEventListener('input', () => {
+  if (Number(manualRooms.value) !== 2 && fullTwoRoom) fullTwoRoom.checked = false;
+});
 const message = document.querySelector('#formMessage');
 const importForm = document.querySelector('#importForm');
 const importMessage = document.querySelector('#importMessage');
@@ -16,6 +21,42 @@ const bookmarkletMessage = document.querySelector('#bookmarkletMessage');
 const runChecksButton = document.querySelector('#runChecksButton');
 const checkMessage = document.querySelector('#checkMessage');
 const runSearchButton = document.querySelector('#runSearchButton');
+const searchRooms = document.querySelector('#searchRooms');
+const searchMaxPrice = document.querySelector('#searchMaxPrice');
+const searchMinArea = document.querySelector('#searchMinArea');
+const searchMaxArea = document.querySelector('#searchMaxArea');
+const searchBathrooms = document.querySelector('#searchBathrooms');
+let searchRoomsInitialized = false;
+let searchPriceInitialized = false;
+let searchMinAreaInitialized = false;
+let searchMaxAreaInitialized = false;
+let searchBathroomsInitialized = false;
+searchBathrooms?.addEventListener('change', () => { searchBathroomsInitialized = true; });
+function updateCriteriaRooms() {
+  const heading = document.querySelector('#criteriaRooms');
+  if (heading && searchRooms) heading.textContent = `${searchRooms.value}-комнатная квартира`;
+}
+searchRooms?.addEventListener('change', () => {
+  searchRoomsInitialized = true;
+  updateCriteriaRooms();
+});
+function updateCriteriaPrice() {
+  const label = document.querySelector('#criteriaPrice');
+  const value = Number(searchMaxPrice?.value);
+  if (label && value > 0 && Number.isInteger(value)) label.textContent = money.format(value);
+}
+searchMaxPrice?.addEventListener('input', () => {
+  searchPriceInitialized = true;
+  updateCriteriaPrice();
+});
+function updateCriteriaArea() {
+  const label = document.querySelector('#criteriaArea');
+  if (label && searchMinArea?.checkValidity() && searchMaxArea?.checkValidity() && Number(searchMinArea.value) <= Number(searchMaxArea.value)) {
+    label.textContent = `${number.format(Number(searchMinArea.value))}–${number.format(Number(searchMaxArea.value))}`;
+  }
+}
+searchMinArea?.addEventListener('input', () => { searchMinAreaInitialized = true; updateCriteriaArea(); });
+searchMaxArea?.addEventListener('input', () => { searchMaxAreaInitialized = true; updateCriteriaArea(); });
 const searchMessage = document.querySelector('#searchMessage');
 const searchMeta = document.querySelector('#searchMeta');
 const searchResults = document.querySelector('#searchResults');
@@ -24,6 +65,13 @@ let savedUrls = new Set();
 
 function escapeHtml(value='') {
   return String(value).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#039;','"':'&quot;'}[ch]));
+}
+
+function safeExternalUrl(value) {
+  try {
+    const url = new URL(value);
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
+  } catch { return null; }
 }
 
 function buildBookmarklet() {
@@ -60,7 +108,7 @@ function cleanSearchTitle(title='') {
   let value = String(title).replace(/\s+/g, ' ').trim();
   value = value.replace(/\s*[·|,-]\s*\d{2,3}(?:[.,]\d+)?\s*м(?:²|2).*$/i, '');
   value = value.replace(/\s*\d{1,2}\s*\/\s*\d{1,2}\s*этаж.*$/i, '');
-  return value || '2-комнатная квартира';
+  return value || 'Квартира';
 }
 
 function priorityLabel(priority) {
@@ -87,6 +135,66 @@ function sortListings(listings) {
   return items.sort(compare);
 }
 
+function comparisonSummary(label, values, minSamples) {
+  if (values?.status === 'city_unknown') {
+    return `<div class="comparison-row"><span>${escapeHtml(label)}</span><span>Город не подтверждён как Астана</span></div>`;
+  }
+  if (!values || values.status === 'district_unknown') {
+    return `<div class="comparison-row"><span>${escapeHtml(label)}</span><span>Район не указан</span></div>`;
+  }
+  if (values.status !== 'ok' || !Number.isFinite(values.average_price_per_m2) || values.average_price_per_m2 <= 0) {
+    return `<div class="comparison-row"><span>${escapeHtml(label)}</span><span>Недостаточно данных (${Number(values.count) || 0} из ${minSamples})</span></div>`;
+  }
+  const diff = values.difference_percent;
+  const description = Number.isFinite(diff)
+    ? diff === 0 ? 'эта квартира на уровне выборки' : `эта квартира на ${number.format(Math.abs(diff))}% ${diff < 0 ? 'дешевле' : 'дороже'} выборки`
+    : '';
+  return `<div class="comparison-row"><span>${escapeHtml(label)} · ${values.count} объявл.</span><span><b>${escapeHtml(money.format(values.average_price_per_m2))}/м²</b>${description ? ` <small>(${escapeHtml(description)})</small>` : ''}</span></div>`;
+}
+
+function renderComparison(data) {
+  const asOf = new Date(data.as_of);
+  const dateLabel = Number.isNaN(asOf.getTime()) ? 'дата неизвестна' : dateTime.format(asOf);
+  const district = data.district_label ? `Район: ${data.district_label}` : 'Район';
+  const minSamples = Number(data.min_samples) || 5;
+  const krisha = data.krisha || {};
+  const hasKrisha = krisha.district?.status === 'ok' || krisha.city?.status === 'ok';
+  const observed = new Date(krisha.observed_at);
+  const observedLabel = !krisha.observed_at || Number.isNaN(observed.getTime()) ? 'неизвестно' : dateTime.format(observed);
+  const referenceRow = (label, value) => {
+    if (value?.status !== 'ok' || !Number.isFinite(value.average_price_per_m2)) return `<div class="comparison-row"><span>${escapeHtml(label)}</span><span>Не получено со страницы</span></div>`;
+    const diff = value.difference_percent;
+    const difference = Number.isFinite(diff) ? diff === 0 ? 'эта квартира на уровне среднего' : `эта квартира на ${number.format(Math.abs(diff))}% ${diff < 0 ? 'дешевле' : 'дороже'} среднего` : '';
+    return `<div class="comparison-row"><span>${escapeHtml(label)}</span><span><b>${escapeHtml(money.format(value.average_price_per_m2))}/м²</b> <small>${escapeHtml(difference)}</small></span></div>`;
+  };
+  const sourceUrl = safeExternalUrl(krisha.source_url);
+  const krishaBlock = hasKrisha ? `<div class="krisha-comparison"><b>Средние из блока Krisha</b>
+    ${referenceRow(krisha.district_label ? `Район в блоке Krisha: ${krisha.district_label}` : 'Район в блоке Krisha', krisha.district)}
+    ${referenceRow('Астана', krisha.city)}
+    <small>Получено со страницы: ${escapeHtml(observedLabel)}. Период и размер выборки источником не переданы.${sourceUrl ? ` <a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">Источник →</a>` : ''}</small></div>` : '<p>Средние Krisha со страницы объявления пока не получены.</p>';
+  return `<b>Сравнение цены за м²</b>
+    ${krishaBlock}
+    <b>По сохранённым объявлениям</b>
+    <p>Среднее по другим сохранённым объявлениям за ${Number(data.lookback_days) || 90} дней; это не средняя цена рынка.</p>
+    ${comparisonSummary(district, data.district, minSamples)}
+    ${comparisonSummary('Астана', data.city, minSamples)}
+    <small>Срез: ${escapeHtml(dateLabel)}. Цена предложения; объявления могут быть подобраны по вашим фильтрам.</small>`;
+}
+
+async function loadComparisons() {
+  const nodes = [...(grid?.querySelectorAll('.price-comparison[data-listing-id]') || [])];
+  await Promise.all(nodes.map(async node => {
+    try {
+      const response = await fetch(`/api/v1/listings/${encodeURIComponent(node.dataset.listingId)}/comparison`);
+      if (!response.ok) throw new Error('Не удалось загрузить сравнение');
+      const data = await readJson(response);
+      if (node.isConnected) node.innerHTML = renderComparison(data);
+    } catch {
+      if (node.isConnected) node.textContent = 'Не удалось загрузить сравнение цены.';
+    }
+  }));
+}
+
 function render(listings) {
   savedUrls = new Set(listings.map(item => normalizeUrl(item.source_url)));
   const minScore = Number(filter?.value || 0);
@@ -96,21 +204,29 @@ function render(listings) {
   document.querySelector('#strongCount').textContent = strong.length;
   if (!grid) return;
   if (!visible.length) {
-    grid.innerHTML = '<section class="empty card"><strong>Сохранённых квартир пока нет</strong><p>Нажмите «Открыть и мониторить» у найденного объявления — браузер автоматически передаст данные в приложение.</p></section>';
+    grid.innerHTML = listings.length
+      ? '<section class="empty card"><strong>Нет квартир с выбранным рейтингом</strong><p>Выберите «Все», чтобы увидеть остальные квартиры.</p></section>'
+      : '<section class="empty card"><strong>Сохранённых квартир пока нет</strong><p>Добавьте квартиру вручную или импортируйте объявление.</p></section>';
     return;
   }
   grid.innerHTML = visible.map(item => {
+    const sourceUrl = safeExternalUrl(item.source_url);
     const title = item.residential_complex || item.title;
     const location = [item.address, item.district, item.city].filter(Boolean).join(' · ');
     const hasCoordinates = item.latitude != null && item.longitude != null;
     const locationMissing = !item.address && !hasCoordinates;
-    const mapUrl = item.latitude != null && item.longitude != null
+    const mapUrl = hasCoordinates
       ? `https://yandex.ru/maps/?ll=${encodeURIComponent(`${item.longitude},${item.latitude}`)}&z=16&pt=${encodeURIComponent(`${item.longitude},${item.latitude},pm2rdm`)}`
-      : null;
+      : item.address ? `https://yandex.ru/maps/?text=${encodeURIComponent([item.city, item.address].filter(Boolean).join(', '))}` : null;
     const scoreClass = item.assessment.score < 85 ? 'medium' : '';
     const photos = (item.photo_urls || []).slice(0, 4);
     const ai = item.ai_analysis || {};
-    const latestChange = (item.price_history || []).find(snapshot => snapshot.change_kzt);
+    const history = item.price_history || [];
+    const latestChange = history[0]?.change_kzt;
+    const mortgage = item.mortgage_supported === true ? 'Указана' : item.mortgage_supported === false ? 'Не предусмотрена' : 'Не указана';
+    const seller = [item.seller_name, item.seller_type].filter(Boolean).join(' · ') || 'Не указан';
+    const complexDescriptionUrl = safeExternalUrl(item.complex_description_source_url);
+    const complexDescriptionSource = ({listing:'Объявление', developer:'Сайт застройщика', manual:'Ручной ввод'})[item.complex_description_source_kind] || 'Источник не указан';
     const twogisRating = Number(item.twogis_rating);
     const twogisReviews = Number(item.twogis_review_count || 0);
     const twogisLine = item.twogis_name ? `<div class="twogis-review"><b>2GIS</b> ${Number.isFinite(twogisRating) && twogisReviews ? `★ ${twogisRating.toFixed(1)}/5 · ${twogisReviews} отзывов` : 'оценка и отзывы не опубликованы'}${item.twogis_url ? ` · <a href="${escapeHtml(item.twogis_url)}" target="_blank" rel="noopener noreferrer">Открыть в 2GIS →</a>` : ''}</div>` : '';
@@ -118,16 +234,20 @@ function render(listings) {
       ${photos.length ? `<div class="listing-photos">${photos.map((photo, index) => `<img class="listing-photo ${index ? 'thumbnail' : ''}" src="${escapeHtml(photo)}" alt="Фото квартиры ${index + 1}" loading="lazy" referrerpolicy="no-referrer">`).join('')}</div>` : ''}
       <div class="listing-top"><div><h3>${escapeHtml(title)}</h3><div class="meta">${escapeHtml(location)}</div></div><div class="rating ${scoreClass}">${item.assessment.score}</div></div>
       <div class="price">${money.format(item.price_kzt)}</div>
-      <div class="meta">${number.format(item.area_m2)} м² · ${money.format(item.assessment.price_per_m2)}/м² · этаж ${item.floor || '—'}/${item.floors_total || '—'}</div>
-      ${mapUrl ? `<a class="location-link" href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener noreferrer">Открыть местоположение на карте →</a>` : ''}
-      ${locationMissing ? '<div class="meta location-missing">Точное местоположение не опубликовано в открытых данных Krisha</div>' : ''}
+      <div class="meta">${item.rooms} комн. · ${number.format(item.area_m2)} м² · ${money.format(item.assessment.price_per_m2)}/м² · этаж ${item.floor || '—'}/${item.floors_total || '—'}</div>
+      <section class="price-comparison" data-listing-id="${Number(item.id)}" aria-label="Сравнение цены за квадратный метр">Загружаю сравнение цены…</section>
+      ${mapUrl ? `<a class="location-link" href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener noreferrer">${hasCoordinates ? 'Открыть координаты на карте' : 'Найти адрес на карте (местоположение приблизительное)'} →</a>` : ''}
+      ${locationMissing ? '<div class="meta location-missing">Адрес и координаты не указаны</div>' : ''}
+      <div class="listing-details"><div><b>Санузлы:</b> ${Number.isInteger(item.bathrooms_count) ? `${item.bathrooms_count_is_lower_bound ? 'не менее ' : ''}${item.bathrooms_count}` : 'Не указано'}</div><div><b>Ипотека:</b> ${mortgage}</div><div><b>Автор объявления:</b> ${escapeHtml(seller)}</div></div>
       ${item.building_year || item.building_type ? `<div class="meta">${item.building_year ? `Построен ${item.building_year}` : ''}${item.building_year && item.building_type ? ' · ' : ''}${escapeHtml(item.building_type || '')}</div>` : ''}
       ${twogisLine}
-      ${latestChange ? `<div class="price-change ${latestChange.change_kzt < 0 ? 'down' : 'up'}">${latestChange.change_kzt < 0 ? '↓' : '↑'} ${money.format(Math.abs(latestChange.change_kzt))} с последнего наблюдения</div>` : ''}
+      <details class="complex-description"><summary>Описание ЖК</summary>${item.complex_description ? `<p style="white-space:pre-wrap">${escapeHtml(item.complex_description)}</p><p class="meta">${escapeHtml(complexDescriptionSource)}${complexDescriptionUrl ? ` · <a href="${escapeHtml(complexDescriptionUrl)}" target="_blank" rel="noopener noreferrer">Источник →</a>` : ''}${item.complex_description_observed_at ? ` · получено ${escapeHtml(dateTime.format(new Date(item.complex_description_observed_at)))}` : ''}</p>` : '<p class="meta">Описание ЖК не получено. Его можно добавить из объявления, сайта застройщика или вручную.</p>'}</details>
+      ${latestChange ? `<div class="price-change ${latestChange < 0 ? 'down' : 'up'}">${latestChange < 0 ? '↓' : '↑'} ${money.format(Math.abs(latestChange))} между последними записями</div>` : ''}
+      <details class="price-history"><summary>История цены (${history.length})</summary>${history.length ? `<ol>${history.map(snapshot => `<li>${escapeHtml(dateTime.format(new Date(snapshot.observed_at)))} — ${escapeHtml(money.format(snapshot.price_kzt))}${snapshot.change_kzt ? ` (${snapshot.change_kzt > 0 ? '+' : '−'}${escapeHtml(money.format(Math.abs(snapshot.change_kzt)))})` : ''}</li>`).join('')}</ol>` : '<p>Пока нет записей о цене.</p>'}</details>
       <span class="verdict">${escapeHtml(item.assessment.verdict)}</span>
       ${ai.summary ? `<div class="ai-summary"><b>AI-анализ</b><p>${escapeHtml(ai.summary)}</p></div>` : ''}
       <div class="listing-actions"><button class="check-listing secondary-action" data-listing-id="${item.id}" type="button">↻ Проверить квартиру</button></div>
-      <a href="${escapeHtml(item.source_url)}">Открыть объявление →</a>
+      ${sourceUrl ? `<a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">Открыть объявление →</a>` : ''}
     </article>`;
   }).join('');
 }
@@ -159,6 +279,7 @@ async function loadListings() {
     const response = await fetch('/api/v1/listings');
     if (!response.ok) throw new Error('Не удалось загрузить квартиры');
     render(await readJson(response));
+    void loadComparisons();
     grid?.querySelectorAll('.check-listing').forEach(button => {
       button.addEventListener('click', () => checkListingNow(Number(button.dataset.listingId), button));
     });
@@ -170,33 +291,6 @@ async function loadListings() {
 }
 
 async function markSeen(id) { await fetch(`/api/v1/search/results/${id}/seen`, {method:'POST'}); }
-
-function openListingInYandexBrowser(targetUrl) {
-  const parsed = new URL(targetUrl, location.href);
-  const normalizedUrl = parsed.toString();
-  const userAgent = navigator.userAgent || '';
-  const isAndroid = /Android/i.test(userAgent);
-
-  if (!isAndroid) {
-    const opened = window.open(normalizedUrl, '_blank', 'noopener,noreferrer');
-    if (!opened) window.location.assign(normalizedUrl);
-    return;
-  }
-
-  // Android may route an ordinary Krisha HTTPS link to the Krisha app. An
-  // explicit package keeps the listing in Yandex Browser, including when the
-  // ApartmentAgent PWA itself is already running there.
-  const scheme = parsed.protocol.replace(':', '') || 'https';
-  const intentTarget = `${parsed.host}${parsed.pathname}${parsed.search}`;
-  const intentUrl = `intent://${intentTarget}#Intent;scheme=${scheme};package=com.yandex.browser;S.browser_fallback_url=${encodeURIComponent(normalizedUrl)};end`;
-  window.location.href = intentUrl;
-
-  // If Yandex Browser is not installed or Android rejects the intent, keep a
-  // reliable HTTPS fallback instead of leaving the user on an error page.
-  setTimeout(() => {
-    if (!document.hidden) window.location.assign(normalizedUrl);
-  }, 1500);
-}
 
 async function importSearchResult(url, button) {
   button.disabled = true;
@@ -223,28 +317,45 @@ async function importSearchResult(url, button) {
 async function loadSearchResults() {
   if (!searchResults) return;
   try {
-    const response = await fetch('/api/v1/search/results?limit=200&only_new=false');
+    const [response, statusResponse] = await Promise.all([
+      fetch('/api/v1/search/results?limit=200&only_new=false'),
+      fetch('/api/v1/search/status')
+    ]);
     if (!response.ok) throw new Error('Не удалось загрузить найденные ссылки');
+    if (!statusResponse.ok) throw new Error('Не удалось получить параметры поиска');
     const items = await readJson(response);
-    if (!items.length) {
+    const status = await readJson(statusResponse);
+    let unconfirmed = [];
+    if (status.min_bathrooms === 2) {
+      const unconfirmedResponse = await fetch('/api/v1/search/results?limit=200&only_new=false&include_unconfirmed=true');
+      if (!unconfirmedResponse.ok) throw new Error('Не удалось загрузить объявления с неподтверждёнными санузлами');
+      unconfirmed = (await readJson(unconfirmedResponse)).map(item => ({...item, bathroomsUnconfirmed:true}));
+    }
+    const allItems = [...items, ...unconfirmed];
+    if (!allItems.length) {
       searchResults.innerHTML = '<section class="empty card"><strong>Новых ссылок пока нет</strong><p>Новые объявления появятся после следующей публикации на Krisha.</p></section>';
       return;
     }
-    searchResults.innerHTML = items.map(item => {
+    searchResults.innerHTML = allItems.map((item, index) => {
+      const sourceUrl = safeExternalUrl(item.url);
       const a = item.analysis || {};
       const facts = [
-        a.price_kzt ? money.format(a.price_kzt) : null,
+        a.price_is_lower_bound ? `от ${money.format(a.price_lower_bound_kzt)} · точная цена не подтверждена` : a.price_kzt ? money.format(a.price_kzt) : 'Цена не подтверждена',
         a.area_m2 ? `${number.format(a.area_m2)} м²` : null,
-        a.price_per_m2 ? `${money.format(a.price_per_m2)}/м²` : null,
+        Number.isInteger(a.bathrooms_count) ? `Санузлов: ${a.bathrooms_count_is_lower_bound ? 'не менее ' : ''}${a.bathrooms_count}` : 'Санузел не подтверждён',
+        a.price_per_m2 ? `${a.price_is_lower_bound ? 'от ' : ''}${money.format(a.price_per_m2)}/м²` : null,
         a.floor ? `${a.floor}/${a.floors_total || '—'} этаж` : null
       ].filter(Boolean);
       const reasons = (a.reasons || []).slice(0, 3).map(reason => `<li>✓ ${escapeHtml(reason)}</li>`).join('');
       const isSaved = savedUrls.has(normalizeUrl(item.url));
       const importStatus = item.import_status || 'pending';
       const imported = importStatus === 'imported' || isSaved;
-      const importLabel = imported ? 'Автоматически сохранено' : importStatus === 'queued' ? 'Мониторинг запущен' : importStatus === 'blocked' ? 'Источник ограничил импорт' : importStatus === 'error' ? 'Импорт не удался — повторить' : 'Импортирую…';
-      const seenLabel = item.status === 'seen' ? 'Просмотрено' : priorityLabel(item.priority);
-      return `<article class="listing card ${priorityClass(item.priority)} ${item.status === 'seen' ? 'result-seen' : ''}">
+      const importLabel = imported ? 'Сохранено в карточку' : importStatus === 'queued' ? 'Мониторинг запущен' : importStatus === 'blocked' ? 'Источник ограничил импорт' : importStatus === 'error' ? 'Импорт не удался — повторить' : 'Сохранить объявление';
+      const seenLabel = item.bathroomsUnconfirmed ? 'Санузлы: требуется проверить' : item.status === 'seen' ? 'Просмотрено' : priorityLabel(item.priority);
+      const unconfirmedTotal = Number(status.bathrooms_unconfirmed_results) || 0;
+      const truncated = unconfirmedTotal > unconfirmed.length ? ` Показаны первые ${unconfirmed.length} из ${unconfirmedTotal}.` : '';
+      const sectionTitle = item.bathroomsUnconfirmed && index === items.length ? `<div class="unconfirmed-heading"><b>Санузлы не подтверждены</b><p>Эти объявления подходят по известным данным. Проверьте число санузлов и цену в объявлении.${escapeHtml(truncated)}</p></div>` : '';
+      return `${sectionTitle}<article class="listing card ${item.bathroomsUnconfirmed ? 'priority-normal' : priorityClass(item.priority)} ${item.status === 'seen' ? 'result-seen' : ''}">
         <div class="listing-top">
           <div><span class="verdict">${escapeHtml(seenLabel)}</span><h3>${escapeHtml(cleanSearchTitle(item.title))}</h3></div>
           <div class="rating ${a.score < 85 ? 'medium' : ''}">${a.score ?? '—'}</div>
@@ -253,13 +364,12 @@ async function loadSearchResults() {
         ${reasons ? `<ul class="reason-list">${reasons}</ul>` : `<p class="meta">${escapeHtml(item.snippet || 'Откройте объявление для проверки параметров.')}</p>`}
         <div class="meta source-meta">Источник: ${escapeHtml(item.search_engine)} · обнаружено ${dateTime.format(new Date(item.first_seen))}</div>
         <div class="card-actions">
-          <button class="enrich-result primary secondary-action ${imported ? 'saved' : ''}" data-url="${escapeHtml(item.url)}" type="button" ${imported ? 'disabled' : ''}>${imported ? 'Сохранено автоматически' : importLabel}</button>
-          <a class="search-open" data-result-id="${item.id}" href="${escapeHtml(item.url)}">Открыть и мониторить →</a>
+          <button class="enrich-result primary secondary-action ${imported ? 'saved' : ''}" data-url="${escapeHtml(item.url)}" type="button" ${imported ? 'disabled' : ''}>${importLabel}</button>
+          ${sourceUrl ? `<a class="search-open" data-result-id="${item.id}" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">Открыть и мониторить →</a>` : ''}
         </div>
       </article>`;
     }).join('');
     searchResults.querySelectorAll('.search-open').forEach(link => link.addEventListener('click', event => {
-      event.preventDefault();
       void monitorBeforeOpen(link);
     }));
     searchResults.querySelectorAll('.enrich-result:not(.saved)').forEach(button => button.addEventListener('click', () => importSearchResult(button.dataset.url, button)));
@@ -270,12 +380,10 @@ async function loadSearchResults() {
 
 function monitorBeforeOpen(link) {
   const resultId = link.dataset.resultId;
-  const targetUrl = link.href;
   link.classList.add('is-monitoring');
   link.setAttribute('aria-busy', 'true');
   link.textContent = 'Ставлю на мониторинг…';
-  // Start the monitoring request, but do not await it: Android only permits an
-  // external intent while the original click still has user activation.
+  // Let the browser open the link in a new tab without waiting for monitoring.
   const monitorRequest = fetch(`/api/v1/search/results/${resultId}/monitor`, {
     method:'POST',
     keepalive:true,
@@ -283,7 +391,6 @@ function monitorBeforeOpen(link) {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
   }).catch(() => markSeen(resultId).catch(() => {}));
 
-  openListingInYandexBrowser(targetUrl);
   void monitorRequest;
 }
 
@@ -292,6 +399,29 @@ async function loadSearchStatus() {
     const response = await fetch('/api/v1/search/status');
     if (!response.ok) throw new Error('Не удалось получить статус поиска');
     const status = await readJson(response);
+    if (searchBathrooms && !searchBathroomsInitialized && [0, 2].includes(status.min_bathrooms)) {
+      searchBathrooms.checked = status.min_bathrooms === 2;
+      searchBathroomsInitialized = true;
+    }
+    if (searchRooms && !searchRoomsInitialized && [2, 3, 4].includes(status.rooms)) {
+      searchRooms.value = String(status.rooms);
+      searchRoomsInitialized = true;
+      updateCriteriaRooms();
+    }
+    if (searchMaxPrice && !searchPriceInitialized && Number.isInteger(status.max_price_kzt) && status.max_price_kzt > 0) {
+      searchMaxPrice.value = String(status.max_price_kzt);
+      searchPriceInitialized = true;
+      updateCriteriaPrice();
+    }
+    if (searchMinArea && !searchMinAreaInitialized && Number.isFinite(status.min_area_m2) && status.min_area_m2 > 0) {
+      searchMinArea.value = String(status.min_area_m2);
+      searchMinAreaInitialized = true;
+    }
+    if (searchMaxArea && !searchMaxAreaInitialized && Number.isFinite(status.max_area_m2) && status.max_area_m2 > 0) {
+      searchMaxArea.value = String(status.max_area_m2);
+      searchMaxAreaInitialized = true;
+    }
+    updateCriteriaArea();
     document.querySelector('#newSearchCount').textContent = status.new_results || 0;
     document.querySelector('#foundHour').textContent = status.found_last_hour || 0;
     document.querySelector('#foundToday').textContent = status.found_today || 0;
@@ -299,7 +429,7 @@ async function loadSearchStatus() {
     document.querySelector('#importedCount').textContent = status.imported_results || 0;
     const providers = (status.providers || []).join(', ') || 'нет';
     const lastRun = status.last_run ? dateTime.format(new Date(status.last_run)) : 'ещё не выполнялся';
-    if (searchMeta) searchMeta.textContent = `Источники: ${providers}. Запросов за запуск: ${status.queries_per_run}. Последний поиск: ${lastRun}.`;
+    if (searchMeta) searchMeta.textContent = `Источники: ${providers}. Запросов за запуск: ${status.queries_per_run}. Последний поиск: ${lastRun}.${status.min_bathrooms === 2 ? ` Требуют проверки санузлов: ${Number(status.bathrooms_unconfirmed_results) || 0}.` : ''}`;
     const telegram = await fetch('/api/v1/notifications/status').then(readJson);
     const telegramNode = document.querySelector('#telegramStatus');
     if (telegramNode) telegramNode.textContent = telegram.configured ? `Telegram: подключён · отправлено ${telegram.sent_notifications || 0}` : 'Telegram: добавьте TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID для уведомлений';
@@ -312,10 +442,27 @@ async function loadSearchStatus() {
 }
 
 runSearchButton?.addEventListener('click', async () => {
+  if (!searchMaxPrice?.checkValidity()) {
+    if (searchMessage) searchMessage.textContent = 'Введите целую максимальную цену от 1 до 10 000 000 000 ₸.';
+    searchMaxPrice?.reportValidity();
+    return;
+  }
+  if (!searchMinArea?.checkValidity() || !searchMaxArea?.checkValidity()) {
+    if (searchMessage) searchMessage.textContent = 'Введите площади от 0,1 до 10 000 м² с точностью до 0,1 м².';
+    (!searchMinArea?.checkValidity() ? searchMinArea : searchMaxArea)?.reportValidity();
+    return;
+  }
+  if (Number(searchMinArea.value) > Number(searchMaxArea.value)) {
+    if (searchMessage) searchMessage.textContent = 'Минимальная площадь не может быть больше максимальной.';
+    return;
+  }
   runSearchButton.disabled = true;
   if (searchMessage) searchMessage.textContent = 'Проверяю поисковую выдачу…';
   try {
-    const response = await fetch('/api/v1/search/run', {method:'POST'});
+    const response = await fetch('/api/v1/search/run', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({rooms:Number(searchRooms?.value || 2), max_price_kzt:Number(searchMaxPrice.value), min_area_m2:Number(searchMinArea.value), max_area_m2:Number(searchMaxArea.value), min_bathrooms:searchBathrooms?.checked ? 2 : 0})
+    });
     const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось выполнить поиск');
     if (searchMessage) searchMessage.textContent = `Запросов: ${body.queries}. Найдено ссылок: ${body.found}. Новых: ${body.new}. Автоимпортировано: ${body.imported || 0}. Ошибок: ${body.errors + (body.import_errors || 0)}.`;
@@ -374,13 +521,19 @@ form?.addEventListener('submit', async event => {
   const payload = {
     source:'manual', source_url:data.get('source_url'), title:data.get('title') || '2-комнатная квартира в Астане', city:'Астана',
     district:data.get('district') || null, residential_complex:data.get('residential_complex') || null,
+    complex_description:data.get('complex_description')?.trim() || null,
+    complex_description_source_kind:data.get('complex_description')?.trim() ? data.get('complex_description_source_kind') : null,
+    complex_description_source_url:data.get('complex_description')?.trim() ? data.get('complex_description_source_url')?.trim() || null : null,
     address:data.get('address') || null,
+    seller_name:data.get('seller_name')?.trim() || null,
+    seller_type:data.get('seller_type')?.trim() || null,
     latitude:data.get('latitude') ? Number(data.get('latitude')) : null,
     longitude:data.get('longitude') ? Number(data.get('longitude')) : null,
     price_kzt:Number(data.get('price_kzt')), area_m2:Number(data.get('area_m2')), rooms:Number(data.get('rooms')),
+    bathrooms_count:data.get('bathrooms_count') ? Number(data.get('bathrooms_count')) : null,
     floor:data.get('floor') ? Number(data.get('floor')) : null, floors_total:data.get('floors_total') ? Number(data.get('floors_total')) : null,
     building_year:data.get('building_year') ? Number(data.get('building_year')) : null, building_type:data.get('building_type') || null,
-    is_full_two_room:data.get('is_full_two_room') === 'on', mortgage_supported:null
+    is_full_two_room:data.get('is_full_two_room') === 'on', mortgage_supported:data.get('mortgage_supported') === '' ? null : data.get('mortgage_supported') === 'true'
   };
   try {
     const response = await fetch('/api/v1/listings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
@@ -397,5 +550,13 @@ form?.addEventListener('submit', async event => {
 filter?.addEventListener('change', loadListings);
 listingSort?.addEventListener('change', loadListings);
 refreshButton?.addEventListener('click', async () => { await loadListings(); await Promise.all([loadSearchStatus(), loadSearchResults()]); });
+let lastReturnRefresh = 0;
+function refreshAfterReturn() {
+  if (document.visibilityState !== 'visible' || Date.now() - lastReturnRefresh < 1000) return;
+  lastReturnRefresh = Date.now();
+  void (async () => { await loadListings(); await Promise.all([loadSearchStatus(), loadSearchResults()]); })();
+}
+document.addEventListener('visibilitychange', refreshAfterReturn);
+window.addEventListener('focus', refreshAfterReturn);
 if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/service-worker.js'));
 (async () => { await loadListings(); await Promise.all([loadSearchStatus(), loadSearchResults()]); })();

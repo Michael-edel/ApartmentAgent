@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     check_interval_minutes: int = 120
 
     search_enabled: bool = True
+    target_rooms: int = 2
     search_interval_minutes: int = 15
     search_queries_per_run: int = 8
     # The example .env uses a readable comma-separated value.  NoDecode keeps
@@ -53,6 +54,7 @@ class Settings(BaseSettings):
     min_area_m2: float = 55.0
     max_area_m2: float = 70.0
     min_score_to_notify: int = 85
+    min_bathrooms: int = 0
 
     @field_validator("search_providers", mode="before")
     @classmethod

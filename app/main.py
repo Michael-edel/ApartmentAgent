@@ -1,6 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -8,20 +8,23 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, model_validator
+from typing import Literal
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app.ai_service import analyze_listing
+from app.ai_service import analyze_listing, current_analysis
 from app.checker import ListingNotFound, check_all_listings, check_listing, periodic_checker
 from app.config import get_settings
 from app.database import SessionLocal, engine, initialize_database
 from app.importer import ListingImportError, _is_krisha_host, import_krisha_listing
 from app.listing_service import ListingAlreadyExists, persist_listing
+from app.market_comparison import LOOKBACK_DAYS, compare_saved_listings
+from app.krisha_search import normalize_krisha_listing_url
 from app.models import Listing, ListingCheck, PriceSnapshot, SearchHistory, SearchResult
 from app.schemas import ListingCreate, ListingImportRequest, ListingResponse, PriceSnapshotResponse
 from app.scoring import assess_listing
-from app.search_agent import get_search_status, periodic_search, run_search
+from app.search_agent import get_search_status, load_search_preference, periodic_search, run_search, bathrooms_for_row, _row_matches_basic, _row_matches_target
 from app.search_analysis import analyze_search_result
 from app.telegram import telegram_status
 
@@ -31,6 +34,7 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await initialize_database()
+    await load_search_preference()
 
     stop_event = asyncio.Event()
     checker_task = asyncio.create_task(periodic_checker(stop_event))
@@ -92,12 +96,17 @@ def _payload_from_row(row: Listing) -> ListingCreate:
         city=row.city,
         district=row.district,
         residential_complex=row.residential_complex,
+        complex_description=row.complex_description,
+        complex_description_source_url=row.complex_description_source_url,
+        complex_description_source_kind=row.complex_description_source_kind,
         address=row.address,
         latitude=row.latitude,
         longitude=row.longitude,
         price_kzt=row.price_kzt,
         area_m2=row.area_m2,
         rooms=row.rooms,
+        bathrooms_count=row.bathrooms_count,
+        bathrooms_count_is_lower_bound=row.bathrooms_count_is_lower_bound,
         floor=row.floor,
         floors_total=row.floors_total,
         building_year=row.building_year,
@@ -108,6 +117,11 @@ def _payload_from_row(row: Listing) -> ListingCreate:
         twogis_url=row.twogis_url,
         is_full_two_room=row.is_full_two_room,
         mortgage_supported=row.mortgage_supported,
+        krisha_district_price_per_m2=row.krisha_district_price_per_m2,
+        krisha_city_price_per_m2=row.krisha_city_price_per_m2,
+        krisha_comparison_district=row.krisha_comparison_district,
+        seller_name=row.seller_name,
+        seller_type=row.seller_type,
         photo_urls=list(row.photo_urls or []),
     )
 
@@ -158,6 +172,11 @@ async def _finish_search_result_monitor(result_id: int, source_url: str) -> None
             return
         row.import_status = import_status
         row.imported_listing_id = listing_id
+        if listing_id is not None:
+            listing = await session.get(Listing, listing_id)
+            if listing is not None and listing.bathrooms_count is not None:
+                row.bathrooms_count = listing.bathrooms_count
+                row.bathrooms_count_is_lower_bound = listing.bathrooms_count_is_lower_bound
         row.import_error = import_error[:500] if import_error else None
         row.imported_at = datetime.now(UTC) if import_status == "imported" else None
         await session.commit()
@@ -165,12 +184,16 @@ async def _finish_search_result_monitor(result_id: int, source_url: str) -> None
 
 def _to_response(row: Listing) -> ListingResponse:
     payload = _payload_from_row(row)
+    assessment = assess_listing(payload, settings)
     return ListingResponse(
         id=row.id,
         created_at=row.created_at,
-        assessment=assess_listing(payload, settings),
-        ai_analysis=row.ai_analysis,
+        assessment=assessment,
+        ai_analysis=current_analysis(payload, assessment, row.ai_analysis),
         price_history=_price_history(row),
+        complex_description_observed_at=row.complex_description_observed_at,
+        krisha_comparison_observed_at=row.krisha_comparison_observed_at,
+        krisha_comparison_source=row.krisha_comparison_source,
         **payload.model_dump(),
     )
 
@@ -234,20 +257,12 @@ async def import_listing_from_browser(payload: ListingCreate) -> ListingResponse
             detail="Разрешены только ссылки krisha.kz",
         )
 
-    browser_payload = payload.model_copy(update={"source": "browser"})
-    saved = await _save_listing(browser_payload, allow_existing=True)
-
-    async with SessionLocal() as session:
-        result = await session.scalar(
-            select(SearchResult).where(SearchResult.url == str(browser_payload.source_url))
-        )
-        if result is not None:
-            result.import_status = "imported"
-            result.imported_listing_id = saved.id
-            result.import_error = None
-            result.imported_at = datetime.now(UTC)
-            await session.commit()
-    return saved
+    canonical_url = normalize_krisha_listing_url(str(payload.source_url))
+    browser_payload = payload.model_copy(update={
+        "source": "browser",
+        "source_url": HttpUrl(canonical_url) if canonical_url else payload.source_url,
+    })
+    return await _save_listing(browser_payload, allow_existing=True)
 
 
 @app.post("/api/v1/checks/run")
@@ -301,9 +316,31 @@ async def latest_checks() -> list[dict[str, object]]:
     ]
 
 
+class SearchRunRequest(BaseModel):
+    rooms: Literal[2, 3, 4]
+    max_price_kzt: int | None = Field(default=None, strict=True, ge=1, le=10_000_000_000)
+    min_area_m2: float | None = Field(default=None, strict=True, ge=0.1, le=10000, allow_inf_nan=False)
+    max_area_m2: float | None = Field(default=None, strict=True, ge=0.1, le=10000, allow_inf_nan=False)
+    min_bathrooms: Literal[0, 2] | None = None
+
+    @model_validator(mode="after")
+    def validate_area(self) -> "SearchRunRequest":
+        if (self.min_area_m2 is None) != (self.max_area_m2 is None):
+            raise ValueError("Укажите минимальную и максимальную площадь")
+        if self.min_area_m2 is not None and self.max_area_m2 is not None and self.min_area_m2 > self.max_area_m2:
+            raise ValueError("Минимальная площадь не может превышать максимальную")
+        return self
+
+
 @app.post("/api/v1/search/run")
-async def run_search_now() -> dict[str, object]:
-    summary = await run_search()
+async def run_search_now(request: SearchRunRequest | None = None) -> dict[str, object]:
+    summary = await run_search(
+        request.rooms if request is not None else None,
+        request.max_price_kzt if request is not None else None,
+        request.min_area_m2 if request is not None else None,
+        request.max_area_m2 if request is not None else None,
+        request.min_bathrooms if request is not None else None,
+    )
     return {
         "queries": summary.queries,
         "found": summary.found,
@@ -323,17 +360,28 @@ async def search_status() -> dict[str, object]:
 
 
 @app.get("/api/v1/search/results")
-async def search_results(limit: int = 50, only_new: bool = False) -> list[dict[str, object]]:
+async def search_results(limit: int = 50, only_new: bool = False, include_unconfirmed: bool = False) -> list[dict[str, object]]:
     safe_limit = min(max(limit, 1), 200)
     async with SessionLocal() as session:
-        query = (
-            select(SearchResult)
-            .order_by(SearchResult.first_seen.desc(), SearchResult.id.desc())
-            .limit(safe_limit)
-        )
+        query = select(SearchResult).order_by(SearchResult.first_seen.desc(), SearchResult.id.desc())
         if only_new:
             query = query.where(SearchResult.status.like("new:%"))
-        rows = (await session.scalars(query)).all()
+        rows = []
+        offset = 0
+        batch_size = 200
+        while len(rows) < safe_limit:
+            batch = (await session.scalars(query.offset(offset).limit(batch_size))).all()
+            if not batch:
+                break
+            for row in batch:
+                matches = (_row_matches_basic(row) and settings.min_bathrooms > 0 and bathrooms_for_row(row) is None) if include_unconfirmed else _row_matches_target(row)
+                if matches:
+                    rows.append(row)
+                    if len(rows) == safe_limit:
+                        break
+            offset += len(batch)
+            if len(batch) < batch_size:
+                break
 
     result: list[dict[str, object]] = []
     for row in rows:
@@ -343,7 +391,10 @@ async def search_results(limit: int = 50, only_new: bool = False) -> list[dict[s
             max_price=settings.max_price_kzt,
             min_area=settings.min_area_m2,
             max_area=settings.max_area_m2,
+            target_rooms=settings.target_rooms,
         )
+        analysis["bathrooms_count"] = bathrooms_for_row(row)
+        analysis["bathrooms_count_is_lower_bound"] = row.bathrooms_count_is_lower_bound or analysis["bathrooms_count_is_lower_bound"]
         result.append(
             {
                 "id": row.id,
@@ -353,7 +404,7 @@ async def search_results(limit: int = 50, only_new: bool = False) -> list[dict[s
                 "title": row.title,
                 "snippet": row.snippet,
                 "status": row.status.split(":", 1)[0],
-                "priority": row.status.split(":", 1)[1] if ":" in row.status else "normal",
+                "priority": "urgent" if analysis["score"] >= 85 else "good" if analysis["score"] >= 65 else "normal",
                 "import_status": row.import_status,
                 "imported_listing_id": row.imported_listing_id,
                 "import_error": row.import_error,
@@ -451,6 +502,26 @@ async def list_listings(min_score: int | None = None) -> list[ListingResponse]:
     if min_score is not None:
         items = [item for item in items if item.assessment.score >= min_score]
     return items
+
+
+@app.get("/api/v1/listings/{listing_id}/comparison")
+async def listing_comparison(listing_id: int) -> dict[str, object]:
+    now = datetime.now(UTC)
+    columns = (
+        Listing.id, Listing.source_url, Listing.city, Listing.district,
+        Listing.price_kzt, Listing.area_m2, Listing.last_imported_at,
+        Listing.krisha_district_price_per_m2, Listing.krisha_city_price_per_m2,
+        Listing.krisha_comparison_observed_at, Listing.krisha_comparison_source,
+        Listing.krisha_comparison_district,
+    )
+    async with SessionLocal() as session:
+        target = (await session.execute(select(*columns).where(Listing.id == listing_id))).first()
+        if target is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found")
+        rows = (await session.execute(
+            select(*columns).where(Listing.last_imported_at >= now - timedelta(days=LOOKBACK_DAYS))
+        )).all()
+    return compare_saved_listings(target, rows, now=now)
 
 
 @app.get("/api/v1/listings/{listing_id}", response_model=ListingResponse)

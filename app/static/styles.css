@@ -3,9 +3,14 @@
 .result-seen .verdict{background:#edf3f8;color:var(--muted)}
 .search-open.is-monitoring{opacity:.65;pointer-events:none}
 .listing .location-link{display:inline-block;margin-top:7px;font-size:13px}
+.listing-details{display:grid;gap:5px;margin-top:10px;color:#46576b;font-size:13px;line-height:1.4}.price-history{margin-top:10px;color:#46576b;font-size:13px}.price-history summary{cursor:pointer;color:#2f6fb0;font-weight:650}.price-history ol{padding-left:20px;line-height:1.7}
 .listing .location-missing{margin-top:7px;color:var(--good);font-size:12px}
 .listing .twogis-review{margin-top:9px;padding:9px 10px;border-radius:12px;background:#f4f8fc;color:#526477;font-size:13px;line-height:1.4}
 .listing .twogis-review b{color:#17365d}
 .listing .twogis-review a{display:inline;margin:0;font-size:12px}
 .form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.search-price-control{margin-top:12px}
 @media(max-width:420px){.form-grid{grid-template-columns:1fr}}
+.price-comparison{margin-top:14px;padding:12px;border:1px solid var(--line);border-radius:14px;background:#f8fafc;color:#46576b;font-size:13px;line-height:1.4}.price-comparison>b{color:#17365d}.price-comparison p{margin:5px 0 9px}.price-comparison>small{display:block;margin-top:9px;color:var(--muted)}.comparison-row{display:flex;justify-content:space-between;gap:10px;padding:5px 0;flex-wrap:wrap}.comparison-row b{color:#17365d}.comparison-row small{color:var(--muted)}
+.checkbox{display:flex!important;align-items:center;gap:8px}.checkbox input{width:20px;height:20px;flex:none}
+.unconfirmed-heading{grid-column:1/-1;padding:8px 3px;color:#46576b}.unconfirmed-heading p{margin:4px 0 0;font-size:13px}

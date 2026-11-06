@@ -4,11 +4,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai_service import analyze_listing
 from app.config import get_settings
 from app.database import SessionLocal
-from app.models import Listing, PriceSnapshot
+from app.models import Listing, PriceSnapshot, SearchResult
+from app.krisha_search import normalize_krisha_listing_url
 from app.schemas import ListingCreate
 from app.scoring import assess_listing
 from app.telegram import notify_listing
@@ -36,8 +38,42 @@ def _snapshot(listing_id: int, price_kzt: int, area_m2: float) -> PriceSnapshot:
 
 def _values(payload: ListingCreate) -> dict[str, object]:
     values = payload.model_dump(mode="json")
-    values["source_url"] = str(payload.source_url)
+    raw_url = str(payload.source_url)
+    values["source_url"] = normalize_krisha_listing_url(raw_url) or raw_url
     return values
+
+
+async def _find_listing(session: AsyncSession, source_url: str) -> Listing | None:
+    canonical = normalize_krisha_listing_url(source_url)
+    exact = await session.scalar(select(Listing).where(Listing.source_url == (canonical or source_url)))
+    if exact is not None or canonical is None:
+        return exact
+    path = canonical.removeprefix("https://krisha.kz")
+    candidates = (await session.scalars(
+        select(Listing).where(Listing.source_url.contains(path, autoescape=True))
+    )).all()
+    return next((row for row in candidates if normalize_krisha_listing_url(row.source_url) == canonical), None)
+
+
+async def _sync_search_results(session: AsyncSession, listing: Listing, now: datetime) -> None:
+    """Make every import path expose saved, confirmed fields in search results."""
+    canonical = normalize_krisha_listing_url(listing.source_url)
+    query = select(SearchResult)
+    if canonical:
+        path = canonical.removeprefix("https://krisha.kz")
+        query = query.where(SearchResult.url.contains(path, autoescape=True))
+    else:
+        query = query.where(SearchResult.url == listing.source_url)
+    for result in (await session.scalars(query)).all():
+        if canonical and normalize_krisha_listing_url(result.url) != canonical:
+            continue
+        result.import_status = "imported"
+        result.imported_listing_id = listing.id
+        result.import_error = None
+        result.imported_at = now
+        if listing.bathrooms_count is not None:
+            result.bathrooms_count = listing.bathrooms_count
+            result.bathrooms_count_is_lower_bound = listing.bathrooms_count_is_lower_bound
 
 
 async def _enrich_twogis(
@@ -54,7 +90,7 @@ async def _enrich_twogis(
     settings = get_settings()
     source_url = str(payload.source_url)
     async with SessionLocal() as session:
-        existing = await session.scalar(select(Listing).where(Listing.source_url == source_url))
+        existing = await _find_listing(session, source_url)
 
     if existing is None:
         complex_changed = False
@@ -124,12 +160,22 @@ async def persist_listing(
     now = datetime.now(UTC)
     payload, twogis_checked, replace_twogis = await _enrich_twogis(payload, now=now)
     values = _values(payload)
+    has_complex_description = bool(payload.complex_description)
+    if has_complex_description:
+        values['complex_description_observed_at'] = now
+    has_krisha_comparison = (
+        payload.krisha_district_price_per_m2 is not None
+        or payload.krisha_city_price_per_m2 is not None
+    )
+    if has_krisha_comparison:
+        values["krisha_comparison_observed_at"] = now
+        values["krisha_comparison_source"] = "krisha_listing_page"
     price_change: tuple[int, int] | None = None
     if twogis_checked:
         values["twogis_checked_at"] = now
 
     async with SessionLocal() as session:
-        row = await session.scalar(select(Listing).where(Listing.source_url == values["source_url"]))
+        row = await _find_listing(session, str(values["source_url"]))
         created = row is None
         if row is None:
             row = Listing(**values, last_imported_at=now)
@@ -140,12 +186,38 @@ async def persist_listing(
             if not allow_existing:
                 raise ListingAlreadyExists("Listing with this URL already exists")
             old_price = row.price_kzt
+            complex_changed = bool(payload.residential_complex) and (
+                (payload.residential_complex or '').strip().casefold()
+                != (row.residential_complex or '').strip().casefold()
+            )
+            if has_complex_description or complex_changed:
+                # Text and provenance are one snapshot; never attach an old
+                # source URL to a new description or a different complex.
+                row.complex_description = payload.complex_description
+                row.complex_description_source_url = (
+                    str(payload.complex_description_source_url)
+                    if payload.complex_description_source_url else None
+                )
+                row.complex_description_source_kind = payload.complex_description_source_kind
+                row.complex_description_observed_at = now if has_complex_description else None
+            if has_krisha_comparison:
+                # Keep a single observed snapshot: an absent member is unknown
+                # in this snapshot, rather than an older value with a new date.
+                row.krisha_district_price_per_m2 = payload.krisha_district_price_per_m2
+                row.krisha_city_price_per_m2 = payload.krisha_city_price_per_m2
+                row.krisha_comparison_district = payload.krisha_comparison_district
             if replace_twogis:
                 row.twogis_name = payload.twogis_name
                 row.twogis_rating = payload.twogis_rating
                 row.twogis_review_count = payload.twogis_review_count
                 row.twogis_url = payload.twogis_url
             for key, value in values.items():
+                if key.startswith('complex_description'):
+                    continue
+                if key == "krisha_comparison_district" and not has_krisha_comparison:
+                    continue
+                if key == "bathrooms_count_is_lower_bound" and payload.bathrooms_count is None:
+                    continue
                 if key in {"source_url", "photo_urls", "twogis_checked_at"}:
                     continue
                 if value is not None:
@@ -158,6 +230,7 @@ async def persist_listing(
             if old_price != payload.price_kzt:
                 price_change = (old_price, payload.price_kzt)
                 session.add(_snapshot(row.id, payload.price_kzt, payload.area_m2))
+        await _sync_search_results(session, row, now)
         await session.commit()
         await session.refresh(row)
 

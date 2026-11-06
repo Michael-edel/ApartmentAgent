@@ -1,4 +1,8 @@
+import httpx
+import pytest
+
 from app.importer import (
+    ListingImportError,
     _address_from_text,
     _coordinates_from_html,
     _embedded_number,
@@ -6,7 +10,28 @@ from app.importer import (
     _find_numeric,
     _find_text,
     _json_scripts,
+    import_krisha_listing,
 )
+
+
+@pytest.mark.parametrize("status_code", [403, 429, 468])
+async def test_access_restrictions_suggest_manual_or_browser_import(monkeypatch, status_code: int) -> None:
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, url):
+            return httpx.Response(status_code, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    with pytest.raises(ListingImportError, match=f"ограничил.*HTTP {status_code}.*браузерный импорт"):
+        await import_krisha_listing("https://krisha.kz/a/show/123")
 
 
 def test_reads_next_data_values() -> None:
@@ -56,3 +81,20 @@ def test_falls_back_to_visible_title_and_map_coordinates() -> None:
         None,
         None,
     )
+
+
+async def test_import_preserves_bathrooms_lower_bound(monkeypatch):
+    html = '<script type="application/ld+json">{"price":45000000,"area":100,"rooms":4,"bathroomsCount":"2 с/у и более"}</script>'
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        async def get(self, url):
+            return httpx.Response(200, text=html, request=httpx.Request("GET", url))
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    result = await import_krisha_listing("https://krisha.kz/a/show/123")
+    assert result.bathrooms_count == 2
+    assert result.bathrooms_count_is_lower_bound is True

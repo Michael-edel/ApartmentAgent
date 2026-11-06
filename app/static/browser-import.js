@@ -32,14 +32,61 @@
     const parsed = Number(digits);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
   };
-  const parsePrice = value => {
+
+
+  const complexDescription = () => {
+    const empty = {complex_description:null, complex_description_source_url:null, complex_description_source_kind:null};
+    for (const heading of document.querySelectorAll('h2, h3, h4')) {
+      if (!/^(?:Описание ЖК|О жилом комплексе)\s*:?$/i.test(clean(heading.textContent))) continue;
+      const sibling = heading.nextElementSibling;
+      // Read only the immediate prose block; do not absorb later widgets or recommendations.
+      if (!sibling || !['P','DIV','UL','OL'].includes(sibling.tagName)) continue;
+      const description = clean(sibling.textContent);
+      if (description.length > 5000) continue;
+      if (description.length >= 20) return {complex_description:description,
+        complex_description_source_url:location.href.split('#')[0], complex_description_source_kind:'listing'};
+    }
+    return empty;
+  };
+  const krishaComparison = () => {
+    const result = {krisha_district_price_per_m2:null, krisha_city_price_per_m2:null, krisha_comparison_district:null};
+    // A labelled statistics block is required. Never search arbitrary page text for averages.
+    const blocks = [...document.querySelectorAll('section, article, div')]
+      .filter(node => {
+        const text = clean(node.textContent);
+        return text.length <= 1800 && /Цена\s*м[²2]\s*в похожих квартирах/i.test(text)
+          && /Похожие квартиры в Астане/i.test(text);
+      }).sort((a, b) => clean(a.textContent).length - clean(b.textContent).length);
+    for (const block of blocks) {
+      const found = {...result};
+      for (const cell of block.querySelectorAll('div, td, li')) {
+        const text = clean(cell.textContent);
+        if (text.length > 220) continue;
+        const valueFirst = text.match(/^(\d[\d ]*)\s*(?:₸|тг|тенге)(?:\s*\/\s*м[²2])?\s*Похожие квартиры в (.+)$/i);
+        const labelFirst = text.match(/^Похожие квартиры в (.+?)\s+(\d[\d ]*)\s*(?:₸|тг|тенге)(?:\s*\/\s*м[²2])?$/i);
+        if (!valueFirst && !labelFirst) continue;
+        const label = clean(valueFirst ? valueFirst[2] : labelFirst[1]);
+        const value = Number((valueFirst ? valueFirst[1] : labelFirst[2]).replace(/\s/g, ''));
+        if (!Number.isSafeInteger(value) || value <= 0 || value > 1000000000) continue;
+        if (/^Астане$/i.test(label)) found.krisha_city_price_per_m2 = value;
+        else if (/(?:район[еа]?|р-н(?:е)?)$/i.test(label)) {
+          found.krisha_district_price_per_m2 = value;
+          found.krisha_comparison_district = label;
+        }
+      }
+      if (found.krisha_city_price_per_m2 || found.krisha_district_price_per_m2) return found;
+    }
+    return result;
+  };
+  const parsePrice = (value, allowPlain = true) => {
     if (typeof value === 'number' && value >= 500000) return value;
     const raw = clean(value).replace(/\u00a0/g, ' ');
     const money = raw.match(/(\d[\d\s]{5,})\s*(?:₸|тг|тенге)/i);
-    if (money) return Number(money[1].replace(/\D/g, '')) || null;
-    const millions = raw.match(/(\d{1,2}(?:[.,]\d+)?)\s*млн/i);
-    if (millions) return Math.round(Number(millions[1].replace(',', '.')) * 1000000);
-    const digits = raw.replace(/\D/g, '');
+    if (money) return /(?:^|\s)от\s*$/i.test(raw.slice(0, money.index)) ? null : Number(money[1].replace(/\D/g, '')) || null;
+    const millions = raw.match(/(\d{1,3}(?:[.,]\d+)?)\s*млн/i);
+    if (millions) return /(?:^|\s)от\s*$/i.test(raw.slice(0, millions.index)) ? null : Math.round(Number(millions[1].replace(',', '.')) * 1000000);
+    if (!allowPlain || !/^\d[\d\s]*$/.test(raw)) return null;
+    const digits = raw.replace(/\s/g, '');
     return digits.length >= 6 ? Number(digits) : null;
   };
   const text = clean(document.body?.innerText || '');
@@ -132,14 +179,46 @@
     return null;
   };
   const findText = keys => findValue(keys, textValue);
+  const sellerName = () => findValue(['sellerName', 'ownerName', 'advertiserName'], value =>
+    typeof value === 'string' && clean(value) ? clean(value).slice(0, 200) : null)
+    || clean(document.querySelector('[data-testid="seller-name"], [itemprop="seller"] [itemprop="name"]')?.textContent).slice(0, 200) || null;
+  const sellerType = () => findValue(['sellerType', 'ownerType', 'advertiserType'], value =>
+    typeof value === 'string' && clean(value) ? clean(value).slice(0, 100) : null);
+  const mortgageValue = value => {
+    if (typeof value === 'boolean') return value;
+    if (typeof value !== 'string') return null;
+    const normalized = clean(value).toLowerCase();
+    if (['да', 'true'].includes(normalized)) return true;
+    if (['нет', 'false'].includes(normalized)) return false;
+    return null;
+  };
+  const mortgageSupported = () => {
+    const structured = findValue(['mortgageSupported', 'mortgage_supported', 'isMortgageAvailable'], mortgageValue);
+    if (structured !== null) return structured;
+    const fieldText = [...document.querySelectorAll('[data-testid="mortgage"], [data-testid="mortgage-status"], [data-property="mortgage"]')].map(node => clean(node.textContent)).join(' ');
+    if (/(?:ипотека\s*[:—-]\s*нет|ипотека\s+не\s+рассматривается|не\s+прода[её]тся\s+в\s+ипотеку)/i.test(fieldText)) return false;
+    if (/(?:ипотека\s*[:—-]\s*да|(?:можно|возможна\s+покупка)\s+в\s+ипотеку)/i.test(fieldText)) return true;
+    return null;
+  };
 
-  const price = findValue(['price', 'price_kzt', 'priceKzt', 'amount', 'value'], parsePrice) || parsePrice(fullText);
+  const price = findValue(['price', 'price_kzt', 'priceKzt'], parsePrice) || parsePrice(fullText, false);
   const areaMatch = fullText.match(/(\d{2,3}(?:[.,]\d+)?)\s*(?:м²|м2|кв\.?\s*м)/i);
   const roomsMatch = fullText.match(/(\d+)\s*[-–]?\s*комн(?:ат(?:н(?:ая|ую|ой))?|\.)/i);
   const floorMatch = fullText.match(/(\d+)\s*(?:из|\/)\s*(\d+)\s*(?:этаж|эт\.)?/i);
   const yearMatch = fullText.match(/(?:год\s+постройки|построен\w*)\D{0,12}(19\d{2}|20\d{2})/i);
   const area = findValue(['area', 'area_m2', 'areaM2', 'square', 'floorSize', 'totalArea']) || (areaMatch ? number(areaMatch[1].replace(',', '.')) : null);
   const rooms = findValue(['rooms', 'roomCount', 'numberOfRooms', 'roomsCount']) || (roomsMatch ? Number(roomsMatch[1]) : null);
+  const bathroomInfo = value => {
+    const s = String(value ?? '').trim();
+    const match = s.match(/^(\d{1,2})(?:\s*с\s*\/\s*у)?\s*(и\s+более|и\s+больше|\+)?$/i);
+    if (!match || Number(match[1]) > 20) return null;
+    return {count:Number(match[1]), lower:!!match[2]};
+  };
+  const bathroomData = findValue(['bathroomsCount', 'bathrooms_count', 'numberOfBathroomsTotal', 'numberOfBathrooms'], bathroomInfo)
+    ?? [...document.querySelectorAll('[data-testid="bathrooms"], [data-name="bathrooms"], .a-list__item')]
+      .map(node => clean(node.textContent).match(/^(?:санузел|санузла|санузлов|санузлы|с\s*\/\s*у)\s*[:—-]?\s*(.+)$/i))
+      .map(match => match ? bathroomInfo(match[1]) : null).find(value => value !== null) ?? null;
+  const bathroomsCount = bathroomData?.count ?? null;
   const floor = findValue(['floor', 'floorNumber']) || (floorMatch ? Number(floorMatch[1]) : null);
   const floorsTotal = findValue(['floors', 'floorsTotal', 'floorCount', 'numberOfFloors']) || (floorMatch ? Number(floorMatch[2]) : null);
   const buildingYear = findValue(['year', 'buildYear', 'buildingYear', 'yearBuilt']) || (yearMatch ? Number(yearMatch[1]) : null);
@@ -185,6 +264,8 @@
     : coordinates;
   const payload = {
     source: 'browser',
+    ...krishaComparison(),
+    ...complexDescription(),
     source_url: location.href.split('#')[0],
     title: title.slice(0, 300),
     description,
@@ -197,12 +278,16 @@
     price_kzt: price,
     area_m2: area,
     rooms,
+    bathrooms_count: bathroomsCount,
+    bathrooms_count_is_lower_bound: bathroomData?.lower ?? false,
     floor,
     floors_total: floorsTotal,
     building_year: buildingYear,
     building_type: buildingType,
     is_full_two_room: rooms === 2,
-    mortgage_supported: null,
+    mortgage_supported: mortgageSupported(),
+    seller_name: sellerName(),
+    seller_type: sellerType(),
     photo_urls: photoUrls,
   };
 

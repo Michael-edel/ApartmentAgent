@@ -5,6 +5,7 @@ import json
 import re
 from dataclasses import dataclass
 from html import unescape
+from html.parser import HTMLParser
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 
 import httpx
@@ -43,10 +44,63 @@ class KrishaSearchItem:
     snippet: str | None = None
 
 
-def build_krisha_search_url(page: int = 1) -> str:
+class _CardParser(HTMLParser):
+    """Read a title and price from the same public search result card."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.items: list[KrishaSearchItem] = []
+        self.depth = 0
+        self.price_depth: int | None = None
+        self.in_title = False
+        self.url = ""
+        self.title: list[str] = []
+        self.price: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        classes = (attributes.get("class") or "").split()
+        if tag == "div" and not self.depth and {"a-card__main-info", "a-card__title-info"} & set(classes):
+            self.depth = 1
+            self.url, self.title, self.price = "", [], []
+            return
+        if not self.depth:
+            return
+        if tag == "div":
+            self.depth += 1
+            if "a-card__price" in classes:
+                self.price_depth = self.depth
+        if tag == "a" and "a-card__title" in classes:
+            self.url = attributes.get("href") or ""
+            self.in_title = True
+
+    def handle_data(self, data: str) -> None:
+        if self.in_title:
+            self.title.append(data)
+        if self.price_depth is not None:
+            self.price.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self.depth:
+            return
+        if tag == "a":
+            self.in_title = False
+        if tag == "div":
+            if self.price_depth == self.depth:
+                self.price_depth = None
+            self.depth -= 1
+            if not self.depth:
+                url = normalize_krisha_listing_url(self.url)
+                title = " ".join(" ".join(self.title).split())
+                price = " ".join(" ".join(self.price).split())
+                if url and title:
+                    self.items.append(KrishaSearchItem(title=title[:300], url=url, snippet=price or None))
+
+
+def build_krisha_search_url(page: int = 1, rooms: int = 2) -> str:
     base_url = "https://krisha.kz/prodazha/kvartiry/astana/"
     params: list[tuple[str, str]] = [
-        ("das[live.rooms]", "2"),
+        ("das[live.rooms]", str(rooms)),
         ("das[price][to]", str(settings.max_price_kzt)),
         ("das[live.square][from]", str(settings.min_area_m2)),
         ("das[live.square][to]", str(settings.max_area_m2)),
@@ -126,12 +180,18 @@ def parse_krisha_search_page(html: str) -> list[KrishaSearchItem]:
         return []
     by_url: dict[str, KrishaSearchItem] = {}
 
+    parser = _CardParser()
+    parser.feed(html)
+    for item in parser.items:
+        by_url[item.url] = item
+
     for match in _TITLE_LINK_RE.finditer(html):
         url = normalize_krisha_listing_url(match.group("url"))
         if not url:
             continue
         title = _plain_text(match.group("title")) or "Новое объявление Krisha"
-        by_url[url] = KrishaSearchItem(title=title[:300], url=url)
+        if url not in by_url:
+            by_url[url] = KrishaSearchItem(title=title[:300], url=url)
 
     for match in _LISTING_LINK_RE.finditer(html):
         url = normalize_krisha_listing_url(match.group("url"))
@@ -143,7 +203,7 @@ def parse_krisha_search_page(html: str) -> list[KrishaSearchItem]:
         if existing:
             if existing.title == "Новое объявление Krisha" and item.title:
                 existing.title = item.title[:300]
-            if item.snippet:
+            if item.snippet and not existing.snippet:
                 existing.snippet = item.snippet
         else:
             by_url[item.url] = item
@@ -151,7 +211,7 @@ def parse_krisha_search_page(html: str) -> list[KrishaSearchItem]:
     return list(by_url.values())
 
 
-async def search_krisha_direct(_: str = "") -> list[KrishaSearchItem]:
+async def search_krisha_direct(rooms: int = 2) -> list[KrishaSearchItem]:
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) "
@@ -173,13 +233,13 @@ async def search_krisha_direct(_: str = "") -> list[KrishaSearchItem]:
         headers=headers,
     ) as client:
         for page in range(1, page_limit + 1):
-            url = build_krisha_search_url(page)
+            url = build_krisha_search_url(page, rooms)
             response: httpx.Response | None = None
 
             for attempt in range(3):
                 try:
                     response = await client.get(url)
-                    if response.status_code in {403, 429}:
+                    if response.status_code in {403, 429, 468}:
                         raise KrishaSearchBlocked(
                             f"Krisha ограничила поиск (HTTP {response.status_code})"
                         )

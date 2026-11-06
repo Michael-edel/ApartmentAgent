@@ -20,6 +20,17 @@ class Base(DeclarativeBase):
     pass
 
 
+class SearchPreference(Base):
+    __tablename__ = "search_preferences"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    rooms: Mapped[int] = mapped_column(Integer, default=2)
+    max_price_kzt: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    min_area_m2: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_area_m2: Mapped[float | None] = mapped_column(Float, nullable=True)
+    min_bathrooms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
 class Listing(Base):
     __tablename__ = "listings"
 
@@ -31,16 +42,24 @@ class Listing(Base):
     city: Mapped[str] = mapped_column(String(100), default="Астана")
     district: Mapped[str | None] = mapped_column(String(150), nullable=True)
     residential_complex: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    complex_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    complex_description_source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    complex_description_source_kind: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    complex_description_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     address: Mapped[str | None] = mapped_column(String(500), nullable=True)
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     price_kzt: Mapped[int] = mapped_column(BigInteger)
     area_m2: Mapped[float] = mapped_column(Float)
     rooms: Mapped[int] = mapped_column(Integer)
+    bathrooms_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bathrooms_count_is_lower_bound: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     floor: Mapped[int | None] = mapped_column(Integer, nullable=True)
     floors_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     building_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
     building_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    seller_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    seller_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
     twogis_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
     twogis_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
     twogis_review_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -50,6 +69,11 @@ class Listing(Base):
     )
     is_full_two_room: Mapped[bool] = mapped_column(Boolean, default=True)
     mortgage_supported: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    krisha_district_price_per_m2: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    krisha_city_price_per_m2: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    krisha_comparison_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    krisha_comparison_source: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    krisha_comparison_district: Mapped[str | None] = mapped_column(String(150), nullable=True)
     photo_urls: Mapped[list[str]] = mapped_column(
         JSON, default=list, server_default="[]", nullable=False
     )
@@ -104,6 +128,8 @@ class SearchResult(Base):
     query: Mapped[str] = mapped_column(Text)
     title: Mapped[str] = mapped_column(String(500))
     snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bathrooms_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bathrooms_count_is_lower_bound: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     status: Mapped[str] = mapped_column(String(30), default="new", index=True)
     first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

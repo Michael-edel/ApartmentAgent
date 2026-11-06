@@ -4,8 +4,22 @@ from sqlalchemy.engine import Connection
 # create_all intentionally remains the first step; these definitions only cover
 # columns introduced after the initial MVP schema was deployed.
 _COLUMNS: dict[str, dict[str, str]] = {
+    "search_preferences": {"max_price_kzt": "BIGINT", "min_area_m2": "DOUBLE PRECISION", "max_area_m2": "DOUBLE PRECISION", "min_bathrooms": "INTEGER"},
     "listings": {
+        "complex_description": "TEXT",
+        "complex_description_source_url": "TEXT",
+        "complex_description_source_kind": "VARCHAR(30)",
+        "complex_description_observed_at": "TIMESTAMP WITH TIME ZONE",
+        "krisha_district_price_per_m2": "BIGINT",
+        "krisha_city_price_per_m2": "BIGINT",
+        "krisha_comparison_observed_at": "TIMESTAMP WITH TIME ZONE",
+        "krisha_comparison_source": "VARCHAR(50)",
+        "krisha_comparison_district": "VARCHAR(150)",
+        "bathrooms_count": "INTEGER",
+        "bathrooms_count_is_lower_bound": "BOOLEAN NOT NULL DEFAULT FALSE",
         "description": "TEXT",
+        "seller_name": "VARCHAR(200)",
+        "seller_type": "VARCHAR(100)",
         "address": "VARCHAR(500)",
         "latitude": "DOUBLE PRECISION",
         "longitude": "DOUBLE PRECISION",
@@ -21,6 +35,8 @@ _COLUMNS: dict[str, dict[str, str]] = {
     },
     "price_snapshots": {"price_per_m2": "BIGINT"},
     "search_results": {
+        "bathrooms_count": "INTEGER",
+        "bathrooms_count_is_lower_bound": "BOOLEAN NOT NULL DEFAULT FALSE",
         "import_status": "VARCHAR(30) DEFAULT 'pending'",
         "imported_listing_id": "INTEGER REFERENCES listings(id) ON DELETE SET NULL",
         "import_error": "TEXT",
