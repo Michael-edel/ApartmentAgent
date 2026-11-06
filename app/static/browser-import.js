@@ -89,7 +89,11 @@
     const digits = raw.replace(/\s/g, '');
     return digits.length >= 6 ? Number(digits) : null;
   };
-  const text = clean(document.body?.innerText || '');
+  let pageText = document.body?.innerText || '';
+  for (const notice of document.querySelectorAll('[data-apartment-agent-extension-message], [data-apartment-agent-message]')) {
+    pageText = pageText.replace(notice.innerText || notice.textContent || '', '');
+  }
+  const text = clean(pageText);
   const fullText = `${document.title} ${text}`;
   const meta = name => document.querySelector(`meta[property="${name}"], meta[name="${name}"]`)?.content || '';
   const roots = [];
@@ -179,6 +183,25 @@
     return null;
   };
   const findText = keys => findValue(keys, textValue);
+  const districtFromText = (value, allowBare = false) => {
+    const text = clean(value);
+    const names = [
+      ['Байконур', 'Байконур(?:ский)?|Байконыр|Байқоңыр'],
+      ['Есильский', 'Есильский|Есиль|Есіл'],
+      ['Нура', 'Нура|Нұра|Нуринский'],
+      ['Алматы', 'Алматы|Алматинский'],
+      ['Сарыарка', 'Сарыарка|Сарыаркинский'],
+      ['Сарайшык', 'Сарайшык|Сарайшық'],
+    ];
+    const label = '(?:р\\s*[-–—]\\s*н|район)';
+    for (const [name, aliases] of names) {
+      // JS \\b does not delimit Cyrillic words; use Unicode letter boundaries.
+      const namePattern = `(?:${aliases})`;
+      const labelled = new RegExp(`(?:^|[^\\p{L}])(?:${label}\\s*${namePattern}|${namePattern}\\s*${label})(?=$|[^\\p{L}])`, 'iu');
+      if (labelled.test(text) || allowBare && new RegExp(`^${namePattern}$`, 'iu').test(text)) return `${name} район`;
+    }
+    return null;
+  };
   const sellerName = () => findValue(['sellerName', 'ownerName', 'advertiserName'], value =>
     typeof value === 'string' && clean(value) ? clean(value).slice(0, 200) : null)
     || clean(document.querySelector('[data-testid="seller-name"], [itemprop="seller"] [itemprop="name"]')?.textContent).slice(0, 200) || null;
@@ -221,9 +244,45 @@
     if (!match || Number(match[1]) > 20) return null;
     return {count:Number(match[1]), lower:!!match[2]};
   };
-  const bathroomData = [...document.querySelectorAll('[data-testid="bathrooms"], [data-name="bathrooms"], .a-list__item')]
-      .map(node => clean(node.textContent).match(/^(?:санузел|санузла|санузлов|санузлы|с\s*\/\s*у)\s*[:—-]?\s*(.+)$/i))
-      .map(match => match ? bathroomInfo(match[1]) : null).find(value => value !== null)
+  const visibleProperty = node => {
+    for (let current = node; current; current = current.parentElement) {
+      if (current.hidden || current.getAttribute?.('hidden') !== null && current.getAttribute?.('hidden') !== undefined
+        || current.getAttribute?.('aria-hidden') === 'true' || ['SCRIPT', 'STYLE'].includes(current.tagName)) return false;
+      const style = typeof window.getComputedStyle === 'function' ? window.getComputedStyle(current) : current.style;
+      if (style?.display === 'none' || ['hidden', 'collapse'].includes(style?.visibility)) return false;
+    }
+    return true;
+  };
+  const propertyText = node => clean(node?.innerText ?? node?.textContent);
+  const bathroomLabel = /^(?:санузел|санузла|санузлов|санузлы|с\s*\/\s*у)\s*[:—-]?\s*$/i;
+  const bathroomField = node => {
+    if (!visibleProperty(node)) return null;
+    const text = propertyText(node);
+    const labelled = text.match(/^(?:санузел|санузла|санузлов|санузлы|с\s*\/\s*у)\s*[:—-]?\s*(.+)$/i);
+    const inline = labelled ? bathroomInfo(clean(labelled[1])) : null;
+    if (inline) return inline;
+    // A semantic property name is a label even when only its value is rendered.
+    if (['bathrooms', 'flat.toilet'].includes(node.getAttribute?.('data-name'))
+      || node.getAttribute?.('data-testid') === 'bathrooms') {
+      const value = bathroomInfo(text);
+      if (value) return value;
+    }
+    if (bathroomLabel.test(text) && node.nextElementSibling && visibleProperty(node.nextElementSibling)
+      && (!node.tagName || node.tagName !== 'DT' || node.nextElementSibling.tagName === 'DD')) {
+      const value = bathroomInfo(propertyText(node.nextElementSibling));
+      if (value) return value;
+    }
+    // Labels and values can be sibling children of a property row.
+    for (const label of [...(node.children || [])]) {
+      if (!visibleProperty(label) || !bathroomLabel.test(propertyText(label))
+        || !label.nextElementSibling || !visibleProperty(label.nextElementSibling)) continue;
+      const value = bathroomInfo(propertyText(label.nextElementSibling));
+      if (value) return value;
+    }
+    return null;
+  };
+  const bathroomData = [...document.querySelectorAll('[data-testid="bathrooms"], [data-name="bathrooms"], [data-name="flat.toilet"], .a-list__item, .offer__info-item, dt')]
+      .map(bathroomField).find(value => value !== null)
     ?? findValue(['bathroomsCount', 'bathrooms_count', 'numberOfBathroomsTotal', 'numberOfBathrooms'], bathroomInfo) ?? null;
   const bathroomsCount = bathroomData?.count ?? null;
   const floor = findValue(['floor', 'floorNumber']) || (floorMatch ? Number(floorMatch[1]) : null);
@@ -251,10 +310,9 @@
   const description = clean(meta('og:description') || meta('description')).slice(0, 20000) || null;
   const lower = fullText.toLowerCase();
   const buildingType = lower.includes('кирпич') ? 'brick' : lower.includes('монолит') ? 'monolith' : lower.includes('панел') ? 'panel' : null;
-  const districtValue = findText(['district', 'districtName', 'areaName'])
-    || [findText(['regionName', 'addressRegion'])].find(value => value && /\b(?:район|р-н)\b/i.test(value))
-    || (fullText.match(/((?:Есильский|Нура|Алматы|Сарыарка|Байконур)\s+(?:район|р-н))/i)?.[1] || null);
-  const district = districtValue ? districtValue.replace(/\s+р-н\b/i, ' район') : null;
+  const district = districtFromText(findText(['district', 'districtName', 'areaName']), true)
+    || districtFromText(findText(['regionName', 'addressRegion']))
+    || districtFromText(fullText);
   const residentialComplex = findText(['complexName', 'residentialComplex', 'housingComplex', 'residentialComplexName'])
     || (fullText.match(/ЖК\s*[«"]?([^»".,;]{2,100})/i)?.[1]?.trim() || null);
   const domAddress = [...document.querySelectorAll('[itemprop="streetAddress"], [data-testid*="address" i], [class*="address" i]')]

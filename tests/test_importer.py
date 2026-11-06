@@ -7,11 +7,23 @@ from app.importer import (
     _coordinates_from_html,
     _embedded_number,
     _find_coordinate,
+    _find_district,
     _find_numeric,
     _find_text,
     _json_scripts,
     import_krisha_listing,
 )
+
+
+@pytest.mark.parametrize("value", ["Астана, р-н Байконур", "Байконур р-н", "район Байконур", "Байконур район"])
+def test_district_label_before_or_after_name(value):
+    assert _find_district([], value) == "Байконур район"
+    assert _find_district([{"regionName": value}], "") == "Байконур район"
+    assert _find_district([{"districtName": value}], "") == "Байконур район"
+
+
+def test_district_name_is_not_inferred_from_street_name():
+    assert _find_district([], "Астана, улица Байконур 12") is None
 
 
 @pytest.mark.parametrize("status_code", [403, 429, 468])

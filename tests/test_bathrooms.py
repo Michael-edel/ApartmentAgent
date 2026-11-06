@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from app.search_analysis import parse_bathrooms_count
 from app import search_agent
 from app.schemas import ListingCreate
@@ -70,3 +72,48 @@ def test_scoring_respects_bathroom_requirement():
     assert one.verdict == 'НЕ РЕКОМЕНДУЮ'
     two = assess_listing(ListingCreate(**args, bathrooms_count=2), settings)
     assert two.score > unknown.score
+
+
+@pytest.mark.parametrize('value, expected', [
+    ('раздельный', (1, False)),
+    ('совмещенный', (1, False)),
+    ('совмещённый', (1, False)),
+    ('2 с/у и более', (2, True)),
+])
+@pytest.mark.parametrize('template', [
+    '<div class="offer__info-item"><div class="offer__info-title"><span>Санузел</span></div>'
+    '<div class="offer__info-value"><strong>{value}</strong></div></div>',
+    '<div data-name="flat.toilet"><div>{value}</div></div>',
+    '<dl><dt><span>Санузел</span></dt><dd><div>{value}</div></dd></dl>',
+    '<li class="a-list__item"><div>Санузел</div><div><span>{value}</span></div></li>',
+])
+def test_bathroom_nested_labelled_fields_override_json(template, value, expected):
+    from app.importer import _bathrooms_fields
+
+    stale_json = [{'bathroomsCount': 5}]
+    assert _bathrooms_fields(template.format(value=value), stale_json) == expected
+
+
+@pytest.mark.parametrize('html', [
+    '<p>Реклама: Санузел 2 с/у и более</p>',
+    '<div class="offer__info-item"><div>Описание</div><div>Санузел 2 с/у и более</div></div>',
+    '<dl><dt>Комнат</dt><dd>2</dd><dt>Описание</dt><dd>2 с/у</dd></dl>',
+    '<dl><dt>Санузел</dt><div>Реклама</div><dd>2 с/у и более</dd></dl>',
+    '<div hidden><div class="offer__info-item">Санузел 2 с/у и более</div></div>',
+    '<div class="offer__info-item" style="display: none">Санузел 2 с/у и более</div>',
+    '<dl><dt>Санузел</dt><dd aria-hidden="true">2 с/у и более</dd></dl>',
+    '<div data-name="flat.toilet">неизвестно, возможно 2 с/у</div>',
+])
+def test_bathroom_field_parser_ignores_unlabelled_hidden_and_ambiguous_text(html):
+    from app.importer import _bathrooms_fields
+
+    assert _bathrooms_fields(html, []) == (None, False)
+
+
+def test_hidden_bathroom_field_does_not_override_visible_and_unknown_stays_unknown():
+    from app.importer import _bathrooms_fields
+
+    html = ('<div hidden><div data-name="flat.toilet">2 с/у и более</div></div>'
+            '<div class="offer__info-item"><div>Санузел</div><div>раздельный</div></div>')
+    assert _bathrooms_fields(html, [{'bathroomsCount': 2}]) == (1, False)
+    assert _bathrooms_fields('<dl><dt>Санузел</dt><dd>не указано</dd></dl>', []) == (None, False)

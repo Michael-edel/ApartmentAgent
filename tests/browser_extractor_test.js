@@ -6,7 +6,7 @@ function extract(file, text, data = null, mortgageField = null, bathroomField = 
   let posted;
   const body = {innerText: text, appendChild() {}};
   const document = {
-    title: '3-комнатная квартира 80 м²', body,
+    title: text.startsWith('4-комнатная') ? '4-комнатная квартира 100 м²' : '3-комнатная квартира 80 м²', body,
     currentScript: {src: 'http://localhost:8000/static/browser-import.js'},
     querySelector() { return null; },
     querySelectorAll(selector) {
@@ -14,7 +14,10 @@ function extract(file, text, data = null, mortgageField = null, bathroomField = 
       if (complexBlock && selector === 'h2, h3, h4') return [{textContent:complexBlock.heading, nextElementSibling:{tagName:'P', textContent:complexBlock.text, nextElementSibling:null}}];
       if (comparisonCells && selector === 'section, article, div') return [{textContent: comparisonHeading + ' ' + comparisonCells.join(' '), querySelectorAll() { return comparisonCells.map(textContent => ({textContent})); }}];
       if (data && selector.startsWith('script[')) return [{textContent: JSON.stringify(data)}];
-      if (bathroomField && selector.startsWith('[data-testid="bathrooms"]')) return [{textContent: bathroomField}];
+      if (bathroomField && selector.startsWith('[data-testid="bathrooms"]')) {
+        if (typeof bathroomField === 'string') return [{textContent: bathroomField}];
+        return selector.includes(bathroomField.selector) ? bathroomField.nodes : [];
+      }
       if (mortgageField && selector.startsWith('[data-testid="mortgage"]')) return [{textContent: mortgageField}];
       return [];
     },
@@ -35,6 +38,15 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
     assert.equal(result?.price_kzt ?? null, null, file);
   }
   const common = '3-комнатная квартира 80 м² Цена 45 000 000 ₸';
+  for (const cityField of ['Город Астана, р-н Байконур', 'Город Астана, Байконур р-н', 'Город Астана, район Байконур', 'Город Астана, Байконур район']) {
+    const result = extract(file, `4-комнатная квартира 100 м² Цена 45 000 000 ₸ ${cityField}`);
+    assert.equal(result.rooms, 4, file);
+    assert.equal(result.district, 'Байконур район', `${file}: ${cityField}`);
+  }
+  assert.equal(extract(file, common, {addressRegion:'Астана, р-н Байконур'}).district, 'Байконур район', file);
+  assert.equal(extract(file, common, {districtName:'Байконур'}).district, 'Байконур район', file);
+  assert.equal(extract(file, `${common} ЖК Байконур, раздельный вход`).district, null, file);
+  assert.equal(extract(file, `${common} Город Астана, Есильский р-н`).district, 'Есильский район', file);
   const unknown = extract(file, `${common} Рассчитать ипотеку`);
   assert.equal(unknown.mortgage_supported, null, file);
   assert.equal(unknown.seller_name, null, file);
@@ -65,6 +77,30 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
   }
   assert.equal(extract(file, `${common} Раздельный санузел на рекламном баннере`).bathrooms_count, null, file);
   assert.equal(extract(file, common, {bathroomsCount: 'раздельный'}, null, 'Санузел 2 с/у и более').bathrooms_count, 2, file);
+  for (const [value, count, lower] of [['2 с/у и более', 2, true], ['раздельный', 1, false], ['совмещенный', 1, false], ['совмещённый', 1, false]]) {
+    const dd = {tagName:'DD', textContent:value};
+    const label = {tagName:'DT', textContent:'Санузел', nextElementSibling:dd};
+    const rows = [
+      {selector:'.offer__info-item', nodes:[{textContent:`Санузел${value}`, children:[label, dd]}]},
+      {selector:'[data-name="flat.toilet"]', nodes:[{textContent:value, getAttribute:name => name === 'data-name' ? 'flat.toilet' : null}]},
+      {selector:'dt', nodes:[label]},
+      // The row has extra decoration; exact label/value siblings remain readable.
+      {selector:'.offer__info-item', nodes:[{textContent:`Санузел ${value} Подробнее`, children:[label, dd]}]},
+    ];
+    for (const row of rows) {
+      const result = extract(file, common, null, null, row);
+      assert.equal(result.bathrooms_count, count, `${file}: ${row.selector} ${value}`);
+      assert.equal(result.bathrooms_count_is_lower_bound, lower, `${file}: ${row.selector} ${value}`);
+    }
+  }
+  assert.equal(extract(file, common, null, null, {selector:'dt', nodes:[{tagName:'DT', textContent:'Количество комнат', nextElementSibling:{tagName:'DD', textContent:'2'}}]}).bathrooms_count, null, file);
+  for (const hidden of [{hidden:true}, {style:{display:'none'}}, {parentElement:{style:{visibility:'hidden'}}}, {getAttribute:name => name === 'aria-hidden' ? 'true' : null}]) {
+    const result = extract(file, common, null, null, {selector:'.offer__info-item', nodes:[
+      {textContent:'Санузел 2 с/у и более', ...hidden}, {textContent:'Санузел раздельный'},
+    ]});
+    assert.equal(result.bathrooms_count, 1, `${file}: hidden two-plus must not override visible separate`);
+    assert.equal(result.bathrooms_count_is_lower_bound, false, file);
+  }
   const comparison = extract(file, common, null, null, null, ['416 667 ₸ Цена м² в этом объявлении', '845 700 ₸ Похожие квартиры в Есильском р-н', '792 420 ₸ Похожие квартиры в Астане']);
   assert.equal(comparison.krisha_district_price_per_m2, 845700, file);
   assert.equal(comparison.krisha_city_price_per_m2, 792420, file);

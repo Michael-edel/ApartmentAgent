@@ -1,6 +1,7 @@
 import json
 import re
 from html import unescape
+from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import unquote, urlparse, urlunparse
 
@@ -9,35 +10,118 @@ from pydantic import HttpUrl
 
 from app.schemas import ListingCreate
 from app.mortgage import mortgage_from_html, mortgage_value, parse_mortgage_text
-from app.search_analysis import parse_bathrooms_count, bathrooms_is_lower_bound
+
+
+class _FieldNode:
+    def __init__(self, tag: str, attrs: dict[str, str | None], parent=None):
+        self.tag, self.attrs, self.parent = tag, attrs, parent
+        self.children: list[_FieldNode | str] = []
+
+    def hidden(self) -> bool:
+        return (self.tag in {"script", "style", "noscript"}
+                or "hidden" in self.attrs
+                or str(self.attrs.get("aria-hidden", "")).lower() == "true"
+                or bool(re.search(r"(?:display\s*:\s*none|visibility\s*:\s*hidden)",
+                                  self.attrs.get("style") or "", re.I)))
+
+    def text(self) -> str:
+        chunks, pending = [], list(reversed(self.children))
+        while pending:
+            child = pending.pop()
+            if isinstance(child, str):
+                chunks.append(child)
+            elif not child.hidden():
+                pending.extend(reversed(child.children))
+        return re.sub(r"\s+", " ", " ".join(chunks)).strip()
+
+
+class _BathroomFieldHTMLParser(HTMLParser):
+    _void_tags = {"area", "base", "br", "col", "embed", "hr", "img", "input",
+                  "link", "meta", "param", "source", "track", "wbr"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.root = _FieldNode("document", {})
+        self.stack = [self.root]
+
+    def handle_starttag(self, tag, attrs):
+        node = _FieldNode(tag, dict(attrs), self.stack[-1])
+        self.stack[-1].children.append(node)
+        if tag not in self._void_tags:
+            self.stack.append(node)
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag not in self._void_tags:
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag):
+        for index in range(len(self.stack) - 1, 0, -1):
+            if self.stack[index].tag == tag:
+                del self.stack[index:]
+                break
+
+    def handle_data(self, data):
+        self.stack[-1].children.append(data)
+
+    def values(self):
+        pending = [self.root]
+        label = re.compile(r"^(?:санузел|санузлы|с\s*/\s*у)\s*[:—-]?\s*(.*)$", re.I)
+        while pending:
+            node = pending.pop()
+            if node.hidden():
+                continue
+            children = [child for child in node.children if isinstance(child, _FieldNode)]
+            pending.extend(reversed(children))
+            classes = set((node.attrs.get("class") or "").split())
+            named = (node.attrs.get("data-name") in {"flat.toilet", "bathrooms"}
+                     or node.attrs.get("data-testid") == "bathrooms")
+            if named or classes.intersection({"a-list__item", "offer__info-item"}):
+                text = node.text()
+                match = label.fullmatch(text)
+                if match:
+                    yield match.group(1)
+                elif named:
+                    yield text
+            elif node.tag == "dt" and label.fullmatch(node.text()):
+                # Only the adjacent definition belongs to this exact label.
+                siblings = [child for child in node.parent.children if isinstance(child, _FieldNode)]
+                index = siblings.index(node)
+                if index + 1 < len(siblings) and siblings[index + 1].tag == "dd":
+                    match = label.fullmatch(node.text())
+                    if not match.group(1) and not siblings[index + 1].hidden():
+                        yield siblings[index + 1].text()
+
+
+def _bathroom_field_value(raw: Any) -> tuple[int | None, bool]:
+    if isinstance(raw, bool):
+        return None, False
+    value = str(raw).strip()
+    if re.fullmatch(r"раздельный|совмещ[её]нный", value, re.I):
+        return 1, False
+    match = re.fullmatch(r"(\d{1,2})(?:\s*с\s*/\s*у)?\s*(и\s+более|и\s+больше|\+)?", value, re.I)
+    if match and int(match.group(1)) <= 20:
+        return int(match.group(1)), bool(match.group(2))
+    return None, False
 
 
 def _bathrooms_fields(html: str, data: list[Any]) -> tuple[int | None, bool]:
-    # The visible labelled field is authoritative over cached JSON metadata.
-    for raw in re.findall(r'<(?:div|li)[^>]+class=["\'][^"\']*a-list__item[^"\']*["\'][^>]*>(.*?)</(?:div|li)>', html, re.I | re.S):
-        text = re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", raw))).strip()
-        if re.match(r"^(?:Санузел|Санузлы|с\s*/\s*у)\b", text, re.I):
-            text = re.sub(r"^(Санузел|Санузлы|с\s*/\s*у)\s+(?=\d)", r"\1: ", text, flags=re.I)
-            count = parse_bathrooms_count(text)
-            if count is not None:
-                return count, bathrooms_is_lower_bound(text)
+    # Read complete nested property rows, with visible fields ahead of JSON.
+    parser = _BathroomFieldHTMLParser()
+    parser.feed(html)
+    for value in parser.values():
+        count, lower = _bathroom_field_value(value)
+        if count is not None:
+            return count, lower
     keys = {"bathroomscount", "bathrooms_count", "numberofbathroomstotal", "numberofbathrooms"}
     for root in data:
         for item in _walk(root):
             for key, raw in item.items():
-                if str(key).lower() not in keys or isinstance(raw, bool):
+                if str(key).lower() not in keys:
                     continue
-                value = str(raw).strip()
-                if re.fullmatch(r"раздельный|совмещ[её]нный", value, re.I):
-                    return 1, False
-                if re.fullmatch(r"\d{1,2}", value) and int(value) <= 20:
-                    return int(value), False
-                if not re.fullmatch(r"\d{1,2}(?:\s*с\s*/\s*у)?\s*(?:и\s+более|и\s+больше|\+)?", value, re.I):
-                    continue
-                text = f"Санузел: {value}"
-                count = parse_bathrooms_count(text)
+                count, lower = _bathroom_field_value(raw)
                 if count is not None:
-                    return count, bathrooms_is_lower_bound(text)
+                    return count, lower
     return None, False
 
 
@@ -212,19 +296,26 @@ def _find_text(data: list[Any], keys: set[str]) -> str | None:
 
 
 def _find_district(data: list[Any], combined: str) -> str | None:
+    names = r"Есильский|Нура|Алматы|Сарыарка|Байконур"
+
+    def labelled_district(text: str) -> str | None:
+        for pattern in (
+            rf"(?<!\w)(?:район|р-н)\s+(?P<name>{names})(?!\w)",
+            rf"(?<!\w)(?P<name>{names})\s+(?:район|р-н)(?!\w)",
+        ):
+            match = re.search(pattern, text, re.I)
+            if match:
+                return f"{match.group('name')} район"
+        return None
+
     district = _find_text(data, {"district", "districtName", "areaName"})
     if not district:
         region = _find_text(data, {"regionName", "addressRegion"})
         if region and re.search(r"\b(?:район|р-н)\b", region, re.IGNORECASE):
             district = region
-    if not district:
-        district_match = re.search(
-            r"((?:Есильский|Нура|Алматы|Сарыарка|Байконур)\s+(?:район|р-н))",
-            combined,
-            re.IGNORECASE,
-        )
-        district = district_match.group(1) if district_match else None
-    return re.sub(r"\s+р-н\b", " район", district, flags=re.IGNORECASE) if district else None
+    if district:
+        return labelled_district(district) or re.sub(r"\s+р-н\b", " район", district, flags=re.IGNORECASE)
+    return labelled_district(combined)
 
 
 def _address_from_text(value: str) -> str | None:

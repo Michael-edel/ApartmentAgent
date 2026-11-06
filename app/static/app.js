@@ -225,11 +225,16 @@ function render(listings) {
     const sourceUrl = safeExternalUrl(item.source_url);
     const title = item.residential_complex || item.title;
     const location = [item.address, item.district, item.city].filter(Boolean).join(' · ');
-    const hasCoordinates = item.latitude != null && item.longitude != null;
+    const hasCoordinates = Number.isFinite(item.latitude) && Number.isFinite(item.longitude)
+      && item.latitude >= -90 && item.latitude <= 90
+      && item.longitude >= -180 && item.longitude <= 180;
     const locationMissing = !item.address && !hasCoordinates;
     const mapUrl = hasCoordinates
       ? `https://yandex.ru/maps/?ll=${encodeURIComponent(`${item.longitude},${item.latitude}`)}&z=16&pt=${encodeURIComponent(`${item.longitude},${item.latitude},pm2rdm`)}`
       : item.address ? `https://yandex.ru/maps/?text=${encodeURIComponent([item.city, item.address].filter(Boolean).join(', '))}` : null;
+    const mapWidgetUrl = hasCoordinates
+      ? `https://yandex.ru/map-widget/v1/?ll=${encodeURIComponent(`${item.longitude},${item.latitude}`)}&z=16&pt=${encodeURIComponent(`${item.longitude},${item.latitude},pm2rdm`)}&l=map`
+      : null;
     const scoreClass = item.assessment.score < 85 ? 'medium' : '';
     const photos = (item.photo_urls || []).slice(0, 4);
     const ai = item.ai_analysis || {};
@@ -248,7 +253,8 @@ function render(listings) {
       <div class="price">${money.format(item.price_kzt)}</div>
       <div class="meta">${item.rooms} комн. · ${number.format(item.area_m2)} м² · ${money.format(item.assessment.price_per_m2)}/м² · этаж ${item.floor || '—'}/${item.floors_total || '—'}</div>
       <section class="price-comparison" data-listing-id="${Number(item.id)}" aria-label="Сравнение цены за квадратный метр">Загружаю сравнение цены…</section>
-      ${mapUrl ? `<a class="location-link" href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener noreferrer">${hasCoordinates ? 'Открыть координаты на карте' : 'Найти адрес на карте'} →</a>${!hasCoordinates ? '<p class="meta">Координаты не получены. Карта найдёт дом по указанному адресу.</p>' : ''}` : ''}
+      ${mapWidgetUrl ? `<div class="listing-map"><iframe src="${escapeHtml(mapWidgetUrl)}" title="Расположение квартиры: ${escapeHtml(title)}" loading="lazy" allowfullscreen></iframe></div>` : ''}
+      ${mapUrl ? `<a class="location-link" href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener noreferrer">${hasCoordinates ? 'Открыть большую карту' : 'Найти адрес на карте'} →</a>${hasCoordinates ? '<p class="meta map-fallback">Если карта не загрузилась, воспользуйтесь ссылкой выше.</p>' : '<p class="meta">Координаты не получены. Карта найдёт дом по указанному адресу.</p>'}` : ''}
       ${locationMissing ? '<div class="meta location-missing">Адрес и координаты не указаны</div>' : ''}
       <div class="listing-details"><div>${bathroomBadge(item)}</div><div><b>Ипотека:</b> ${mortgage}</div><div><b>Автор объявления:</b> ${escapeHtml(seller)}</div></div>
       ${item.building_year || item.building_type ? `<div class="meta">${item.building_year ? `Построен ${item.building_year}` : ''}${item.building_year && item.building_type ? ' · ' : ''}${escapeHtml(item.building_type || '')}</div>` : ''}
