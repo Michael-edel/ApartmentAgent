@@ -19,7 +19,7 @@ from app.ai_service import analyze_listing, current_analysis
 from app.checker import ListingNotFound, check_all_listings, check_listing, periodic_checker
 from app.config import get_settings
 from app.database import SessionLocal, engine, initialize_database
-from app.importer import ListingImportError, _is_krisha_host, import_krisha_listing
+from app.importer import ListingImportError, _address_from_text, _is_krisha_host, import_krisha_listing
 from app.listing_service import ListingAlreadyExists, persist_listing
 from app.market_comparison import LOOKBACK_DAYS, compare_saved_listings
 from app.krisha_search import normalize_krisha_listing_url
@@ -270,6 +270,13 @@ async def import_listing_from_browser(payload: ListingCreate) -> ListingResponse
         "source": "browser",
         "source_url": HttpUrl(canonical_url) if canonical_url else payload.source_url,
     })
+    # Keep older installed extensions from replacing a house address with the
+    # seller's office address while a browser queue is still running.
+    own_address = _address_from_text(payload.title) if "м²" in payload.title else None
+    if (own_address and any(char.isdigit() for char in own_address)
+            and not payload.property_details.get("Адрес")
+            and payload.title.lstrip()[:1].isdigit()):
+        browser_payload = browser_payload.model_copy(update={"address": own_address})
     return await _save_listing(browser_payload, allow_existing=True)
 
 

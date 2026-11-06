@@ -124,6 +124,29 @@ async def test_visible_headline_and_labelled_price_override_cached_json(html_res
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("headline_address", ["Айтматова 21", "Е-321 17/3, 17/2, 17/1, 15/1, 15/2, 15/3"])
+async def test_own_headline_house_address_precedes_json_office_address(html_response, headline_address):
+    advert = rich_advert()
+    advert["address"] = {"streetAddress": "пр. Улы Дала, 13", "addressLocality": "Астана", "addressRegion": "Нура р-н"}
+    html_response["html"] = '<script type="application/json">' + json.dumps(advert) + '</script>' + (
+        f'<h1>4-комнатная квартира · 95.66 м², {headline_address}</h1>')
+    value = await import_krisha_listing(URL)
+    assert value.address == headline_address
+    html_response["html"] += '<dl><dt>Адрес</dt><dd>Явный адрес 8</dd></dl>'
+    assert (await import_krisha_listing(URL)).address == "Явный адрес 8"
+
+
+@pytest.mark.asyncio
+async def test_empty_photo_placeholders_are_not_apartment_photos(html_response):
+    advert = rich_advert()
+    advert["image"].append("https://krisha.kz/static/frontend/images/empty-photo-flat.png")
+    html_response["html"] = '<meta property="og:image" content="https://krisha.kz/static/frontend/images/empty-photo-flat.svg">' + (
+        '<script type="application/json">' + json.dumps(advert) + '</script>')
+    value = await import_krisha_listing(URL)
+    assert value.photo_urls == ["https://images.example.test/one.jpg", "https://images.example.test/two.jpg"]
+
+
+@pytest.mark.asyncio
 async def test_basic_matched_json_does_not_claim_full_details(html_response):
     html_response["html"] = '<script type="application/json">{"id":123,"price":45000000,"rooms":4,"area":100}</script>'
     value = await import_krisha_listing(URL)

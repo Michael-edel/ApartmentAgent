@@ -27,6 +27,27 @@ def test_details_input_is_plain_bounded_and_timestamp_is_response_only():
             payload(property_details=details)
 
 
+def test_old_extension_placeholder_is_not_saved_as_an_apartment_photo():
+    value = payload(photo_urls=["https://krisha.kz/static/frontend/images/empty-photo-750.png",
+                                "https://photos.example/real.jpg"])
+    assert value.photo_urls == ["https://photos.example/real.jpg"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_browser_endpoint_corrects_office_address_from_old_extensions(monkeypatch, explicit):
+    async def save(value, *, allow_existing):
+        assert allow_existing is True
+        return value
+    monkeypatch.setattr(main, "_save_listing", save)
+    value = payload(address="Явный адрес 7" if explicit else "Астана, Нура р-н, пр. Улы Дала, 13",
+                    property_details={"Адрес": "Явный адрес 7"} if explicit else {})
+    value = value.model_copy(update={"title": "4-комнатная квартира · 95.66 м², Айтматова 21"})
+    result = await main.import_listing_from_browser(value)
+    assert result.address == (value.address if explicit else "Айтматова 21")
+    assert result.price_kzt == value.price_kzt and result.source == "browser"
+
+
 @pytest.mark.asyncio
 async def test_detail_snapshot_replaces_properties_and_old_import_preserves_full_text_photos(monkeypatch):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")

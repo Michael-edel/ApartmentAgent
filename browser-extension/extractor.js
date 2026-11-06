@@ -391,6 +391,7 @@
     const normalized = clean(value);
     const patterns = [
       /\d{1,2}\s*(?:из|\/)\s*\d{1,2}\s*(?:этаж|эт\.)\s*,\s*([^—–]{3,180})(?:\s*[—–]|$)/i,
+      /\d{2,3}(?:[.,]\d+)?\s*(?:м²|м2)\s*,\s*([^—–·]{3,160}\s\d+[A-Za-zА-Яа-яЁё]?(?:\/\d+[A-Za-zА-Яа-яЁё]?)?)(?:\s*[—–·]|$)/i,
       /(?:№\s*\d+\s*[:：]\s*|Продажа[^:—]{0,120}[:：]\s*)([^—]{3,120}?),\s*(?:Астана|Astana)(?![А-Яа-яЁё])/i,
       /(?:^|[^\p{L}])((?:ул\.?|улица|просп\.?|проспект|пер\.?|переулок|мкр\.?|микрорайон|шоссе|набережная)\s+[^,;]{2,80},?\s+\d+[A-Za-zА-Яа-яЁё]?(?:\/\d+)?)/iu,
     ];
@@ -406,6 +407,13 @@
     // Some seller cards use an "address" class for the employer caption.
     // That caption is not the apartment's location, even when it precedes h1.
     return text.length >= 5 && text.length <= 500 && !/работает\s+в\s+компании/i.test(text) ? text : null;
+  };
+  const inAuthorContext = node => {
+    for (let current = node; current; current = current.parentElement) {
+      const marker = `${current.className || ''} ${current.id || ''} ${current.getAttribute?.('data-testid') || ''} ${current.getAttribute?.('itemprop') || ''}`;
+      if (/(?:^|[\s_-])(?:owners?|sellers?|contacts?|agents?|authors?|advertisers?|company)(?=$|[\s_-])/i.test(marker)) return true;
+    }
+    return false;
   };
   const coordinate = (value, minimum, maximum) => {
     const parsed = typeof value === 'number' ? value : Number(clean(value).replace(',', '.').replace(/[^0-9+-.]/g, ''));
@@ -513,15 +521,25 @@
     }
   }
   photos.push(...jsonPhotos);
-  window.ApartmentAgentImportState.has_json_photos = jsonPhotos.some(value => /^(?:https?:)?\/\//i.test(clean(value)));
+  const actualPhoto = value => /^(?:https?:)?\/\//i.test(clean(value))
+    && !/\/empty-photo(?:-\d+)?\.[a-z0-9]+(?:[?#]|$)/i.test(clean(value));
+  window.ApartmentAgentImportState.has_json_photos = jsonPhotos.some(actualPhoto);
   const photoUrls = [...new Set(photos.map(clean).map(value => value.startsWith('//') ? `https:${value}` : value))]
-    .filter(value => /^https?:\/\//i.test(value)).slice(0, 30);
+    .filter(actualPhoto).slice(0, 30);
   const buildingText = (propertyDetails['Тип дома'] || findText(['buildingType', 'building_type', 'houseType', 'wallMaterial']) || '').toLowerCase();
   const description = domDescription || jsonDescription || clean(meta('og:description') || meta('description')).slice(0,20000) || null;
   const cityText = clean(propertyDetails['Город'] || findText(['city', 'addressLocality']));
   const city = cityText ? cityText.split(',')[0].replace(/^Город\s+/i,'').replace(/\s+(?:р\s*-\s*н|район)\s+.*$/i,'').trim().slice(0,100) : 'Астана';
-  const address = validPropertyAddress(propertyDetails['Адрес']) || listingNodes('[itemprop="streetAddress"], [data-testid*="address" i], [class*="address" i]').map(propertyText).find(value => value.length <= 180 && validPropertyAddress(value))
-    || addressFromText(domHeadline) || findValue(['streetAddress', 'formattedAddress', 'fullAddress', 'addressLine', 'displayAddress', 'address'], value => validPropertyAddress(textValue(value?.streetAddress ?? value))) || addressFromText(fallbackText);
+  const addressNodes = listingNodes('[itemprop="streetAddress"], [data-testid*="address" i], [class*="address" i]');
+  let addressFallbackText = fallbackText;
+  for (const node of [...authorNodes,...addressNodes.filter(inAuthorContext)]) {
+    const text = propertyText(node);
+    if (text) addressFallbackText = addressFallbackText.replace(text,'');
+  }
+  const address = validPropertyAddress(propertyDetails['Адрес']) || addressFromText(domHeadline)
+    || addressNodes.filter(node => !inAuthorContext(node))
+      .map(propertyText).find(value => value.length <= 180 && validPropertyAddress(value))
+    || findValue(['streetAddress', 'formattedAddress', 'fullAddress', 'addressLine', 'displayAddress', 'address'], value => validPropertyAddress(textValue(value?.streetAddress ?? value))) || addressFromText(addressFallbackText);
   const complex = propertyDetails['Жилой комплекс'] || findText(['complexName', 'residentialComplex', 'housingComplex', 'residentialComplexName']) || (headline.match(/ЖК\s*[«"]?([^»".,;]{2,100})/i)?.[1]?.trim() || null);
   const coordinates = pageCoordinates();
   // Both coordinates must come from the same advertised location, never from

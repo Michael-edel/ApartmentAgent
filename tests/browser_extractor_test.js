@@ -177,6 +177,42 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
     heading:exactHeadline,nodes:{'[itemprop="streetAddress"]':[employerNode]},
   });
   assert.equal(employerBeforeHeadline.address,'Кудайбердыулы 36/3',`${file}: seller employer must not override the apartment address`);
+  const officeAddress = {className:'address',textContent:'Астана, Нура р-н, пр. Улы Дала, 13',parentElement:{className:'owners__card'}};
+  const actualNoFloorHeadline = '4-комнатная квартира · 95.66 м², Айтматова 21';
+  const noFloorHeadline = extract(file,common,null,null,null,null,undefined,null,null,{
+    heading:actualNoFloorHeadline,nodes:{'[itemprop="streetAddress"]':[officeAddress]},
+  });
+  assert.equal(noFloorHeadline.address,'Айтматова 21',`${file}: own h1 without floor supplies the apartment address before the author's office`);
+  const corpusList = 'Е-321 17/3,17/2, 17/1, 15/1, 15/2, 15/3';
+  const multipleBuildings = extract(file,common,null,null,null,null,undefined,null,null,{
+    heading:`4-комнатная квартира · 104.4 м², ${corpusList}`,nodes:{'[itemprop="streetAddress"]':[officeAddress]},
+  });
+  assert.equal(multipleBuildings.address,corpusList,`${file}: preserve every advertised building instead of substituting the agent's office`);
+  const officeBeforeFullHeadline = extract(file,common,null,null,null,null,undefined,null,null,{
+    heading:exactHeadline,nodes:{'[itemprop="streetAddress"]':[officeAddress]},
+  });
+  assert.equal(officeBeforeFullHeadline.address,'Кудайбердыулы 36/3',file);
+  for (const context of ['owners__card','seller-card','offer__contacts','author__profile','agent-address']) {
+    const officeOnly = extract(file,common,null,null,null,null,undefined,null,null,{
+      nodes:{'[itemprop="streetAddress"]':[{className:'address',textContent:'пр. Улы Дала, 13',parentElement:{className:context}}]},
+    });
+    assert.equal(officeOnly.address,null,`${file}: ${context} is not the apartment's address`);
+  }
+  const officeInBody = {className:'address',textContent:'улица Офисная 99',parentElement:{className:'owners__card'}};
+  const noBodyOffice = extract(file,`${common} улица Офисная 99`,null,null,null,null,undefined,null,null,{
+    nodes:{'[itemprop="streetAddress"]':[officeInBody]},
+  });
+  assert.equal(noBodyOffice.address,null,`${file}: do not reintroduce the author's address through the page-text fallback`);
+  const incompleteHeadline = extract(file,common,{address:'Айтматова 21'},null,null,null,undefined,null,null,{
+    heading:'4-комнатная квартира · 95.66 м², Айтматова',nodes:{'[itemprop="streetAddress"]':[officeAddress]},
+  });
+  assert.equal(incompleteHeadline.address,'Айтматова 21',`${file}: scoped JSON supplies the address when h1 does not contain a house number`);
+  const streetOnly = extract(file,common,null,null,null,null,undefined,null,null,{heading:'4-комнатная квартира · 95.66 м², Айтматова'});
+  assert.equal(streetOnly.address,null,`${file}: never invent a house number for an incomplete h1 address`);
+  const explicitNoFloorAddress = extract(file,common,null,null,null,null,undefined,null,null,{
+    heading:actualNoFloorHeadline,nodes:{'.offer__info-item':[property('Адрес','Кенен Азербаев 6б')],'[itemprop="streetAddress"]':[officeAddress]},
+  });
+  assert.equal(explicitNoFloorAddress.address,'Кенен Азербаев 6б',file);
   const employerOnly = extract(file, common,{address:'Работает в компании Royal Invest'},null,null,null,undefined,null,null,{
     nodes:{'[itemprop="streetAddress"]':[employerNode]},
   });
@@ -231,6 +267,11 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
   assert.equal(oldYear.property_details['Год постройки'],'1880',file);
   const manyPhotos = extract(file,common,null,null,null,null,undefined,null,null,{nodes:{'.offer__photos img':Array.from({length:35},(_,index) => ({src:`https://images.example/photo-${index}.jpg`}))}});
   assert.equal(manyPhotos.photo_urls.length,30,file);
+  const placeholderPhotos = extract(file,common,null,null,null,null,undefined,null,null,{nodes:{'.offer__photos img':[
+    {src:'https://krisha.kz/static/frontend/images/empty-photo-750.png'},
+    {src:'https://images.example/apartment-real.jpg'},
+  ]}});
+  assert.deepEqual(Array.from(placeholderPhotos.photo_urls),['https://images.example/apartment-real.jpg'],file);
 
   // JSON fixtures below model contracts only, not a captured Krisha response.
   const richJson = {
@@ -274,6 +315,9 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
   assert.equal(rich.krisha_district_price_per_m2,845700,file);
   assert.equal(rich.details_extracted,true,file);
   assert.deepEqual(Array.from(rich.photo_urls),['https://images.example/json-1.jpg','https://images.example/json-2.jpg'],file);
+  const jsonPlaceholder = extract(file,'Загрузка объявления',{...richJson,image:['https://krisha.kz/static/frontend/images/empty-photo-750.png']},null,null,null,undefined,null,null,{unscopedJson:true,onState:value=>state=value});
+  assert.equal(jsonPlaceholder.photo_urls.length,0,file);
+  assert.equal(state.has_json_photos,false,file);
 
   const other = {...richJson,id:999,url:'https://krisha.kz/a/show/999',offers:{price:99999999},seller:{name:'Чужой автор'},address:{streetAddress:'Чужой адрес 99'}};
   const selected = extract(file,'Загрузка объявления',{adverts:[other,{...richJson,recommendations:[other],similarListings:[other]}]},null,null,null,undefined,null,null,{unscopedJson:true});

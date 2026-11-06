@@ -714,6 +714,12 @@ def _find_district(data: list[Any], combined: str) -> str | None:
 def _address_from_text(value: str) -> str | None:
     patterns = (
         re.compile(
+            r"\d+(?:[.,]\d+)?\s*м(?:²|2)\s*[·,]\s*"
+            r"(?:(?:\d{1,3}\s*(?:из|/)\s*\d{1,3}\s*(?:этаж|эт\.)\s*,\s*))?"
+            r"(?P<address>[^—–\n]{3,180}?)(?:\s*[—–]|$)",
+            re.IGNORECASE,
+        ),
+        re.compile(
             r"(?:№\s*\d+\s*[:：]\s*|Продажа[^:—]{0,120}[:：]\s*)"
             r"(?P<address>[^—\n]{3,120}?),\s*(?:Астана|Astana)\b",
             re.IGNORECASE,
@@ -725,11 +731,12 @@ def _address_from_text(value: str) -> str | None:
             re.IGNORECASE,
         ),
     )
-    for pattern in patterns:
+    for index, pattern in enumerate(patterns):
         match = pattern.search(value)
         if match:
             address = re.sub(r"\s+", " ", match.group("address")).strip(" ,.-")
-            if 5 <= len(address) <= 180:
+            if (5 <= len(address) <= 180 and (index != 0 or re.search(r"\d", address))
+                    and not re.fullmatch(r"\d{1,3}\s*(?:из|/)\s*\d{1,3}\s*(?:этаж|эт\.)", address, re.I)):
                 return address
     return None
 
@@ -989,7 +996,13 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
     if not residential_complex:
         complex_match = re.search(r"ЖК\s*[«\"]?([^»\".,;]{2,100})", combined, re.IGNORECASE)
         residential_complex = complex_match.group(1).strip() if complex_match else None
-    address = _valid_property_address(_property_value(property_details, "Адрес")) or _find_address(data) or _address_from_text(combined)
+    headline_address = _address_from_text(headline)
+    if headline_address and not re.search(r"\d", headline_address):
+        headline_address = None
+    address = (_valid_property_address(_property_value(visible_details, "Адрес"))
+               or headline_address
+               or _valid_property_address(_property_value(json_details, "Адрес"))
+               or _find_address(data) or _address_from_text(combined))
     # Coordinates form an indivisible observation. Never combine one coordinate
     # from one JSON object with another object or a later DOM observation.
     latitude, longitude = _visible_coordinate_pair(detail_parser)
@@ -1002,7 +1015,8 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
                 latitude, longitude = pair
                 break
     photo_urls = meta_images + _find_image_urls(data)
-    photo_urls = list(dict.fromkeys(photo_urls))[:30]
+    photo_urls = [url for url in dict.fromkeys(photo_urls)
+                  if not re.search(r"/static/frontend/images/empty-photo-[^/?#]*", url, re.I)][:30]
     normalized_source_url = urlunparse(
         ("https", final_host or "krisha.kz", response.url.path.rstrip("/"), "", "", "")
     )

@@ -93,6 +93,8 @@ class ListingCreate(BaseModel):
             url = str(raw_url).strip()
             if not url.lower().startswith(("http://", "https://")):
                 continue
+            if re.search(r"^https?://(?:www\.)?krisha\.kz/static/(?:frontend/)?images/empty-photo(?:[-.]|$)", url, re.I):
+                continue
             if url not in result:
                 result.append(url)
         return result
