@@ -13,6 +13,14 @@ from app.search_analysis import parse_bathrooms_count, bathrooms_is_lower_bound
 
 
 def _bathrooms_fields(html: str, data: list[Any]) -> tuple[int | None, bool]:
+    # The visible labelled field is authoritative over cached JSON metadata.
+    for raw in re.findall(r'<(?:div|li)[^>]+class=["\'][^"\']*a-list__item[^"\']*["\'][^>]*>(.*?)</(?:div|li)>', html, re.I | re.S):
+        text = re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", raw))).strip()
+        if re.match(r"^(?:Санузел|Санузлы|с\s*/\s*у)\b", text, re.I):
+            text = re.sub(r"^(Санузел|Санузлы|с\s*/\s*у)\s+(?=\d)", r"\1: ", text, flags=re.I)
+            count = parse_bathrooms_count(text)
+            if count is not None:
+                return count, bathrooms_is_lower_bound(text)
     keys = {"bathroomscount", "bathrooms_count", "numberofbathroomstotal", "numberofbathrooms"}
     for root in data:
         for item in _walk(root):
@@ -20,6 +28,8 @@ def _bathrooms_fields(html: str, data: list[Any]) -> tuple[int | None, bool]:
                 if str(key).lower() not in keys or isinstance(raw, bool):
                     continue
                 value = str(raw).strip()
+                if re.fullmatch(r"раздельный|совмещ[её]нный", value, re.I):
+                    return 1, False
                 if re.fullmatch(r"\d{1,2}", value) and int(value) <= 20:
                     return int(value), False
                 if not re.fullmatch(r"\d{1,2}(?:\s*с\s*/\s*у)?\s*(?:и\s+более|и\s+больше|\+)?", value, re.I):
@@ -28,15 +38,6 @@ def _bathrooms_fields(html: str, data: list[Any]) -> tuple[int | None, bool]:
                 count = parse_bathrooms_count(text)
                 if count is not None:
                     return count, bathrooms_is_lower_bound(text)
-    # Only labelled property fields, not arbitrary page numbers or ads.
-    for raw in re.findall(r'<(?:div|li)[^>]+class=["\'][^"\']*a-list__item[^"\']*["\'][^>]*>(.*?)</(?:div|li)>', html, re.I | re.S):
-        text = re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", raw))).strip()
-        if re.match(r"^(?:Санузел|Санузлы|с\s*/\s*у)\b", text, re.I):
-            # HTML labels normally do not contain a colon.
-            text = re.sub(r"^(Санузел|Санузлы|с\s*/\s*у)\s+(?=\d)", r"\1: ", text, flags=re.I)
-            count = parse_bathrooms_count(text)
-            if count is not None:
-                return count, bathrooms_is_lower_bound(text)
     return None, False
 
 

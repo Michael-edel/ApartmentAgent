@@ -5,10 +5,16 @@ from app import search_agent
 from app.schemas import ListingCreate
 
 
-def test_explicit_count_does_not_infer_from_type():
+def test_explicit_count_and_krisha_separate_bathroom_option():
     assert parse_bathrooms_count('4-комнатная, 90 м², 2 с/у') == 2
     assert parse_bathrooms_count('Санузел: 3') == 3
-    assert parse_bathrooms_count('санузел раздельный') is None
+    assert parse_bathrooms_count('санузел раздельный') == 1
+    assert parse_bathrooms_count('Санузел: РАЗДЕЛЬНЫЙ') == 1
+    assert parse_bathrooms_count('Санузел: совмещённый') == 1
+    assert parse_bathrooms_count('Санузел совмещенный') == 1
+    assert parse_bathrooms_count('раздельный') is None
+    assert parse_bathrooms_count('раздельный вход в квартиру') is None
+    assert parse_bathrooms_count('Санузел раздельный, всего 2 с/у') == 2
 
 
 def test_filter_requires_confirmed_bathroom_count(monkeypatch):
@@ -43,7 +49,13 @@ def test_lower_bound_fields_and_unknown():
     assert _bathrooms_fields('', [{'numberOfBathroomsTotal': 3}]) == (3, False)
     assert _bathrooms_fields('', [{'bathroomsCount': '2 с/у и более'}]) == (2, True)
     assert _bathrooms_fields('<li class="a-list__item">Санузел 2 с/у и более</li>', []) == (2, True)
-    assert _bathrooms_fields('<li class="a-list__item">Санузел раздельный</li>', []) == (None, False)
+    assert _bathrooms_fields('<li class="a-list__item">Санузел раздельный</li>', []) == (1, False)
+    assert _bathrooms_fields('', [{'bathroomsCount': 'раздельный'}]) == (1, False)
+    for layout in ('совмещённый', 'совмещенный'):
+        assert _bathrooms_fields('', [{'bathroomsCount': layout}]) == (1, False)
+        assert _bathrooms_fields(f'<li class="a-list__item">Санузел {layout}</li>', []) == (1, False)
+    assert _bathrooms_fields('<li class="a-list__item">Санузел раздельный</li>', [{'bathroomsCount': 2}]) == (1, False)
+    assert _bathrooms_fields('<li class="a-list__item">Санузел 2 с/у и более</li>', [{'bathroomsCount': 'раздельный'}]) == (2, True)
 
 
 def test_scoring_respects_bathroom_requirement():

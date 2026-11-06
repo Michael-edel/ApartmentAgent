@@ -52,11 +52,19 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
   assert.equal(extract(file, common, null, 'Можно в ипотеку и без ипотеки').mortgage_supported, true, file);
   const structured = extract(file, common, {sellerName: 'Иван', sellerType: 'Хозяин', mortgageSupported: false, latitude: 51.15, longitude: 71.45});
   assert.equal(extract(file, common, {bathroomsCount: 2}).bathrooms_count, 2, file);
-  assert.equal(extract(file, common, {bathroomsCount: 'раздельный'}).bathrooms_count, null, file);
+  assert.equal(extract(file, common, {bathroomsCount: 'раздельный'}).bathrooms_count, 1, file);
   const lowerBathrooms = extract(file, common, null, null, 'Санузел 2 с/у и более');
   assert.equal(lowerBathrooms.bathrooms_count, 2, file);
   assert.equal(lowerBathrooms.bathrooms_count_is_lower_bound, true, file);
-  assert.equal(extract(file, common, null, null, 'Санузел раздельный').bathrooms_count, null, file);
+  const separateBathroom = extract(file, common, {bathroomsCount: 2}, null, 'Санузел раздельный');
+  assert.equal(separateBathroom.bathrooms_count, 1, file);
+  assert.equal(separateBathroom.bathrooms_count_is_lower_bound, false, file);
+  for (const layout of ['совмещённый', 'совмещенный']) {
+    assert.equal(extract(file, common, {bathroomsCount: layout}).bathrooms_count, 1, file);
+    assert.equal(extract(file, common, null, null, `Санузел ${layout}`).bathrooms_count, 1, file);
+  }
+  assert.equal(extract(file, `${common} Раздельный санузел на рекламном баннере`).bathrooms_count, null, file);
+  assert.equal(extract(file, common, {bathroomsCount: 'раздельный'}, null, 'Санузел 2 с/у и более').bathrooms_count, 2, file);
   const comparison = extract(file, common, null, null, null, ['416 667 ₸ Цена м² в этом объявлении', '845 700 ₸ Похожие квартиры в Есильском р-н', '792 420 ₸ Похожие квартиры в Астане']);
   assert.equal(comparison.krisha_district_price_per_m2, 845700, file);
   assert.equal(comparison.krisha_city_price_per_m2, 792420, file);

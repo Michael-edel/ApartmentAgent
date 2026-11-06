@@ -216,14 +216,15 @@
   const rooms = findValue(['rooms', 'roomCount', 'numberOfRooms', 'roomsCount']) || (roomsMatch ? Number(roomsMatch[1]) : null);
   const bathroomInfo = value => {
     const s = String(value ?? '').trim();
+    if (/^(?:раздельный|совмещ[её]нный)$/i.test(s)) return {count:1, lower:false};
     const match = s.match(/^(\d{1,2})(?:\s*с\s*\/\s*у)?\s*(и\s+более|и\s+больше|\+)?$/i);
     if (!match || Number(match[1]) > 20) return null;
     return {count:Number(match[1]), lower:!!match[2]};
   };
-  const bathroomData = findValue(['bathroomsCount', 'bathrooms_count', 'numberOfBathroomsTotal', 'numberOfBathrooms'], bathroomInfo)
-    ?? [...document.querySelectorAll('[data-testid="bathrooms"], [data-name="bathrooms"], .a-list__item')]
+  const bathroomData = [...document.querySelectorAll('[data-testid="bathrooms"], [data-name="bathrooms"], .a-list__item')]
       .map(node => clean(node.textContent).match(/^(?:санузел|санузла|санузлов|санузлы|с\s*\/\s*у)\s*[:—-]?\s*(.+)$/i))
-      .map(match => match ? bathroomInfo(match[1]) : null).find(value => value !== null) ?? null;
+      .map(match => match ? bathroomInfo(match[1]) : null).find(value => value !== null)
+    ?? findValue(['bathroomsCount', 'bathrooms_count', 'numberOfBathroomsTotal', 'numberOfBathrooms'], bathroomInfo) ?? null;
   const bathroomsCount = bathroomData?.count ?? null;
   const floor = findValue(['floor', 'floorNumber']) || (floorMatch ? Number(floorMatch[1]) : null);
   const floorsTotal = findValue(['floors', 'floorsTotal', 'floorCount', 'numberOfFloors']) || (floorMatch ? Number(floorMatch[2]) : null);

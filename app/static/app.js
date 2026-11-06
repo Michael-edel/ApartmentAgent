@@ -248,7 +248,7 @@ function render(listings) {
       <div class="price">${money.format(item.price_kzt)}</div>
       <div class="meta">${item.rooms} комн. · ${number.format(item.area_m2)} м² · ${money.format(item.assessment.price_per_m2)}/м² · этаж ${item.floor || '—'}/${item.floors_total || '—'}</div>
       <section class="price-comparison" data-listing-id="${Number(item.id)}" aria-label="Сравнение цены за квадратный метр">Загружаю сравнение цены…</section>
-      ${mapUrl ? `<a class="location-link" href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener noreferrer">${hasCoordinates ? 'Открыть координаты на карте' : 'Найти адрес на карте (местоположение приблизительное)'} →</a>` : ''}
+      ${mapUrl ? `<a class="location-link" href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener noreferrer">${hasCoordinates ? 'Открыть координаты на карте' : 'Найти адрес на карте'} →</a>${!hasCoordinates ? '<p class="meta">Координаты не получены. Карта найдёт дом по указанному адресу.</p>' : ''}` : ''}
       ${locationMissing ? '<div class="meta location-missing">Адрес и координаты не указаны</div>' : ''}
       <div class="listing-details"><div>${bathroomBadge(item)}</div><div><b>Ипотека:</b> ${mortgage}</div><div><b>Автор объявления:</b> ${escapeHtml(seller)}</div></div>
       ${item.building_year || item.building_type ? `<div class="meta">${item.building_year ? `Построен ${item.building_year}` : ''}${item.building_year && item.building_type ? ' · ' : ''}${escapeHtml(item.building_type || '')}</div>` : ''}

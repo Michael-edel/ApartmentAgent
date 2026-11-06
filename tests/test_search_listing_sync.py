@@ -49,6 +49,49 @@ async def test_manual_save_confirms_search_bathrooms_without_losing_partial_data
 
 
 @pytest.mark.asyncio
+async def test_separate_bathroom_reimport_corrects_old_two_and_leaves_both_two_plus_lists(monkeypatch):
+    from app import main, search_agent
+    from app.importer import _bathrooms_fields
+
+    pytest.importorskip("aiosqlite")
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(listing_service, "SessionLocal", sessions)
+    monkeypatch.setattr(main, "SessionLocal", sessions)
+    for settings in (main.settings, search_agent.settings):
+        monkeypatch.setattr(settings, "target_rooms", 4)
+        monkeypatch.setattr(settings, "min_area_m2", 80)
+        monkeypatch.setattr(settings, "max_area_m2", 120)
+        monkeypatch.setattr(settings, "max_price_kzt", 50_000_000)
+        monkeypatch.setattr(settings, "min_bathrooms", 2)
+    payload = ListingCreate(source_url="https://krisha.kz/a/show/123", title="4-комнатная квартира, 80 м², 30 млн тг",
+                            price_kzt=30_000_000, area_m2=80, rooms=4,
+                            bathrooms_count=2, bathrooms_count_is_lower_bound=True)
+    async with sessions() as session:
+        session.add(SearchResult(url=str(payload.source_url), title=payload.title, query="test",
+                                 search_engine="test", status="new:normal"))
+        await session.commit()
+    saved = await listing_service.persist_listing(payload, notify=False, refresh_ai=False)
+    assert len(await main.search_results()) == 1
+    count, lower = _bathrooms_fields('<li class="a-list__item">Санузел раздельный</li>', [])
+    corrected = payload.model_copy(update={"bathrooms_count": count, "bathrooms_count_is_lower_bound": lower})
+    await listing_service.persist_listing(corrected, notify=False, refresh_ai=False)
+    # A later partial import must not restore the old two-plus value.
+    await listing_service.persist_listing(payload.model_copy(update={"bathrooms_count": None}), notify=False, refresh_ai=False)
+    async with sessions() as session:
+        listing = await session.get(Listing, saved.row.id)
+        result = await session.get(SearchResult, 1)
+        assert listing.bathrooms_count == result.bathrooms_count == 1
+        assert listing.bathrooms_count_is_lower_bound is result.bathrooms_count_is_lower_bound is False
+        assert result.imported_listing_id == listing.id
+    assert await main.search_results() == []
+    assert await main.search_results(include_unconfirmed=True) == []
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_sync_existing_listing_does_not_change_listing_or_price_history(monkeypatch):
     pytest.importorskip("aiosqlite")
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")

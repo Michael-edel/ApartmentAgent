@@ -18,6 +18,11 @@ _BATHROOM_PATTERN = re.compile(r"(?<![\d.,])(?P<before>\d{1,2})\s*(?:с\s*/\s*у
 def parse_bathrooms_count(text: str) -> int | None:
     match = _BATHROOM_PATTERN.search(text)
     if not match:
+        # Krisha's labelled layout options describe a single bathroom, even
+        # when the toilet/bath rooms are separate. Do not infer a count from
+        # an unlabelled word elsewhere in the listing.
+        if re.search(r"(?:сануз(?:ел|лы)|с\s*/\s*у)\s*[:—-]?\s*(?:раздельный|совмещ[её]нный)(?=$|[\s.,;])", text, re.IGNORECASE):
+            return 1
         return None
     count = int(match.group('before') or match.group('after'))
     return count if count <= 20 else None
