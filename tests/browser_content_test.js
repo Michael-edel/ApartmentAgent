@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const extractorSource = fs.readFileSync('browser-extension/extractor.js', 'utf8');
 const contentSource = fs.readFileSync('browser-extension/content.js', 'utf8');
 
-function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyAt = 0, failures = 0, respond = true, failureMessage = 'Сервер недоступен'} = {}) {
+function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyAt = 0, failures = 0, respond = true, failureMessage = 'Сервер недоступен', bodySuffix = '', mainHeading = null, captchaForm = null} = {}) {
   let now = 0;
   let sequence = 0;
   const tasks = [];
@@ -18,10 +18,12 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
   const setTimeout = (callback, delay) => tasks.push({at: now + delay, sequence:sequence++, callback});
   const document = {
     title:'4-комнатная квартира 100 м²',
-    body:{get innerText() { return (now >= readyAt ? '4-комнатная квартира 100 м² Цена 45 000 000 ₸' : 'Загрузка объявления') + ' ' + notices.filter(node => !node.removed).map(node => node.textContent).join(' '); }, appendChild(node) { messages.push(node.textContent); notices.push(node); }},
+    body:{get innerText() { return (now >= readyAt ? '4-комнатная квартира 100 м² Цена 45 000 000 ₸' : 'Загрузка объявления') + ' ' + bodySuffix + ' ' + notices.filter(node => !node.removed).map(node => node.textContent).join(' '); }, appendChild(node) { messages.push(node.textContent); notices.push(node); }},
     querySelector(selector) {return selector.startsWith('[data-apartment-agent-extension-message]') ? notices.find(node => !node.removed) || null : null;},
     querySelectorAll(selector) {
       if (selector.startsWith('[data-apartment-agent-extension-message]')) return notices.filter(node => !node.removed);
+      if (selector === 'h1, [role="heading"][aria-level="1"]') return mainHeading ? [typeof mainHeading === 'string' ? {textContent:mainHeading} : mainHeading] : [];
+      if (selector.startsWith('form[action*="captcha"')) return captchaForm ? [captchaForm] : [];
       const value = fieldAt(now);
       if (value && selector.startsWith('[data-testid="bathrooms"]')) return [{textContent:value}];
       return [];
@@ -69,6 +71,47 @@ stable.advance(14000);
 assert.equal(stable.posted.length, 1, 'one successful POST for an unchanged payload despite polling');
 assert.equal(stable.posted[0].floor, null, 'the rating 95/100 in our own banner must not become floor 95 of 100');
 assert.match(stable.messages.at(-1), /Санузлов: не менее 2/);
+
+const footer = fixture({bodySuffix:'Сайт защищён reCAPTCHA. Политика конфиденциальности.'});
+footer.run();
+footer.advance(14000);
+assert.equal(footer.posted.length, 1, 'a reCAPTCHA footer on a valid listing is not a browser challenge');
+assert.equal(footer.outcomes.includes('blocked'), false);
+
+const address403 = fixture({bodySuffix:'Адрес: улица 403, дом 5. Сайт защищён reCAPTCHA.'});
+address403.run();
+address403.advance(14000);
+assert.equal(address403.posted.length, 1, 'an address number 403 is not an HTTP error');
+
+const blankWithFooter = fixture({readyAt:20000,bodySuffix:'Сайт защищён reCAPTCHA.'});
+blankWithFooter.run();
+blankWithFooter.advance(14000);
+assert.deepEqual(blankWithFooter.outcomes, ['unknown'], 'a footer alone does not turn an unreadable page into a CAPTCHA');
+assert.deepEqual(blankWithFooter.reasons, ['unreadable']);
+
+for (const heading of ['CAPTCHA', 'Krisha.kz — CAPTCHA', '403 Forbidden', '429 Too Many Requests', '468', 'Проверка браузера']) {
+  const challengeHeading = fixture({mainHeading:heading});
+  challengeHeading.run();
+  challengeHeading.advance(14000);
+  assert.equal(challengeHeading.posted.length, 0, 'an explicit main heading overrides otherwise valid advertising metadata');
+  assert.deepEqual(challengeHeading.outcomes, ['blocked']);
+}
+
+const bodyHttpError = fixture({bodySuffix:'HTTP Error 468'});
+bodyHttpError.run();
+bodyHttpError.advance(14000);
+assert.equal(bodyHttpError.posted.length, 0, 'an explicit HTTP error must not import unrelated listing metadata');
+assert.deepEqual(bodyHttpError.outcomes, ['blocked']);
+
+const visibleForm = fixture({readyAt:20000,captchaForm:{style:{display:'block'}}});
+visibleForm.run();
+visibleForm.advance(14000);
+assert.deepEqual(visibleForm.outcomes, ['blocked']);
+
+const hiddenHeading = fixture({mainHeading:{textContent:'403 Forbidden', hidden:true}});
+hiddenHeading.run();
+hiddenHeading.advance(14000);
+assert.equal(hiddenHeading.posted.length, 1);
 
 const late = fixture({fieldAt:time => time >= 3000 ? 'Санузел 2 с/у и более' : null});
 late.run();

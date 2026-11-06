@@ -39,13 +39,32 @@
     }
     return text;
   };
-  const challengeDetected = () => {
-    const title = String(document.title || '');
-    const text = pageText();
-    const check = /captcha|проверка\s+(?:безопасности|браузера)|подтвердите.{0,30}(?:человек|робот)|checking\s+your\s+browser|are\s+you\s+(?:a\s+)?robot|robot\s+check|доступ\s+ограничен/i;
+  const visible = node => {
+    for (let current = node; current; current = current.parentElement) {
+      if (current.hidden || current.getAttribute?.('aria-hidden') === 'true') return false;
+      const style = typeof window.getComputedStyle === 'function' ? window.getComputedStyle(current) : current.style;
+      if (style?.display === 'none' || ['hidden', 'collapse'].includes(style?.visibility)) return false;
+    }
+    return true;
+  };
+  const challengeDetected = payload => {
+    const check = /проверка\s+(?:безопасности|браузера)|подтвердите.{0,30}(?:человек|робот)|checking\s+your\s+browser|are\s+you\s+(?:a\s+)?robot|robot\s+check|доступ\s+ограничен/i;
     const httpBlock = /\b(?:Forbidden|Access\s+denied|Too\s+many\s+requests)\b|(?:HTTP(?:\s+Error)?|Error|Ошибка)\s*[:—-]?\s*(?:403|429|468)(?!\d)|(?:^|\n)\s*(?:403|429|468)(?=\s|:|$)/i;
-    return check.test(title) || httpBlock.test(title)
-      || text.length < 5000 && (check.test(text) || httpBlock.test(text));
+    const headings = [String(document.title || ''), ...document.querySelectorAll('h1, [role="heading"][aria-level="1"]')]
+      .filter(value => typeof value === 'string' || visible(value))
+      .map(value => typeof value === 'string' ? value : value.innerText || value.textContent || '');
+    // A real challenge/error heading takes priority over advertising metadata.
+    if (headings.some(value => check.test(value) || httpBlock.test(value)
+      || /(?:^|[^\p{L}])(?:captcha|recaptcha)(?=$|[^\p{L}])/iu.test(value))) return true;
+    const text = pageText();
+    const explicitHttpError = /\b(?:403\s+Forbidden|429\s+Too\s+many\s+requests)\b|(?:HTTP(?:\s+Error)?|Error|Ошибка)\s*[:—-]?\s*(?:403|429|468)(?!\d)/i;
+    if (text.length < 5000 && (explicitHttpError.test(text) || /^(?:403|429|468)\s*$/i.test(text.trim()))) return true;
+    const coreReady = payload && ['price_kzt', 'area_m2', 'rooms'].every(key => Number(payload[key]) > 0);
+    if (coreReady) return false;
+    const explicitVerification = /(?:complete|solve|enter)\s+(?:the\s+)?captcha|verify.{0,25}(?:human|not\s+a\s+robot)|введите\s+код\s+с\s+картинки/i;
+    if (text.length < 5000 && (check.test(text) || httpBlock.test(text) || explicitVerification.test(text))) return true;
+    // reCAPTCHA footers/badges alone are normal site furniture, not a block.
+    return [...document.querySelectorAll('form[action*="captcha" i], iframe[src*="/captcha" i], iframe[src*="/recaptcha/" i], [data-testid="captcha"], .g-recaptcha, #captcha')].some(visible);
   };
   const unavailableDetected = () => {
     const text = `${document.title || ''} ${pageText()}`;
@@ -72,7 +91,10 @@
     }
   };
   const observe = () => {
-    if (challengeDetected()) {
+    let payload = null;
+    let extractionError = null;
+    try { payload = window.ApartmentAgentExtract?.(); } catch (error) { extractionError = error; }
+    if (challengeDetected(payload)) {
       show('ApartmentAgent: сайт запросил проверку браузера. Пройдите её самостоятельно и продолжите очередь в приложении.', true);
       notifyQueue('blocked', 'Сайт запросил проверку браузера');
       return;
@@ -85,7 +107,7 @@
     if (Date.now() >= deadline) { finish(); return; }
     if (!inFlight && failures < 3 && Date.now() >= retryAfter) {
       try {
-        const payload = window.ApartmentAgentExtract?.();
+        if (extractionError) throw extractionError;
         missing = payload ? ['price_kzt', 'area_m2', 'rooms'].filter(key => !payload[key]) : [];
         if (payload && !missing.length) {
           const signature = JSON.stringify(payload);
