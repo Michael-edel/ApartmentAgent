@@ -10,6 +10,7 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
   let sequence = 0;
   const tasks = [];
   const posted = [];
+  const outcomes = [];
   const messages = [];
   const notices = [];
   const setTimeout = (callback, delay) => tasks.push({at: now + delay, sequence:sequence++, callback});
@@ -26,6 +27,7 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
     createElement() {return {dataset:{}, style:{}, remove(){this.removed = true;}};},
   };
   const chrome = {runtime:{sendMessage(message, callback) {
+    if (message.type === 'apartment-agent-queue-finished') { outcomes.push(message.outcome); callback?.({ok:true}); return; }
     posted.push(JSON.parse(JSON.stringify(message.payload)));
     if (respond) setTimeout(() => callback(posted.length <= failures
       ? {ok:false, error:'Сервер недоступен'}
@@ -50,7 +52,7 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
     }
     now = target;
   };
-  return {run, advance, extract, posted, messages};
+  return {run, advance, extract, posted, messages, outcomes, document};
 }
 
 // Repeated extractor calls read the DOM at call time without reinjecting code.
@@ -92,6 +94,7 @@ unknown.run();
 unknown.advance(14000);
 assert.equal(unknown.posted.length, 1);
 assert.match(unknown.messages.at(-1), /количество не определено/);
+assert.deepEqual(unknown.outcomes, ['unknown']);
 
 const transientError = fixture({failures:1});
 transientError.run();
@@ -104,6 +107,7 @@ failed.run();
 failed.advance(14000);
 assert.equal(failed.posted.length, 3, 'network failures have a bounded retry count');
 assert.match(failed.messages.at(-1), /Сервер недоступен/);
+assert.deepEqual(failed.outcomes, ['error']);
 
 const missing = fixture({readyAt:20000});
 missing.run();
@@ -116,5 +120,15 @@ noResponse.run();
 noResponse.advance(14000);
 assert.equal(noResponse.posted.length, 1, 'an in-flight request is not duplicated');
 assert.match(noResponse.messages.at(-1), /подтверждение сохранения не получено/);
+
+for (const title of ['Проверка безопасности', 'Captcha', 'Are you a robot?']) {
+  const challenge = fixture();
+  challenge.document.title = title;
+  challenge.run();
+  challenge.advance(14000);
+  assert.equal(challenge.posted.length, 0, 'never import or solve a browser challenge');
+  assert.deepEqual(challenge.outcomes, ['blocked']);
+  assert.match(challenge.messages.at(-1), /самостоятельно/);
+}
 
 console.log('Browser content lifecycle checks passed');

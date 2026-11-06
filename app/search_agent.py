@@ -9,7 +9,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.importer import ListingImportError, import_krisha_listing
 from app.krisha_search import KrishaSearchBlocked
-from app.listing_service import persist_listing
+from app.listing_service import persist_listing, sync_search_result_facts
 from app.models import Listing, SearchHistory, SearchPreference, SearchResult
 from app.mortgage import parse_mortgage_text
 from app.search_analysis import analyze_search_result, is_target_search_result, parse_bathrooms_count, bathrooms_is_lower_bound
@@ -122,13 +122,18 @@ async def _save_items(
             mortgage_supported = parse_mortgage_text(f"{item.title or ''} {item.snippet or ''}")
             if existing:
                 existing.last_seen = now
-                existing.title = item.title or existing.title
-                existing.snippet = item.snippet or existing.snippet
-                if mortgage_supported is not None:
-                    existing.mortgage_supported = mortgage_supported
-                if bathrooms_count is not None:
-                    existing.bathrooms_count = bathrooms_count
-                    existing.bathrooms_count_is_lower_bound = bathrooms_is_lower_bound(f"{item.title or ''} {item.snippet or ''}")
+                listing = (await session.get(Listing, existing.imported_listing_id)
+                           if existing.imported_listing_id is not None else None)
+                if listing is not None:
+                    sync_search_result_facts(existing, listing)
+                else:
+                    existing.title = item.title or existing.title
+                    existing.snippet = item.snippet or existing.snippet
+                    if mortgage_supported is not None:
+                        existing.mortgage_supported = mortgage_supported
+                    if bathrooms_count is not None:
+                        existing.bathrooms_count = bathrooms_count
+                        existing.bathrooms_count_is_lower_bound = bathrooms_is_lower_bound(f"{item.title or ''} {item.snippet or ''}")
                 if existing.import_status != "imported" or existing.imported_listing_id is None:
                     candidates.append(SearchImportCandidate(result_id=existing.id, url=existing.url))
                 continue

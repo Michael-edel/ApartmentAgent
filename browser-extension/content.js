@@ -25,16 +25,43 @@
   let lastError = '';
   let missing = [];
   let savedMessage = '';
+  let queueNotified = false;
+  let lastSavedBathrooms = null;
+  const notifyQueue = (outcome, error = '') => {
+    if (queueNotified) return;
+    queueNotified = true;
+    chrome.runtime.sendMessage({type:'apartment-agent-queue-finished', outcome, error}, () => { void chrome.runtime.lastError; });
+  };
+  const challengeDetected = () => {
+    const title = String(document.title || '');
+    const text = String(document.body?.innerText || '');
+    const check = /captcha|проверка\s+(?:безопасности|браузера)|подтвердите.{0,30}(?:человек|робот)|checking\s+your\s+browser|are\s+you\s+(?:a\s+)?robot|robot\s+check|доступ\s+ограничен/i;
+    return check.test(title) || text.length < 5000 && check.test(text);
+  };
   const bathroomLabel = payload => Number.isInteger(payload.bathrooms_count)
     ? `Санузлов: ${payload.bathrooms_count_is_lower_bound ? 'не менее ' : ''}${payload.bathrooms_count}.`
     : 'Санузлы: количество не определено.';
   const finish = () => {
-    if (inFlight) show('ApartmentAgent: подтверждение сохранения не получено. Обновите страницу для повторной попытки.', true);
-    else if (lastError) show(`ApartmentAgent: ${lastError}. Обновите страницу для повторной попытки.`, true);
-    else if (savedMessage) show(savedMessage);
-    else show(`ApartmentAgent: не удалось определить ${missing.length ? missing.join(', ') : 'данные объявления'}. Обновите страницу или используйте ручной ввод.`, true);
+    if (inFlight) {
+      show('ApartmentAgent: подтверждение сохранения не получено. Обновите страницу для повторной попытки.', true);
+      notifyQueue('error', 'Подтверждение сохранения не получено');
+    } else if (lastError) {
+      show(`ApartmentAgent: ${lastError}. Обновите страницу для повторной попытки.`, true);
+      notifyQueue('error', lastError);
+    } else if (savedMessage) {
+      show(savedMessage);
+      if (!Number.isInteger(lastSavedBathrooms)) notifyQueue('unknown');
+    } else {
+      show(`ApartmentAgent: не удалось определить ${missing.length ? missing.join(', ') : 'данные объявления'}. Обновите страницу или используйте ручной ввод.`, true);
+      notifyQueue('error', 'Не удалось прочитать обязательные данные объявления');
+    }
   };
   const observe = () => {
+    if (challengeDetected()) {
+      show('ApartmentAgent: сайт запросил проверку браузера. Пройдите её самостоятельно и продолжите очередь в приложении.', true);
+      notifyQueue('blocked', 'Сайт запросил проверку браузера');
+      return;
+    }
     if (Date.now() >= deadline) { finish(); return; }
     if (!inFlight && failures < 3 && Date.now() >= retryAfter) {
       try {
@@ -57,6 +84,7 @@
               }
               succeeded.add(signature);
               lastError = '';
+              lastSavedBathrooms = payload.bathrooms_count;
               savedMessage = `ApartmentAgent: сохранено, рейтинг ${response.listing?.assessment?.score ?? '—'}/100. ${bathroomLabel(payload)}`;
               show(savedMessage);
             });

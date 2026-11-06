@@ -55,6 +55,27 @@ async def _find_listing(session: AsyncSession, source_url: str) -> Listing | Non
     return next((row for row in candidates if normalize_krisha_listing_url(row.source_url) == canonical), None)
 
 
+def sync_search_result_facts(result: SearchResult, listing: Listing) -> None:
+    """Replace discovery facts with the currently saved listing's facts."""
+    parts = [f"{listing.rooms}-комнатная квартира", f"{listing.area_m2:g} м²"]
+    if listing.floor is not None and listing.floors_total is not None:
+        parts.append(f"{listing.floor}/{listing.floors_total} этаж")
+    parts.append(f"{listing.price_kzt} ₸")
+    result.title = " · ".join(parts)
+    # Do not keep an old discovery snippet: it can contain obsolete numbers.
+    extras = []
+    if listing.building_year is not None:
+        extras.append(f"год постройки {listing.building_year}")
+    if listing.building_type:
+        extras.append(listing.building_type)
+    result.snippet = ", ".join(extras) or None
+    if listing.mortgage_supported is not None:
+        result.mortgage_supported = listing.mortgage_supported
+    if listing.bathrooms_count is not None:
+        result.bathrooms_count = listing.bathrooms_count
+        result.bathrooms_count_is_lower_bound = listing.bathrooms_count_is_lower_bound
+
+
 async def _sync_search_results(session: AsyncSession, listing: Listing, now: datetime) -> None:
     """Make every import path expose saved, confirmed fields in search results."""
     canonical = normalize_krisha_listing_url(listing.source_url)
@@ -71,11 +92,7 @@ async def _sync_search_results(session: AsyncSession, listing: Listing, now: dat
         result.imported_listing_id = listing.id
         result.import_error = None
         result.imported_at = now
-        if listing.mortgage_supported is not None:
-            result.mortgage_supported = listing.mortgage_supported
-        if listing.bathrooms_count is not None:
-            result.bathrooms_count = listing.bathrooms_count
-            result.bathrooms_count_is_lower_bound = listing.bathrooms_count_is_lower_bound
+        sync_search_result_facts(result, listing)
 
 
 async def _enrich_twogis(

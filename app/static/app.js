@@ -61,6 +61,24 @@ const searchMessage = document.querySelector('#searchMessage');
 const searchMeta = document.querySelector('#searchMeta');
 const searchResults = document.querySelector('#searchResults');
 const reloadSearchResults = document.querySelector('#refreshSearchButton');
+const bathroomCheckPanel = document.querySelector('#bathroomCheckPanel');
+const bathroomCheckCounts = document.querySelector('#bathroomCheckCounts');
+const bathroomCheckCriteria = document.querySelector('#bathroomCheckCriteria');
+const bathroomCheckProgress = document.querySelector('#bathroomCheckProgress');
+const bathroomCheckMessage = document.querySelector('#bathroomCheckMessage');
+const bathroomCheckCurrent = document.querySelector('#bathroomCheckCurrent');
+const bathroomCheckButtons = {
+  start: document.querySelector('#startBathroomCheck'),
+  pause: document.querySelector('#pauseBathroomCheck'),
+  resume: document.querySelector('#resumeBathroomCheck'),
+  cancel: document.querySelector('#cancelBathroomCheck'),
+};
+const bathroomCheckApi = '/api/v1/search/bathroom-check';
+let bathroomCheckState = null;
+let bathroomCheckBusy = false;
+let bathroomCheckPolling = false;
+let bathroomCheckSignature = null;
+let bathroomCheckRevision = 0;
 let savedUrls = new Set();
 let savedListingIds = new Map();
 
@@ -98,6 +116,112 @@ async function readJson(response) {
   if (!text.trim()) throw new Error(`Сервер не вернул ответ (HTTP ${response.status}). Повторите попытку.`);
   try { return JSON.parse(text); }
   catch { throw new Error(response.ok ? 'Сервер вернул некорректный ответ' : `Ошибка сервера HTTP ${response.status}`); }
+}
+
+function queueCount(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function renderBathroomCheck(state) {
+  if (!bathroomCheckPanel) return;
+  bathroomCheckState = state;
+  const running = state.status === 'running';
+  const paused = state.status === 'paused';
+  const active = running || paused;
+  const total = queueCount(state.total);
+  const checked = queueCount(state.checked);
+  const candidates = queueCount(state.candidate_count);
+  const labels = {idle:'Готово к запуску', running:'Идёт проверка', paused:'Проверка на паузе', completed:'Проверка завершена', cancelled:'Проверка остановлена'};
+  if (bathroomCheckCriteria) {
+    const criteria = state.criteria || {};
+    const parts = [];
+    if ([2, 3, 4].includes(criteria.target_rooms)) parts.push(`${criteria.target_rooms} комн.`);
+    if (Number.isFinite(criteria.min_area_m2) && Number.isFinite(criteria.max_area_m2)) parts.push(`${number.format(criteria.min_area_m2)}–${number.format(criteria.max_area_m2)} м²`);
+    if (Number.isSafeInteger(criteria.max_price_kzt) && criteria.max_price_kzt > 0) parts.push(`до ${money.format(criteria.max_price_kzt)}`);
+    bathroomCheckCriteria.hidden = !state.job_id || parts.length === 0;
+    bathroomCheckCriteria.textContent = state.job_id && parts.length ? `Проверяются квартиры: ${parts.join(', ')}. Критерии сохранены при запуске проверки.` : '';
+  }
+  if (bathroomCheckCounts) bathroomCheckCounts.textContent = total
+    ? `Проверено: ${checked} из ${total}. Санузлов от 2: ${queueCount(state.confirmed)}. Санузлов меньше 2: ${queueCount(state.rejected)}. Без данных: ${queueCount(state.unknown)}. Ошибок: ${queueCount(state.failed)}. Осталось: ${queueCount(state.pending)}.`
+    : `Объявлений с неизвестным количеством санузлов: ${candidates}.`;
+  if (bathroomCheckProgress) {
+    bathroomCheckProgress.hidden = total === 0;
+    bathroomCheckProgress.max = Math.max(total, 1);
+    bathroomCheckProgress.value = Math.min(checked, total);
+  }
+  if (bathroomCheckMessage) bathroomCheckMessage.textContent = `${labels[state.status] || 'Состояние проверки неизвестно'}.${state.message ? ` ${state.message}` : ''}`;
+  if (bathroomCheckCurrent) {
+    const currentUrl = safeExternalUrl(state.current_url);
+    bathroomCheckCurrent.hidden = !currentUrl;
+    bathroomCheckCurrent.innerHTML = currentUrl
+      ? `Текущее объявление: <a href="${escapeHtml(currentUrl)}" target="_blank" rel="noopener noreferrer">Открыть в новой вкладке →</a>` : '';
+  }
+  if (bathroomCheckButtons.start) {
+    bathroomCheckButtons.start.hidden = active;
+    bathroomCheckButtons.start.disabled = bathroomCheckBusy || candidates === 0;
+  }
+  if (bathroomCheckButtons.pause) bathroomCheckButtons.pause.hidden = !running;
+  if (bathroomCheckButtons.resume) bathroomCheckButtons.resume.hidden = !paused;
+  if (bathroomCheckButtons.cancel) bathroomCheckButtons.cancel.hidden = !active;
+  for (const action of ['pause', 'resume', 'cancel']) {
+    if (bathroomCheckButtons[action]) bathroomCheckButtons[action].disabled = bathroomCheckBusy;
+  }
+}
+
+function updateBathroomCheck(state) {
+  const nextSignature = `${state.job_id || ''}:${state.status}:${queueCount(state.checked)}`;
+  const changed = bathroomCheckSignature !== null && bathroomCheckSignature !== nextSignature;
+  bathroomCheckSignature = nextSignature;
+  renderBathroomCheck(state);
+  if (changed) void Promise.all([loadListings(), loadSearchResults(), loadSearchStatus()]);
+}
+
+async function loadBathroomCheckStatus() {
+  if (!bathroomCheckPanel || bathroomCheckPolling || bathroomCheckBusy) return;
+  bathroomCheckPolling = true;
+  const revision = bathroomCheckRevision;
+  try {
+    const response = await fetch(bathroomCheckApi, {cache:'no-store'});
+    const state = await readJson(response);
+    if (!response.ok) throw new Error(state.detail || 'Не удалось получить состояние автопроверки');
+    if (revision === bathroomCheckRevision && !bathroomCheckBusy) updateBathroomCheck(state);
+  } catch (error) {
+    if (bathroomCheckMessage) bathroomCheckMessage.textContent = error.message;
+  } finally {
+    bathroomCheckPolling = false;
+  }
+}
+
+async function controlBathroomCheck(action) {
+  if (bathroomCheckBusy) return;
+  bathroomCheckRevision += 1;
+  bathroomCheckBusy = true;
+  if (bathroomCheckState) renderBathroomCheck(bathroomCheckState);
+  try {
+    const response = await fetch(`${bathroomCheckApi}/${action}`, {method:'POST'});
+    const state = await readJson(response);
+    if (!response.ok) throw new Error(state.detail || 'Не удалось изменить состояние автопроверки');
+    updateBathroomCheck(state);
+    window.postMessage({type:'apartment-agent-bathroom-queue'}, location.origin);
+  } catch (error) {
+    if (bathroomCheckMessage) bathroomCheckMessage.textContent = error.message;
+  } finally {
+    bathroomCheckBusy = false;
+    if (bathroomCheckState) {
+      // Restore button availability without replacing a useful error message.
+      const messageText = bathroomCheckMessage?.textContent;
+      renderBathroomCheck(bathroomCheckState);
+      if (bathroomCheckMessage && messageText) bathroomCheckMessage.textContent = messageText;
+    }
+  }
+}
+
+for (const [action, button] of Object.entries(bathroomCheckButtons)) {
+  button?.addEventListener('click', () => { void controlBathroomCheck(action); });
+}
+if (bathroomCheckPanel) {
+  void loadBathroomCheckStatus();
+  window.setInterval(() => { void loadBathroomCheckStatus(); }, 5000);
 }
 
 function normalizeUrl(value='') {

@@ -11,6 +11,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -170,3 +171,41 @@ class TelegramNotification(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class BathroomCheckJob(Base):
+    __tablename__ = "bathroom_check_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    status: Mapped[str] = mapped_column(String(20), default="running", index=True)
+    criteria: Mapped[dict[str, Any]] = mapped_column(JSON)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_claim_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class BathroomCheckTask(Base):
+    __tablename__ = "bathroom_check_tasks"
+    __table_args__ = (UniqueConstraint("job_id", "url", name="uq_bathroom_check_job_url"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("bathroom_check_jobs.id", ondelete="CASCADE"), index=True)
+    search_result_id: Mapped[int | None] = mapped_column(ForeignKey("search_results.id", ondelete="SET NULL"), nullable=True)
+    url: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_outcome: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class BathroomCheckControl(Base):
+    __tablename__ = "bathroom_check_control"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    current_job_id: Mapped[int | None] = mapped_column(ForeignKey("bathroom_check_jobs.id", ondelete="SET NULL"), nullable=True)

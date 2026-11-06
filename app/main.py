@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app import __version__
+from app.bathroom_queue import router as bathroom_check_router
 from app.ai_service import analyze_listing, current_analysis
 from app.checker import ListingNotFound, check_all_listings, check_listing, periodic_checker
 from app.config import get_settings
@@ -47,6 +48,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
+app.include_router(bathroom_check_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https://([a-z0-9-]+\.)*krisha\.kz$",

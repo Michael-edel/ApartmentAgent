@@ -1,3 +1,5 @@
+importScripts('queue-worker.js');
+
 const DEFAULTS = {enabled: true, apiOrigin: ''};
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -8,7 +10,15 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.action.onClicked.addListener(() => chrome.runtime.openOptionsPage());
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === 'apartment-agent-bathroom-queue-poll') {
+    ApartmentAgentBathroomQueue.kick(sender).then(() => sendResponse({ok:true}));
+    return true;
+  }
+  if (message?.type === 'apartment-agent-queue-finished') {
+    ApartmentAgentBathroomQueue.finished(sender, message.outcome, message.error).then(() => sendResponse({ok:true}));
+    return true;
+  }
   if (message?.type !== 'apartment-agent-import') return false;
   chrome.storage.sync.get(DEFAULTS, async settings => {
     if (!settings.enabled) {
@@ -28,6 +38,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+      await ApartmentAgentBathroomQueue.imported(sender, message.payload);
       sendResponse({ok: true, listing: body});
     } catch (error) {
       sendResponse({ok: false, error: error instanceof Error ? error.message : 'Ошибка импорта'});

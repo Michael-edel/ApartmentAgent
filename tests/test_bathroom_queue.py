@@ -1,0 +1,241 @@
+import asyncio
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+
+import httpx
+import pytest
+import pytest_asyncio
+from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from app import bathroom_queue as queue
+from app.models import Base, BathroomCheckJob, BathroomCheckTask, Listing, SearchResult
+
+
+@pytest_asyncio.fixture
+async def env(monkeypatch, tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'queue.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    settings = SimpleNamespace(target_rooms=4, max_price_kzt=50_000_000,
+                               min_area_m2=80, max_area_m2=120, min_bathrooms=0)
+    clock = {"now": datetime(2026, 11, 6, 12, 0, tzinfo=UTC)}
+    monkeypatch.setattr(queue, "SessionLocal", sessions)
+    monkeypatch.setattr(queue, "get_settings", lambda: settings)
+    monkeypatch.setattr(queue, "_now", lambda: clock["now"])
+    monkeypatch.setattr(queue, "_queue_lock", asyncio.Lock())
+    yield SimpleNamespace(sessions=sessions, settings=settings, clock=clock)
+    await engine.dispose()
+
+
+async def seed(env, urls=("https://krisha.kz/a/show/100",), *, count=None, title=None):
+    async with env.sessions() as session:
+        session.add_all(SearchResult(url=url, title=title or "4-комнатная квартира, 96 м², 38 млн тг",
+                                    query="test", search_engine="test", bathrooms_count=count)
+                        for url in urls)
+        await session.commit()
+
+
+async def store_count(env, url, count):
+    async with env.sessions() as session:
+        session.add(Listing(source="browser", source_url=url, title="Тестовая квартира",
+                            price_kzt=38_000_000, area_m2=96, rooms=4, bathrooms_count=count))
+        await session.commit()
+
+
+async def claim(worker="browser-1"):
+    return await queue.bathroom_check_claim(queue.ClaimRequest(worker_id=worker))
+
+
+async def complete(result, outcome="imported", worker="browser-1", **kwargs):
+    task = result["task"]
+    return await queue.bathroom_check_complete(queue.CompleteRequest(
+        worker_id=worker, task_id=task["id"], lease_token=task["lease_token"], outcome=outcome, **kwargs))
+
+
+@pytest.mark.asyncio
+async def test_start_deduplicates_unknown_even_without_filter_and_preserves_settings(env):
+    await seed(env, ("https://krisha.kz/a/show/100", "https://www.krisha.kz/a/show/100?from=search"))
+    await seed(env, ("https://krisha.kz/a/show/200",), count=1)
+    await seed(env, ("https://krisha.kz/a/show/300",), count=2)
+    await seed(env, ("https://krisha.kz/a/show/400",), title="3-комнатная квартира, 96 м², 38 млн тг")
+    await seed(env, ("https://krisha.kz/a/show/500",), title="4-комнатная квартира, 96 м², 60 млн тг")
+    await seed(env, ("https://krisha.kz/a/show/600",))
+    await store_count(env, "https://www.krisha.kz/a/show/600?x=1", 1)
+    before = await queue.bathroom_check_status()
+    assert before["status"] == "idle" and before["candidate_count"] == 1
+    started = await queue.bathroom_check_start()
+    assert started["total"] == started["pending"] == 1
+    assert started["criteria"]["min_bathrooms"] == env.settings.min_bathrooms == 0
+    async with env.sessions() as session:
+        assert len((await session.scalars(select(SearchResult))).all()) == 7
+        task = await session.scalar(select(BathroomCheckTask))
+        assert task.url == "https://krisha.kz/a/show/100"
+    env.settings.target_rooms = 3
+    assert (await queue.bathroom_check_status())["criteria"]["target_rooms"] == 4
+
+
+@pytest.mark.asyncio
+async def test_concurrent_start_and_claim_have_one_job_and_one_lease(env):
+    await seed(env, ("https://krisha.kz/a/show/100", "https://krisha.kz/a/show/200"))
+    starts = await asyncio.gather(queue.bathroom_check_start(), queue.bathroom_check_start())
+    assert starts[0]["job_id"] == starts[1]["job_id"]
+    results = await asyncio.gather(claim("worker-a"), claim("worker-b"))
+    winners = [result for result in results if result["task"]]
+    assert len(winners) == 1
+    same = await claim("worker-a" if results[0]["task"] else "worker-b")
+    assert same["task"] == winners[0]["task"]
+    async with env.sessions() as session:
+        assert len((await session.scalars(select(BathroomCheckJob))).all()) == 1
+        tasks = (await session.scalars(select(BathroomCheckTask))).all()
+        assert sum(task.status == "leased" for task in tasks) == 1
+        assert sum(task.attempts for task in tasks) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count,expected", [(2, "confirmed"), (1, "rejected"), (None, "unknown")])
+async def test_completion_uses_saved_database_count_and_is_idempotent(env, count, expected):
+    await seed(env)
+    await queue.bathroom_check_start()
+    leased = await claim()
+    if count is not None:
+        await store_count(env, "https://www.krisha.kz/a/show/100?browser=1", count)
+    # Even a client saying "unknown" cannot override a known saved count.
+    result = await complete(leased, "unknown")
+    assert result[expected] == result["checked"] == 1
+    assert result["pending"] == 0 and result["status"] == "completed"
+    assert await complete(leased, "error", error="duplicate") == result
+    assert (await claim())["task"] is None
+
+
+@pytest.mark.asyncio
+async def test_claim_spacing_and_snapshot_do_not_depend_on_changed_search_settings(env):
+    await seed(env, ("https://krisha.kz/a/show/100", "https://krisha.kz/a/show/200"))
+    await queue.bathroom_check_start()
+    first = await claim()
+    await complete(first)
+    env.settings.target_rooms = 2
+    assert (await claim())["task"] is None
+    env.clock["now"] += timedelta(seconds=14)
+    assert (await claim())["task"] is None
+    env.clock["now"] += timedelta(seconds=1)
+    second = await claim()
+    assert second["task"] and second["task"]["id"] != first["task"]["id"]
+
+
+@pytest.mark.asyncio
+async def test_pause_blocks_claims_cancel_invalidates_lease_and_start_creates_new_job(env):
+    await seed(env)
+    started = await queue.bathroom_check_start()
+    leased = await claim()
+    paused = await queue.bathroom_check_pause()
+    assert paused["status"] == "paused" and (await claim())["task"] is None
+    assert (await queue.bathroom_check_start())["job_id"] == started["job_id"]
+    assert (await queue.bathroom_check_resume())["status"] == "running"
+    assert (await claim())["task"] == leased["task"]
+    cancelled = await queue.bathroom_check_cancel()
+    assert cancelled["status"] == "cancelled" and cancelled["current_url"] is None
+    assert (await claim())["task"] is None
+    with pytest.raises(HTTPException) as invalid:
+        await complete(leased)
+    assert invalid.value.status_code == 409
+    assert (await queue.bathroom_check_start())["job_id"] != started["job_id"]
+
+
+@pytest.mark.asyncio
+async def test_expired_lease_pauses_without_automatic_retry_and_manual_resume_retries_once(env):
+    await seed(env)
+    await queue.bathroom_check_start()
+    first = await claim()
+    env.clock["now"] += timedelta(seconds=120)
+    status = await queue.bathroom_check_status()
+    assert status["status"] == "paused" and status["failed"] == 1
+    assert (await claim())["task"] is None
+    await queue.bathroom_check_resume()
+    assert (await claim())["task"] is None  # the safety gap still applies
+    env.clock["now"] += timedelta(seconds=15)
+    second = await claim()
+    assert second["task"]["id"] == first["task"]["id"]
+    assert second["task"]["lease_token"] != first["task"]["lease_token"]
+    with pytest.raises(HTTPException):
+        await complete(first)
+    env.clock["now"] += timedelta(seconds=120)
+    await queue.bathroom_check_status()
+    assert (await queue.bathroom_check_resume())["status"] == "completed"
+    assert (await claim())["task"] is None
+
+
+@pytest.mark.asyncio
+async def test_blocked_pauses_and_resume_resolves_saved_page_without_reopening(env):
+    await seed(env)
+    await queue.bathroom_check_start()
+    leased = await claim()
+    blocked = await complete(leased, "blocked", error="Пройдите проверку браузера")
+    assert blocked["status"] == "paused" and blocked["failed"] == 1
+    assert (await claim())["task"] is None
+    await store_count(env, "https://krisha.kz/a/show/100", 2)
+    resumed = await queue.bathroom_check_resume()
+    assert resumed["status"] == "completed" and resumed["confirmed"] == 1 and resumed["failed"] == 0
+    assert (await claim())["task"] is None
+
+
+@pytest.mark.asyncio
+async def test_error_is_not_retried_but_remaining_tasks_can_resume(env):
+    await seed(env, ("https://krisha.kz/a/show/100", "https://krisha.kz/a/show/200"))
+    await queue.bathroom_check_start()
+    first = await claim()
+    assert (await complete(first, "error", error="Страница недоступна"))["status"] == "paused"
+    await queue.bathroom_check_resume()
+    env.clock["now"] += timedelta(seconds=15)
+    second = await claim()
+    assert second["task"]["id"] != first["task"]["id"]
+
+
+@pytest.mark.asyncio
+async def test_manual_pause_allows_current_import_and_resume_continues_next(env):
+    await seed(env, ("https://krisha.kz/a/show/100", "https://krisha.kz/a/show/200"))
+    await queue.bathroom_check_start()
+    first = await claim()
+    await queue.bathroom_check_pause()
+    await store_count(env, "https://krisha.kz/a/show/100", 2)
+    result = await complete(first)
+    assert result["status"] == "paused" and result["confirmed"] == 1
+    assert result["current_url"] is None and result["pending"] == 1
+    assert (await claim())["task"] is None
+    assert (await queue.bathroom_check_resume())["status"] == "running"
+    env.clock["now"] += timedelta(seconds=15)
+    assert (await claim())["task"]["id"] != first["task"]["id"]
+
+
+@pytest.mark.asyncio
+async def test_pending_task_saved_elsewhere_is_resolved_without_browser_claim(env):
+    await seed(env)
+    await queue.bathroom_check_start()
+    await store_count(env, "https://krisha.kz/a/show/100", 2)
+    result = await claim()
+    assert result["status"] == "completed" and result["task"] is None
+    status = await queue.bathroom_check_status()
+    assert status["confirmed"] == 1 and status["checked"] == 1
+
+
+@pytest.mark.asyncio
+async def test_ownership_and_http_contract_reject_untrusted_count(env):
+    from app.main import app
+
+    await seed(env)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://queue.test") as client:
+        assert (await client.get("/api/v1/search/bathroom-check")).json()["status"] == "idle"
+        assert (await client.get("/api/v1/search/bathroom-check/status")).status_code == 200
+        assert (await client.post("/api/v1/search/bathroom-check/start", headers={"Origin": "https://krisha.kz"})).status_code == 403
+        assert (await client.post("/api/v1/search/bathroom-check/start", headers={"Origin": "http://queue.test"})).status_code == 200
+        assert (await client.post("/api/v1/search/bathroom-check/start", headers={"Origin": "chrome-extension://test"})).status_code == 200
+        assert (await client.post("/api/v1/search/bathroom-check/start")).json()["total"] == 1
+        leased = (await client.post("/api/v1/search/bathroom-check/claim", json={"worker_id": "browser-1"})).json()
+        payload = {"worker_id": "browser-1", "task_id": leased["task"]["id"],
+                   "lease_token": leased["task"]["lease_token"], "outcome": "imported"}
+        assert (await client.post("/api/v1/search/bathroom-check/complete", json={**payload, "bathrooms_count": 2})).status_code == 422
+        assert (await client.post("/api/v1/search/bathroom-check/complete", json={**payload, "worker_id": "thief"})).status_code == 409
+        assert (await client.post("/api/v1/search/bathroom-check/complete", json=payload)).json()["unknown"] == 1
