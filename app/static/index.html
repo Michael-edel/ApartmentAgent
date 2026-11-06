@@ -10,7 +10,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
   <link rel="apple-touch-icon" href="/static/icon.svg">
-  <link rel="stylesheet" href="/static/styles.css?v=140">
+  <link rel="stylesheet" href="/static/styles.css?v=141">
   <style>.bookmarklet-code{width:100%;min-height:96px;resize:vertical;border:1px solid #d8e2ec;border-radius:12px;background:#f8fafc;color:#142033;padding:12px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}</style>
   <title>ApartmentAgent</title>
 </head>
@@ -73,15 +73,16 @@
       <p id="searchMessage" class="form-message" aria-live="polite"></p>
       <p id="searchMeta" class="microcopy"></p>
       <section id="bathroomCheckPanel" class="bathroom-check-panel" aria-labelledby="bathroomCheckHeading">
-        <h3 id="bathroomCheckHeading">Автопроверка санузлов</h3>
-        <p class="microcopy">Нужно расширение ApartmentAgent 0.1.9 и открытый браузер. Объявления проверяются последовательно в одной вкладке. При проверке безопасности или CAPTCHA работа приостанавливается.</p>
+        <h3 id="bathroomCheckHeading">Автопроверка объявлений</h3>
+        <p class="microcopy">Для проверки санузлов и дополнения карточек нужно расширение ApartmentAgent 0.2.0 и открытый браузер. Объявления проверяются последовательно в одной вкладке. При проверке безопасности или CAPTCHA работа приостанавливается.</p>
         <p id="bathroomCheckCriteria" class="microcopy" hidden></p>
         <p id="bathroomCheckCounts" class="microcopy">Загружаю состояние проверки…</p>
-        <progress id="bathroomCheckProgress" max="1" value="0" aria-label="Прогресс проверки санузлов" hidden></progress>
+        <progress id="bathroomCheckProgress" max="1" value="0" aria-label="Прогресс автопроверки объявлений" hidden></progress>
         <p id="bathroomCheckMessage" class="form-message" aria-live="polite"></p>
         <p id="bathroomCheckCurrent" class="microcopy" hidden></p>
         <div class="bathroom-check-actions">
           <button id="startBathroomCheck" type="button" disabled>Проверить неизвестные</button>
+          <button id="startDetailsCheck" type="button" disabled>Дополнить карточки</button>
           <button id="pauseBathroomCheck" class="secondary-action" type="button" hidden>Пауза</button>
           <button id="resumeBathroomCheck" class="secondary-action" type="button" hidden>Продолжить</button>
           <button id="cancelBathroomCheck" class="secondary-action" type="button" hidden>Остановить</button>
@@ -167,6 +168,8 @@
           <label>Год постройки<input name="building_year" type="number"></label>
         </div>
         <label>Район<input name="district"></label>
+        <label>Состояние / ремонт<input name="repair_condition" maxlength="500" placeholder="Если указано в объявлении"></label>
+        <label>Полное описание продавца<textarea name="description" maxlength="20000" rows="5" placeholder="Текст описания квартиры из объявления"></textarea></label>
         <label>ЖК<input name="residential_complex"></label>
         <label>Описание ЖК<textarea name="complex_description" maxlength="5000" placeholder="Сведения о жилом комплексе, а не описание квартиры"></textarea></label>
         <label>Источник описания ЖК<select name="complex_description_source_kind"><option value="manual">Ручной ввод</option><option value="listing">Объявление</option><option value="developer">Сайт застройщика</option></select></label>
@@ -195,6 +198,6 @@
     <a href="#listingGrid">★<span>Лучшие</span></a>
   </nav>
 
-  <script src="/static/app.js?v=153" defer></script>
+  <script src="/static/app.js?v=154" defer></script>
 </body>
 </html>

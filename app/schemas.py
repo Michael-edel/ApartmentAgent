@@ -1,7 +1,15 @@
 from datetime import datetime
+from html import unescape
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
+
+
+def plain_detail_text(value: str) -> str:
+    value = re.sub(r"<(?:script|style)\b[^>]*>.*?</(?:script|style)>", "", value, flags=re.I | re.S)
+    value = unescape(re.sub(r"<[^>]*>", " ", value))
+    return re.sub(r"\s+", " ", re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", value)).strip()
 
 
 class ListingImportRequest(BaseModel):
@@ -13,6 +21,9 @@ class ListingCreate(BaseModel):
     source_url: HttpUrl
     title: str = Field(min_length=3, max_length=300)
     description: str | None = Field(default=None, max_length=20_000)
+    repair_condition: str | None = Field(default=None, max_length=500)
+    property_details: dict[str, str] = Field(default_factory=dict, max_length=60)
+    details_extracted: bool = Field(default=False, exclude=True)
     city: str = "Астана"
     district: str | None = None
     residential_complex: str | None = None
@@ -43,6 +54,23 @@ class ListingCreate(BaseModel):
     krisha_city_price_per_m2: int | None = Field(default=None, gt=0, le=1_000_000_000)
     krisha_comparison_district: str | None = Field(default=None, max_length=150)
     photo_urls: list[str] = Field(default_factory=list, max_length=30)
+
+    @field_validator("repair_condition", mode="before")
+    @classmethod
+    def clean_repair_condition(cls, value):
+        return (plain_detail_text(value) or None) if isinstance(value, str) else value
+
+    @field_validator("property_details")
+    @classmethod
+    def clean_property_details(cls, value: dict[str, str]) -> dict[str, str]:
+        result = {}
+        for label, detail in value.items():
+            label, detail = plain_detail_text(label), plain_detail_text(detail)
+            if len(label) > 100 or len(detail) > 1500:
+                raise ValueError("Характеристика: название до 100 символов, значение до 1500")
+            if label and detail:
+                result[label] = detail
+        return result
 
     @field_validator("photo_urls")
     @classmethod
@@ -101,3 +129,4 @@ class ListingResponse(ListingCreate):
     krisha_comparison_observed_at: datetime | None = None
     krisha_comparison_source: str | None = None
     complex_description_observed_at: datetime | None = None
+    details_imported_at: datetime | None = None

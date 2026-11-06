@@ -239,3 +239,98 @@ async def test_ownership_and_http_contract_reject_untrusted_count(env):
         assert (await client.post("/api/v1/search/bathroom-check/complete", json={**payload, "bathrooms_count": 2})).status_code == 422
         assert (await client.post("/api/v1/search/bathroom-check/complete", json={**payload, "worker_id": "thief"})).status_code == 409
         assert (await client.post("/api/v1/search/bathroom-check/complete", json=payload)).json()["unknown"] == 1
+
+
+@pytest.mark.asyncio
+async def test_details_mode_includes_saved_only_and_known_two_but_respects_minimum(env):
+    await seed(env)
+    await seed(env, ("https://krisha.kz/a/show/200",), count=1)
+    await seed(env, ("https://krisha.kz/a/show/300",), count=2)
+    await store_count(env, "https://krisha.kz/a/show/400", 2)
+    await store_count(env, "https://krisha.kz/a/show/500", 2)
+    async with env.sessions() as session:
+        row = await session.scalar(select(Listing).where(Listing.source_url.endswith("500")))
+        row.details_imported_at = env.clock["now"]
+        await session.commit()
+    env.settings.min_bathrooms = 2
+    before = await queue.bathroom_check_status()
+    assert before["details_candidate_count"] == 3
+    result = await queue.bathroom_check_start(queue.StartRequest(mode="details"))
+    assert result["mode"] == result["criteria"]["mode"] == "details"
+    assert result["total"] == 3
+    async with env.sessions() as session:
+        tasks = (await session.scalars(select(BathroomCheckTask))).all()
+        assert {task.url for task in tasks} == {f"https://krisha.kz/a/show/{i}" for i in (100, 300, 400)}
+        assert next(task for task in tasks if task.url.endswith("400")).search_result_id is None
+    await queue.bathroom_check_cancel()
+    env.settings.min_bathrooms = 0
+    assert (await queue.bathroom_check_start(queue.StartRequest(mode="details")))["total"] == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", [None, "0.1.10", "invalid"])
+async def test_details_requires_new_extension_before_any_task_is_leased(env, version):
+    await seed(env)
+    await queue.bathroom_check_start(queue.StartRequest(mode="details"))
+    result = await queue.bathroom_check_claim(queue.ClaimRequest(worker_id="browser-1", extension_version=version))
+    assert result["status"] == "paused" and result["task"] is None and "0.2.0" in result["message"]
+    async with env.sessions() as session:
+        assert (await session.scalar(select(BathroomCheckTask))).attempts == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", ["0.2.0", "0.2.0.1"])
+async def test_details_known_count_still_requires_new_full_import(env, version):
+    await seed(env, count=2)
+    await store_count(env, "https://krisha.kz/a/show/100", 2)
+    await queue.bathroom_check_start(queue.StartRequest(mode="details"))
+    leased = await queue.bathroom_check_claim(queue.ClaimRequest(worker_id="browser-1", extension_version=version))
+    assert leased["mode"] == leased["task"]["mode"] == "details"
+    result = await complete(leased)
+    assert result["confirmed"] == 0 and result["unknown"] == 1 and result["enriched"] == 0
+    assert result["status"] == "paused" and "не получены" in result["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count,expected", [(2, "confirmed"), (1, "rejected"), (None, "unknown")])
+async def test_details_completion_reports_enrichment_independently_of_bathroom_count(env, count, expected):
+    await seed(env)
+    await queue.bathroom_check_start(queue.StartRequest(mode="details"))
+    leased = await queue.bathroom_check_claim(queue.ClaimRequest(worker_id="browser-1", extension_version="0.2.0"))
+    await store_count(env, "https://krisha.kz/a/show/100", count)
+    async with env.sessions() as session:
+        row = await session.scalar(select(Listing))
+        row.details_imported_at = env.clock["now"] + timedelta(seconds=1)
+        row.property_details = {"Балкон": "Есть"}
+        await session.commit()
+    result = await complete(leased)
+    assert result["status"] == "completed" and result["enriched"] == 1 and result[expected] == 1
+    assert result["details_candidate_count"] == 0
+    assert result["candidate_count"] == (1 if count is None else 0)
+
+
+@pytest.mark.asyncio
+async def test_details_timestamp_older_than_claim_cannot_confirm_new_task(env):
+    await seed(env, count=2)
+    await queue.bathroom_check_start(queue.StartRequest(mode="details"))
+    leased = await queue.bathroom_check_claim(queue.ClaimRequest(worker_id="browser-1", extension_version="0.2.0"))
+    await store_count(env, "https://krisha.kz/a/show/100", 2)
+    async with env.sessions() as session:
+        row = await session.scalar(select(Listing))
+        row.details_imported_at = env.clock["now"] - timedelta(minutes=1)
+        await session.commit()
+    result = await complete(leased)
+    assert result["status"] == "paused" and result["enriched"] == result["confirmed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_details_mode_does_not_repeat_enriched_legacy_url_variant(env):
+    await seed(env)
+    await store_count(env, "https://www.krisha.kz/a/show/100?legacy=1", 2)
+    async with env.sessions() as session:
+        row = await session.scalar(select(Listing))
+        row.details_imported_at = env.clock["now"]
+        await session.commit()
+    await store_count(env, "https://krisha.kz/a/show/100", None)
+    result = await queue.bathroom_check_start(queue.StartRequest(mode="details"))
+    assert result["status"] == "completed" and result["total"] == 0

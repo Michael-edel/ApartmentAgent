@@ -8,7 +8,7 @@ from urllib.parse import unquote, urlparse, urlunparse
 import httpx
 from pydantic import HttpUrl
 
-from app.schemas import ListingCreate
+from app.schemas import ListingCreate, plain_detail_text
 from app.mortgage import mortgage_from_html, mortgage_value, parse_mortgage_text
 
 
@@ -33,6 +33,25 @@ class _FieldNode:
             elif not child.hidden():
                 pending.extend(reversed(child.children))
         return re.sub(r"\s+", " ", " ".join(chunks)).strip()
+
+    def prose_text(self) -> str:
+        parts, pending = [], [self]
+        while pending:
+            child = pending.pop()
+            if isinstance(child, str):
+                parts.append(child)
+            elif not child.hidden():
+                if child.tag == "br":
+                    parts.append("\n")
+                    continue
+                block = child.tag in {"p", "div", "li"}
+                if block:
+                    parts.append("\n")
+                    pending.append("\n")
+                pending.extend(reversed(child.children))
+        raw = "".join(parts).replace("\r\n", "\n").replace("\r", "\n")
+        lines = [re.sub(r"[^\S\n]+", " ", line).strip() for line in raw.split("\n")]
+        return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
 class _BathroomFieldHTMLParser(HTMLParser):
@@ -64,15 +83,52 @@ class _BathroomFieldHTMLParser(HTMLParser):
     def handle_data(self, data):
         self.stack[-1].children.append(data)
 
-    def values(self):
+    def visible_nodes(self):
         pending = [self.root]
-        label = re.compile(r"^(?:санузел|санузлы|с\s*/\s*у)\s*[:—-]?\s*(.*)$", re.I)
         while pending:
             node = pending.pop()
             if node.hidden():
                 continue
-            children = [child for child in node.children if isinstance(child, _FieldNode)]
-            pending.extend(reversed(children))
+            yield node
+            pending.extend(reversed([child for child in node.children if isinstance(child, _FieldNode)]))
+
+    def properties(self) -> dict[str, str]:
+        result = {}
+        common = ("Состояние квартиры", "Год постройки", "Жилой комплекс", "Общая площадь", "Тип дома",
+                  "Высота потолков", "В ипотеку", "В залоге", "Площадь кухни", "Санузел", "Санузлы",
+                  "Город", "Район", "Адрес", "Ремонт", "Ипотека", "Этаж", "Площадь", "Балкон", "Парковка",
+                  "Интернет", "Безопасность", "Мебель", "Дверь", "Пол", "Потолки", "Телефон", "Обмен")
+        for node in self.visible_nodes():
+            label = value = None
+            children = [child for child in node.children if isinstance(child, _FieldNode) and not child.hidden()]
+            if node.tag == "dt" and node.parent:
+                siblings = [child for child in node.parent.children if isinstance(child, _FieldNode)]
+                index = siblings.index(node)
+                if index + 1 < len(siblings) and siblings[index + 1].tag == "dd" and not siblings[index + 1].hidden():
+                    label, value = node.text(), siblings[index + 1].text()
+            elif set((node.attrs.get("class") or "").split()).intersection({"a-list__item", "offer__info-item"}):
+                if len(children) >= 2:
+                    label, value = children[0].text(), " ".join(child.text() for child in children[1:])
+                else:
+                    text = node.text()
+                    for candidate in common:
+                        match = re.fullmatch(re.escape(candidate) + r"\s*[:—-]?\s+(.+)", text, re.I)
+                        if match:
+                            label, value = candidate, match.group(1)
+                            break
+                    if label is None and ":" in text:
+                        label, value = text.split(":", 1)
+            if label is None or value is None:
+                continue
+            label, value = plain_detail_text(label).rstrip(":—- "), plain_detail_text(value)
+            if label and value and len(label) <= 100 and len(value) <= 1500 and len(result) < 60:
+                result[label] = value
+        return result
+
+
+    def values(self):
+        label = re.compile(r"^(?:санузел|санузлы|с\s*/\s*у)\s*[:—-]?\s*(.*)$", re.I)
+        for node in self.visible_nodes():
             classes = set((node.attrs.get("class") or "").split())
             named = (node.attrs.get("data-name") in {"flat.toilet", "bathrooms"}
                      or node.attrs.get("data-testid") == "bathrooms")
@@ -84,7 +140,6 @@ class _BathroomFieldHTMLParser(HTMLParser):
                 elif named:
                     yield text
             elif node.tag == "dt" and label.fullmatch(node.text()):
-                # Only the adjacent definition belongs to this exact label.
                 siblings = [child for child in node.parent.children if isinstance(child, _FieldNode)]
                 index = siblings.index(node)
                 if index + 1 < len(siblings) and siblings[index + 1].tag == "dd":
@@ -92,6 +147,88 @@ class _BathroomFieldHTMLParser(HTMLParser):
                     if not match.group(1) and not siblings[index + 1].hidden():
                         yield siblings[index + 1].text()
 
+
+def _public_details(html: str) -> tuple[_BathroomFieldHTMLParser, dict[str, str]]:
+    parser = _BathroomFieldHTMLParser()
+    parser.feed(html)
+    return parser, parser.properties()
+
+
+def _property_value(details: dict[str, str], *labels: str) -> str | None:
+    wanted = {label.casefold() for label in labels}
+    return next((value for label, value in details.items() if label.casefold() in wanted), None)
+
+
+def _advert_description(parser: _BathroomFieldHTMLParser) -> str | None:
+    for node in parser.visible_nodes():
+        classes = set((node.attrs.get("class") or "").split())
+        if ("offer__description" in classes or node.attrs.get("data-testid") in {"description", "advert-description"}
+                or (node.attrs.get("itemprop") == "description" and node.tag != "meta")):
+            text = node.prose_text()
+            if text:
+                return text[:20_000]
+    return None
+
+
+def _seller_fields(parser: _BathroomFieldHTMLParser, data: list[Any]) -> tuple[str | None, str | None]:
+    name = _find_text(data, {"sellerName", "ownerName", "advertiserName"})
+    seller_type = _find_text(data, {"sellerType", "ownerType", "advertiserType"})
+    for node in parser.visible_nodes():
+        if node.attrs.get("data-testid") == "seller-name":
+            name = node.text()[:200] or name
+        if node.text().casefold().rstrip(": ") != "автор объявления":
+            continue
+        card = node.parent
+        if not card:
+            continue
+        card_text = card.text()
+        if len(card_text) > 1500:
+            continue
+        type_match = re.search(r"Хозяин недвижимости|Агентство недвижимости|Специалист по недвижимости|Крыша Агент|Риелтор|Риэлтор", card_text, re.I)
+        if type_match:
+            seller_type = type_match.group(0)
+        for child in card.children:
+            if not isinstance(child, _FieldNode) or child.hidden():
+                continue
+            if (child.tag in {"h2", "h3", "h4"} or child.attrs.get("itemprop") == "name"
+                    or child.attrs.get("data-testid") == "seller-name"):
+                candidate = child.text()
+                if candidate and candidate.casefold() != "автор объявления" and not re.search(r"\+?\d[\d ()-]{5,}", candidate):
+                    if not type_match or candidate.casefold() != type_match.group(0).casefold():
+                        name = candidate[:200]
+    return name[:200] if name else None, seller_type[:100] if seller_type else None
+
+
+def _krisha_comparison_fields(parser: _BathroomFieldHTMLParser) -> dict[str, Any]:
+    result = {"krisha_district_price_per_m2": None, "krisha_city_price_per_m2": None,
+              "krisha_comparison_district": None}
+    blocks = [node for node in parser.visible_nodes() if node.tag in {"div", "section", "article"}
+              and len(node.text()) <= 1800 and re.search(r"Цена\s*м[²2]\s*в похожих квартирах", node.text(), re.I)
+              and "Похожие квартиры в Астане" in node.text()]
+    for block in sorted(blocks, key=lambda node: len(node.text())):
+        pending = [block]
+        for node in pending:
+            children = [child for child in node.children if isinstance(child, _FieldNode) and not child.hidden()]
+            pending.extend(children)
+            text = node.text()
+            if node.tag not in {"div", "td", "li"} or len(text) > 220:
+                continue
+            first = re.fullmatch(r"(\d[\d ]*)\s*(?:₸|тг|тенге)(?:\s*/\s*м[²2])?\s*Похожие квартиры в (.+)", text, re.I)
+            last = re.fullmatch(r"Похожие квартиры в (.+?)\s+(\d[\d ]*)\s*(?:₸|тг|тенге)(?:\s*/\s*м[²2])?", text, re.I)
+            if not first and not last:
+                continue
+            label, digits = (first.group(2), first.group(1)) if first else (last.group(1), last.group(2))
+            value = int(digits.replace(" ", ""))
+            if not 0 < value <= 1_000_000_000:
+                continue
+            if label.casefold() == "астане":
+                result["krisha_city_price_per_m2"] = value
+            elif re.search(r"(?:район[еа]?|р-н(?:е)?)$", label, re.I):
+                result["krisha_district_price_per_m2"] = value
+                result["krisha_comparison_district"] = label[:150]
+        if result["krisha_district_price_per_m2"] or result["krisha_city_price_per_m2"]:
+            return result
+    return result
 
 def _bathroom_field_value(raw: Any) -> tuple[int | None, bool]:
     if isinstance(raw, bool):
@@ -125,7 +262,13 @@ def _bathrooms_fields(html: str, data: list[Any]) -> tuple[int | None, bool]:
     return None, False
 
 
-def _mortgage_fields(html: str, data: list[Any], description: str = "") -> bool | None:
+def _mortgage_fields(html: str, data: list[Any], description: str = "", property_details: dict[str, str] | None = None) -> bool | None:
+    details = property_details if property_details is not None else _public_details(html)[1]
+    explicit = _property_value(details, "Ипотека", "В ипотеку")
+    if explicit is not None:
+        parsed = mortgage_value(explicit)
+        if parsed is not None:
+            return parsed
     values = []
     for root in data:
         for item in _walk(root):
@@ -461,6 +604,8 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
         if (value := _extract_meta(html, name))
     ]
     data = _json_scripts(html)
+    detail_parser, property_details = _public_details(html)
+    description = _advert_description(detail_parser) or description
     bathrooms_count, bathrooms_lower_bound = _bathrooms_fields(html, data)
 
     price = _find_numeric(data, {"price", "price_kzt", "amount", "value"}, 500_000, 2_000_000_000)
@@ -493,6 +638,12 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
     floor = int(floor or (floor_match.group("floor") if floor_match else 0)) or None
     total_floors = int(total_floors or (floor_match.group("total") if floor_match else 0)) or None
     year = int(year or (year_match.group("year") if year_match else 0)) or None
+    visible_floor = _property_value(property_details, "Этаж")
+    if visible_floor and (match := re.fullmatch(r"(\d{1,3})\s*(?:из|/)\s*(\d{1,3})(?:\s*этаж)?", visible_floor, re.I)):
+        floor, total_floors = int(match.group(1)), int(match.group(2))
+    visible_year = _property_value(property_details, "Год постройки")
+    if visible_year and re.fullmatch(r"(?:19|20)\d{2}", visible_year):
+        year = int(visible_year)
 
     if not price or not area or not rooms:
         missing = []
@@ -505,23 +656,31 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
         raise ListingImportError("Не удалось определить " + ", ".join(missing) + ". Заполните форму вручную")
 
     building_type = None
-    lowered = combined.lower()
+    explicit_building_type = _property_value(property_details, "Тип дома", "Материал стен")
+    lowered = (explicit_building_type or combined).lower()
     if "кирпич" in lowered:
         building_type = "brick"
     elif "монолит" in lowered:
         building_type = "monolith"
     elif "панель" in lowered:
         building_type = "panel"
+    elif explicit_building_type:
+        building_type = explicit_building_type
 
-    district = _find_district(data, combined)
+    visible_city = _property_value(property_details, "Город")
+    if visible_city:
+        visible_city = re.sub(r"\s*показать на карте.*$", "", visible_city, flags=re.I).strip()
+    city = re.split(r",", visible_city)[0].strip() if visible_city else "Астана"
+    district = _property_value(property_details, "Район") or (_find_district([], visible_city) if visible_city else None) or _find_district(data, combined)
     residential_complex = _find_text(
         data,
         {"complexName", "residentialComplex", "housingComplex", "residentialComplexName"},
     )
+    residential_complex = _property_value(property_details, "Жилой комплекс") or residential_complex
     if not residential_complex:
         complex_match = re.search(r"ЖК\s*[«\"]?([^»\".,;]{2,100})", combined, re.IGNORECASE)
         residential_complex = complex_match.group(1).strip() if complex_match else None
-    address = _find_text(
+    address = _property_value(property_details, "Адрес") or _find_text(
         data,
         {"address", "streetAddress", "formattedAddress", "fullAddress", "addressLine", "displayAddress"},
     ) or _address_from_text(combined)
@@ -540,13 +699,15 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
     normalized_source_url = urlunparse(
         ("https", final_host or "krisha.kz", response.url.path.rstrip("/"), "", "", "")
     )
+    seller_name, seller_type = _seller_fields(detail_parser, data)
+    comparison_fields = _krisha_comparison_fields(detail_parser)
 
     return ListingCreate(
         source="krisha-import",
         source_url=HttpUrl(normalized_source_url),
         title=(title or f"{rooms}-комнатная квартира в Астане")[:300],
         description=description[:20_000] or None,
-        city="Астана",
+        city=city,
         district=district,
         residential_complex=residential_complex,
         address=address,
@@ -557,11 +718,17 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
         rooms=rooms,
         bathrooms_count=bathrooms_count,
         bathrooms_count_is_lower_bound=bathrooms_lower_bound,
+        repair_condition=_property_value(property_details, "Состояние квартиры", "Ремонт"),
+        property_details=property_details,
+        details_extracted=bool(property_details or _advert_description(detail_parser)),
         floor=floor,
         floors_total=total_floors,
         building_year=year,
         building_type=building_type,
         is_full_two_room=rooms == 2,
-        mortgage_supported=_mortgage_fields(html, data, description),
+        seller_name=seller_name,
+        seller_type=seller_type,
+        mortgage_supported=_mortgage_fields(html, data, description, property_details),
         photo_urls=photo_urls,
+        **comparison_fields,
     )

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -52,11 +53,11 @@ def _aware(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
-def _criteria() -> dict:
+def _criteria(mode: str = "bathrooms") -> dict:
     settings = get_settings()
     return {"target_rooms": settings.target_rooms, "max_price_kzt": settings.max_price_kzt,
             "min_area_m2": settings.min_area_m2, "max_area_m2": settings.max_area_m2,
-            "min_bathrooms": settings.min_bathrooms}
+            "min_bathrooms": settings.min_bathrooms, "mode": mode}
 
 
 async def _control(session: AsyncSession) -> BathroomCheckControl:
@@ -77,31 +78,59 @@ async def _tasks(session: AsyncSession, job: BathroomCheckJob) -> list[BathroomC
     return list((await session.scalars(select(BathroomCheckTask).where(BathroomCheckTask.job_id == job.id).order_by(BathroomCheckTask.id))).all())
 
 
-async def _candidates(session: AsyncSession, criteria: dict) -> list[tuple[str, int]]:
+async def _candidates(session: AsyncSession, criteria: dict) -> list[tuple[str, int | None]]:
     rows = list((await session.scalars(select(SearchResult).order_by(SearchResult.id))).all())
     # Any known count for a canonical URL, including a legacy www/query variant,
     # prevents that same apartment from being queued as unknown.
-    known = set()
+    known = {}
     for row in rows:
         count = row.bathrooms_count
         if count is None:
             count = parse_bathrooms_count(f"{row.title or ''} {row.snippet or ''}")
         if count is not None:
-            known.add(normalize_krisha_listing_url(row.url))
-    listing_values = (await session.execute(select(Listing.source_url, Listing.bathrooms_count))).all()
-    known.update(normalize_krisha_listing_url(url) for url, count in listing_values if count is not None)
+            known[normalize_krisha_listing_url(row.url)] = count
+    listing_values = (await session.execute(select(Listing.source_url, Listing.bathrooms_count,
+        Listing.details_imported_at, Listing.rooms, Listing.area_m2, Listing.price_kzt))).all()
+    saved = {}
+    for value in listing_values:
+        url = normalize_krisha_listing_url(value.source_url)
+        if url not in saved or (saved[url].details_imported_at is None and value.details_imported_at is not None):
+            saved[url] = value
+        if value.bathrooms_count is not None:
+            known[url] = value.bathrooms_count
     result, seen = [], set()
+    details_mode = criteria.get("mode") == "details"
+
+    def eligible(url):
+        if not url:
+            return False
+        if details_mode:
+            return (not (url in saved and saved[url].details_imported_at is not None)
+                    and not (criteria["min_bathrooms"] == 2 and url in known and known[url] < 2))
+        return url not in known
+
+    def matches(title, snippet):
+        return is_target_search_result(title or "", snippet, target_rooms=criteria["target_rooms"],
+                                       max_price=criteria["max_price_kzt"],
+                                       min_area=criteria["min_area_m2"], max_area=criteria["max_area_m2"])
+
+    def saved_title(value):
+        return f"{value.rooms}-комнатная квартира, {value.area_m2:g} м², {value.price_kzt} ₸"
+
     for row in rows:
         url = normalize_krisha_listing_url(row.url)
-        if not url or url in known or url in seen:
+        if not eligible(url) or url in seen:
             continue
-        if not is_target_search_result(row.title or "", row.snippet,
-                                       target_rooms=criteria["target_rooms"],
-                                       max_price=criteria["max_price_kzt"],
-                                       min_area=criteria["min_area_m2"], max_area=criteria["max_area_m2"]):
+        title, snippet = (saved_title(saved[url]), None) if details_mode and url in saved else (row.title, row.snippet)
+        if not matches(title, snippet):
             continue
         seen.add(url)
         result.append((url, row.id))
+    if details_mode:
+        for url, value in saved.items():
+            if eligible(url) and url not in seen and matches(saved_title(value), None):
+                seen.add(url)
+                result.append((url, None))
     return result
 
 
@@ -119,16 +148,24 @@ async def _expire(session: AsyncSession, job: BathroomCheckJob | None, now: date
 
 async def _status(session: AsyncSession, job: BathroomCheckJob | None) -> dict:
     criteria = job.criteria if job else _criteria()
-    candidates = len(await _candidates(session, _criteria()))
+    mode = criteria.get("mode", "bathrooms")
+    candidates = len(await _candidates(session, _criteria("bathrooms")))
+    details_candidates = len(await _candidates(session, _criteria("details")))
     tasks = await _tasks(session, job) if job else []
     counts = {key: sum(task.status == key for task in tasks) for key in _finished}
     leased = next((task for task in tasks if task.status == "leased"), None)
+    stamps = {normalize_krisha_listing_url(url): stamp for url, stamp in
+              (await session.execute(select(Listing.source_url, Listing.details_imported_at))).all()
+              if stamp is not None}
+    enriched = sum(task.status in _finished and task.url in stamps
+                   and (task.claimed_at is None or _aware(stamps[task.url]) >= _aware(task.claimed_at)) for task in tasks)
     return {"job_id": job.id if job else None, "status": job.status if job else "idle",
             "total": len(tasks), "pending": sum(task.status in {"pending", "leased"} for task in tasks),
             "checked": sum(counts.values()), "confirmed": counts["confirmed"],
             "rejected": counts["rejected"], "unknown": counts["unknown"],
             "failed": counts["failed"] + counts["expired"], "current_url": leased.url if leased else None,
-            "message": job.message if job else None, "criteria": criteria, "candidate_count": candidates}
+            "message": job.message if job else None, "criteria": criteria, "candidate_count": candidates,
+            "mode": mode, "details_candidate_count": details_candidates, "enriched": enriched}
 
 
 @router.get("")
@@ -142,17 +179,22 @@ async def bathroom_check_status() -> dict:
         return await _status(session, job)
 
 
+class StartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["bathrooms", "details"] = "bathrooms"
+
+
 @router.post("/start")
-async def bathroom_check_start() -> dict:
+async def bathroom_check_start(request: StartRequest | None = None) -> dict:
     async with _queue_lock, SessionLocal() as session, session.begin():
         control = await _control(session)
         job = await _job(session, control)
         await _expire(session, job, _now())
         if job is None or job.status not in {"running", "paused"}:
-            criteria = _criteria()
+            criteria = _criteria(request.mode if request else "bathrooms")
             candidates = await _candidates(session, criteria)
             job = BathroomCheckJob(status="running" if candidates else "completed", criteria=criteria,
-                                   message=None if candidates else "Нет объявлений с неизвестным количеством санузлов.")
+                                   message=None if candidates else ("Нет объявлений для получения подробностей." if criteria["mode"] == "details" else "Нет объявлений с неизвестным количеством санузлов."))
             session.add(job)
             await session.flush()
             control.current_job_id = job.id
@@ -176,8 +218,9 @@ async def _change(action: str) -> dict:
                               if task.status == "expired" or (task.status == "failed" and task.last_outcome == "blocked")), None)
                 if retry is not None:
                     count = await _stored_count(session, retry.url)
-                    if count is not None:
-                        retry.status = "confirmed" if count >= 2 else "rejected"
+                    details_ready = await _details_ready(session, retry.url, retry.claimed_at) if job.criteria.get("mode") == "details" else True
+                    if details_ready and (count is not None or job.criteria.get("mode") == "details"):
+                        retry.status = "unknown" if count is None else "confirmed" if count >= 2 else "rejected"
                         retry.error = None
                     elif retry.attempts < 2:
                         # Only an explicit user resume permits one retry; a
@@ -215,6 +258,7 @@ async def bathroom_check_cancel() -> dict:
 class ClaimRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     worker_id: str = Field(min_length=1, max_length=128)
+    extension_version: str | None = Field(default=None, max_length=30)
 
 
 class CompleteRequest(ClaimRequest):
@@ -232,9 +276,18 @@ async def bathroom_check_claim(request: ClaimRequest) -> dict:
         now = _now()
         await _expire(session, job, now)
         result = {"job_id": job.id if job else None, "status": job.status if job else "idle",
-                  "task": None, "wait_seconds": GAP_SECONDS, "message": job.message if job else None}
+                  "task": None, "wait_seconds": GAP_SECONDS, "message": job.message if job else None,
+                  "mode": job.criteria.get("mode", "bathrooms") if job else "bathrooms"}
         if job is None or job.status != "running":
             return result
+        if job.criteria.get("mode") == "details":
+            version = request.extension_version or ""
+            parts = tuple(int(part) for part in version.split(".")) if re.fullmatch(r"\d+(?:\.\d+){1,3}", version) else ()
+            if not parts or (parts + (0,) * (4 - len(parts))) < (0, 2, 0, 0):
+                job.status = "paused"
+                job.message = "Для полного импорта нужно обновить расширение до 0.2.0."
+                result.update(status=job.status, message=job.message)
+                return result
         tasks = await _tasks(session, job)
         task = next((task for task in tasks if task.status == "leased"), None)
         if task and task.worker_id != request.worker_id:
@@ -249,8 +302,10 @@ async def bathroom_check_claim(request: ClaimRequest) -> dict:
                 if candidate.status != "pending":
                     continue
                 count = await _stored_count(session, candidate.url)
-                if count is not None:
-                    candidate.status = "confirmed" if count >= 2 else "rejected"
+                details_mode = job.criteria.get("mode") == "details"
+                ready = await _details_ready(session, candidate.url, candidate.claimed_at) if details_mode else count is not None
+                if ready:
+                    candidate.status = "unknown" if count is None else "confirmed" if count >= 2 else "rejected"
                     candidate.completed_at = now
                     continue
                 task = candidate
@@ -263,7 +318,7 @@ async def bathroom_check_claim(request: ClaimRequest) -> dict:
             task.attempts += 1
             task.lease_token = secrets.token_urlsafe(24)
             task.claimed_at, task.lease_expires_at = now, now + timedelta(seconds=LEASE_SECONDS)
-        result["task"] = {"id": task.id, "url": task.url, "lease_token": task.lease_token}
+        result["task"] = {"id": task.id, "url": task.url, "lease_token": task.lease_token, "mode": result["mode"]}
         return result
 
 
@@ -281,6 +336,14 @@ async def _stored_count(session: AsyncSession, url: str) -> int | None:
         if normalize_krisha_listing_url(row.url) == canonical and row.bathrooms_count is not None:
             return row.bathrooms_count
     return None
+
+
+async def _details_ready(session: AsyncSession, url: str, since: datetime | None = None) -> bool:
+    canonical = normalize_krisha_listing_url(url)
+    rows = (await session.execute(select(Listing.source_url, Listing.details_imported_at)
+            .where(Listing.source_url.contains(canonical.removeprefix("https://krisha.kz"), autoescape=True)))).all()
+    return any(normalize_krisha_listing_url(saved_url) == canonical and imported_at is not None
+               and (since is None or _aware(imported_at) >= _aware(since)) for saved_url, imported_at in rows)
 
 
 @router.post("/complete")
@@ -303,6 +366,10 @@ async def bathroom_check_complete(request: CompleteRequest) -> dict:
             job.status, job.message = "paused", "Проверка приостановлена: " + task.error
         else:
             count = await _stored_count(session, task.url)
+            if job.criteria.get("mode") == "details" and not await _details_ready(session, task.url, task.claimed_at):
+                count = None
+                job.status = "paused"
+                job.message = "Подробные данные объявления не получены. Проверьте расширение и нажмите «Продолжить»."
             task.status = "unknown" if count is None else "confirmed" if count >= 2 else "rejected"
         task.completed_at = now
         task.last_outcome = request.outcome

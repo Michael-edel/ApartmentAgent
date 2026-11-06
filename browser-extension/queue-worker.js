@@ -206,7 +206,7 @@
       return;
     }
     if (state.next_wake > Date.now()) { await schedule(state.next_wake - Date.now()); return; }
-    const claim = await api('/claim', {worker_id:state.worker_id});
+    const claim = await api('/claim', {worker_id:state.worker_id, extension_version:chrome.runtime.getManifest().version});
     if (!claim.task) {
       if (claim.status === 'running') await schedule((claim.wait_seconds || 30) * 1000);
       return;
@@ -220,7 +220,7 @@
       return;
     }
     state.job_id = claim.job_id;
-    state.task = {...claim.task, url, tab_id:null, started_at:Date.now()};
+    state.task = {...claim.task, url, mode:claim.mode || status.mode || 'bathrooms', tab_id:null, started_at:Date.now()};
     state.next_wake = 0;
     const kept = state.kept_tab_id ? await getTab(state.kept_tab_id) : null;
     const reuseAfterExplicitResume = kept && canonical(effectiveURL(kept)) === url && state.kept_tab_url === url;
@@ -250,15 +250,30 @@
       await poll();
     }),
     imported: (sender, payload) => run(async () => {
-      if (!senderIsTask(sender) || !Number.isInteger(payload?.bathrooms_count) || payload.bathrooms_count < 0) return;
+      if (!senderIsTask(sender)) return;
       const tab = await getTab(state.task.tab_id);
       if (!tab || canonical(effectiveURL(tab)) !== state.task.url) { await complete('blocked', 'Адрес вкладки изменился во время импорта'); return; }
-      state.unreadable_streak = 0;
+      state.task.last_imported = {
+        bathrooms_known:Number.isInteger(payload?.bathrooms_count) && payload.bathrooms_count >= 0,
+        details_extracted:payload?.details_extracted === true,
+      };
       await save();
-      await complete('imported');
+      // Keep the page open until the content script's full observation period:
+      // author, description and gallery can arrive after the first valid save.
+      return {observing:true, waiting_details:state.task.mode === 'details' && payload?.details_extracted !== true};
     }),
     finished: (sender, outcome, error, reason) => run(async () => {
       if (!senderIsTask(sender)) return;
+      if (outcome === 'imported') {
+        const latest = state.task.last_imported;
+        const accepted = state.task.mode === 'details' ? latest?.details_extracted : latest?.bathrooms_known;
+        if (accepted) { state.unreadable_streak = 0; await save(); await complete('imported'); return; }
+        outcome = 'unknown';
+        if (state.task.mode === 'details') {
+          reason = 'unreadable';
+          error = 'Не удалось прочитать полный блок характеристик, описания или автора объявления';
+        }
+      }
       if (outcome === 'unknown') {
         state.unreadable_streak = reason === 'unreadable' ? (state.unreadable_streak || 0) + 1 : 0;
         await save();

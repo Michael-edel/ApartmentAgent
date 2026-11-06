@@ -27,6 +27,8 @@
   let savedMessage = '';
   let queueNotified = false;
   let lastSavedBathrooms = null;
+  let waitingDetails = false;
+  let lastSavedDetails = false;
   const notifyQueue = (outcome, error = '', reason = '') => {
     if (queueNotified) return;
     queueNotified = true;
@@ -82,7 +84,9 @@
       notifyQueue('error', lastError);
     } else if (savedMessage) {
       show(savedMessage);
-      if (!Number.isInteger(lastSavedBathrooms)) notifyQueue('unknown');
+      if (waitingDetails && !lastSavedDetails) notifyQueue('unknown', 'Не удалось прочитать полный блок характеристик, описания или автора объявления', 'unreadable');
+      else if (lastSavedDetails || Number.isInteger(lastSavedBathrooms)) notifyQueue('imported');
+      else notifyQueue('unknown');
     } else {
       show(`ApartmentAgent: не удалось определить ${missing.length ? missing.join(', ') : 'данные объявления'}. Обновите страницу или используйте ручной ввод.`, true);
       const fields = missing.length ? missing.join(', ') : 'price_kzt, area_m2, rooms (данные недоступны)';
@@ -127,6 +131,8 @@
               succeeded.add(signature);
               lastError = '';
               lastSavedBathrooms = payload.bathrooms_count;
+              lastSavedDetails = payload.details_extracted === true;
+              waitingDetails = response.waiting_details === true;
               savedMessage = `ApartmentAgent: сохранено, рейтинг ${response.listing?.assessment?.score ?? '—'}/100. ${bathroomLabel(payload)}`;
               show(savedMessage);
             });

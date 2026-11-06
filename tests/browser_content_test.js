@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const extractorSource = fs.readFileSync('browser-extension/extractor.js', 'utf8');
 const contentSource = fs.readFileSync('browser-extension/content.js', 'utf8');
 
-function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyAt = 0, failures = 0, respond = true, failureMessage = 'Сервер недоступен', bodySuffix = '', mainHeading = null, captchaForm = null} = {}) {
+function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyAt = 0, failures = 0, respond = true, failureMessage = 'Сервер недоступен', bodySuffix = '', mainHeading = null, captchaForm = null, extraAt = () => ({}), detailsMode = false} = {}) {
   let now = 0;
   let sequence = 0;
   const tasks = [];
@@ -13,6 +13,7 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
   const outcomes = [];
   const reasons = [];
   const errors = [];
+  const events = [];
   const messages = [];
   const notices = [];
   const setTimeout = (callback, delay) => tasks.push({at: now + delay, sequence:sequence++, callback});
@@ -21,9 +22,15 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
     body:{get innerText() { return (now >= readyAt ? '4-комнатная квартира 100 м² Цена 45 000 000 ₸' : 'Загрузка объявления') + ' ' + bodySuffix + ' ' + notices.filter(node => !node.removed).map(node => node.textContent).join(' '); }, appendChild(node) { messages.push(node.textContent); notices.push(node); }},
     querySelector(selector) {return selector.startsWith('[data-apartment-agent-extension-message]') ? notices.find(node => !node.removed) || null : null;},
     querySelectorAll(selector) {
+      const extra = extraAt(now);
       if (selector.startsWith('[data-apartment-agent-extension-message]')) return notices.filter(node => !node.removed);
       if (selector === 'h1, [role="heading"][aria-level="1"]') return mainHeading ? [typeof mainHeading === 'string' ? {textContent:mainHeading} : mainHeading] : [];
       if (selector.startsWith('form[action*="captcha"')) return captchaForm ? [captchaForm] : [];
+      if (selector.startsWith('.offer__info-item')) return extra.properties || [];
+      if (selector.startsWith('.offer__description')) return extra.description ? [{textContent:extra.description}] : [];
+      if (selector.startsWith('[data-testid="seller"]')) return extra.author ? [{textContent:extra.author}] : [];
+      if (selector.startsWith('[data-testid="seller-name"]')) return extra.name ? [{textContent:extra.name}] : [];
+      if (selector.startsWith('.offer__photos img')) return extra.photos || [];
       const value = fieldAt(now);
       if (value && selector.startsWith('[data-testid="bathrooms"]')) return [{textContent:value}];
       return [];
@@ -31,11 +38,12 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
     createElement() {return {dataset:{}, style:{}, remove(){this.removed = true;}};},
   };
   const chrome = {runtime:{sendMessage(message, callback) {
-    if (message.type === 'apartment-agent-queue-finished') { outcomes.push(message.outcome); reasons.push(message.reason || ''); errors.push(message.error || ''); callback?.({ok:true}); return; }
-    posted.push(JSON.parse(JSON.stringify(message.payload)));
+    if (message.type === 'apartment-agent-queue-finished') { outcomes.push(message.outcome); reasons.push(message.reason || ''); errors.push(message.error || ''); events.push({at:now,outcome:message.outcome}); callback?.({ok:true}); return; }
+    const sent = JSON.parse(JSON.stringify(message.payload));
+    posted.push(sent);
     if (respond) setTimeout(() => callback(posted.length <= failures
       ? {ok:false, error:failureMessage}
-      : {ok:true, listing:{assessment:{score:95}}}), 50);
+      : {ok:true, waiting_details:detailsMode && !sent.details_extracted, observing:true, listing:{assessment:{score:95}}}), 50);
   }}};
   const context = {
     document, chrome, location:{href:'https://krisha.kz/a/show/fixture'}, URL,
@@ -56,7 +64,7 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
     }
     now = target;
   };
-  return {run, advance, extract, posted, messages, outcomes, reasons, errors, document};
+  return {run, advance, extract, posted, messages, outcomes, reasons, errors, events, document};
 }
 
 // Repeated extractor calls read the DOM at call time without reinjecting code.
@@ -71,6 +79,33 @@ stable.advance(14000);
 assert.equal(stable.posted.length, 1, 'one successful POST for an unchanged payload despite polling');
 assert.equal(stable.posted[0].floor, null, 'the rating 95/100 in our own banner must not become floor 95 of 100');
 assert.match(stable.messages.at(-1), /Санузлов: не менее 2/);
+assert.deepEqual(stable.outcomes,['imported']);
+assert.equal(stable.events[0].at,12000,'a queue tab remains open for the full observation interval');
+
+const lateDetails = fixture({detailsMode:true,extraAt:time => time < 3000 ? {} : {
+  properties:[{className:'offer__info-item',textContent:'Состояние квартиры хороший ремонт'}],
+  description:'Полное описание владельца, появившееся после загрузки страницы.',
+  author:'Автор объявления Хозяин недвижимости',name:'Айгуль',
+  photos:[{src:'https://images.example/late-photo.jpg'}],
+}});
+lateDetails.run();
+lateDetails.advance(11000);
+assert.equal(lateDetails.posted.length,2);
+assert.equal(lateDetails.posted[0].details_extracted,false);
+assert.equal(lateDetails.posted[1].details_extracted,true);
+assert.equal(lateDetails.posted[1].repair_condition,'хороший ремонт');
+assert.equal(lateDetails.posted[1].seller_name,'Айгуль');
+assert.equal(lateDetails.posted[1].photo_urls[0],'https://images.example/late-photo.jpg');
+assert.equal(lateDetails.outcomes.length,0,'do not close the queued page on its first valid save');
+lateDetails.advance(14000);
+assert.deepEqual(lateDetails.outcomes,['imported']);
+assert.equal(lateDetails.events[0].at,12000);
+
+const metadataOnlyDetails = fixture({detailsMode:true});
+metadataOnlyDetails.run();
+metadataOnlyDetails.advance(14000);
+assert.deepEqual(metadataOnlyDetails.outcomes,['unknown']);
+assert.deepEqual(metadataOnlyDetails.reasons,['unreadable'],'metadata-only payload is not a completed details check');
 
 const footer = fixture({bodySuffix:'Сайт защищён reCAPTCHA. Политика конфиденциальности.'});
 footer.run();

@@ -179,6 +179,8 @@ async def persist_listing(
     now = datetime.now(UTC)
     payload, twogis_checked, replace_twogis = await _enrich_twogis(payload, now=now)
     values = _values(payload)
+    if payload.details_extracted:
+        values["details_imported_at"] = now
     has_complex_description = bool(payload.complex_description)
     if has_complex_description:
         values['complex_description_observed_at'] = now
@@ -205,6 +207,7 @@ async def persist_listing(
             if not allow_existing:
                 raise ListingAlreadyExists("Listing with this URL already exists")
             old_price = row.price_kzt
+            protect_full_details = row.details_imported_at is not None and not payload.details_extracted and payload.source != "manual"
             complex_changed = bool(payload.residential_complex) and (
                 (payload.residential_complex or '').strip().casefold()
                 != (row.residential_complex or '').strip().casefold()
@@ -237,13 +240,17 @@ async def persist_listing(
                     continue
                 if key == "bathrooms_count_is_lower_bound" and payload.bathrooms_count is None:
                     continue
+                if key == "property_details" and not value:
+                    continue
+                if key == "description" and protect_full_details:
+                    continue
                 if key in {"source_url", "photo_urls", "twogis_checked_at"}:
                     continue
                 if value is not None:
                     setattr(row, key, value)
             if twogis_checked:
                 row.twogis_checked_at = now
-            if payload.photo_urls:
+            if payload.photo_urls and not protect_full_details:
                 row.photo_urls = payload.photo_urls
             row.last_imported_at = now
             if old_price != payload.price_kzt:

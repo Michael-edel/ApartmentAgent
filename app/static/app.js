@@ -63,12 +63,14 @@ const searchResults = document.querySelector('#searchResults');
 const reloadSearchResults = document.querySelector('#refreshSearchButton');
 const bathroomCheckPanel = document.querySelector('#bathroomCheckPanel');
 const bathroomCheckCounts = document.querySelector('#bathroomCheckCounts');
+const bathroomCheckMode = document.querySelector('#bathroomCheckMode');
 const bathroomCheckCriteria = document.querySelector('#bathroomCheckCriteria');
 const bathroomCheckProgress = document.querySelector('#bathroomCheckProgress');
 const bathroomCheckMessage = document.querySelector('#bathroomCheckMessage');
 const bathroomCheckCurrent = document.querySelector('#bathroomCheckCurrent');
 const bathroomCheckButtons = {
   start: document.querySelector('#startBathroomCheck'),
+  details: document.querySelector('#startDetailsCheck'),
   pause: document.querySelector('#pauseBathroomCheck'),
   resume: document.querySelector('#resumeBathroomCheck'),
   cancel: document.querySelector('#cancelBathroomCheck'),
@@ -131,7 +133,13 @@ function renderBathroomCheck(state) {
   const total = queueCount(state.total);
   const checked = queueCount(state.checked);
   const candidates = queueCount(state.candidate_count);
+  const detailsCandidates = queueCount(state.details_candidate_count);
+  const detailsMode = state.mode === 'details';
   const labels = {idle:'Готово к запуску', running:'Идёт проверка', paused:'Проверка на паузе', completed:'Проверка завершена', cancelled:'Проверка остановлена'};
+  if (bathroomCheckMode) {
+    bathroomCheckMode.hidden = !state.job_id;
+    bathroomCheckMode.textContent = state.job_id ? `Режим: ${detailsMode ? 'дополнение карточек' : 'проверка количества санузлов'}.` : '';
+  }
   if (bathroomCheckCriteria) {
     const criteria = state.criteria || {};
     const parts = [];
@@ -142,14 +150,16 @@ function renderBathroomCheck(state) {
     bathroomCheckCriteria.textContent = state.job_id && parts.length ? `Проверяются квартиры: ${parts.join(', ')}. Критерии сохранены при запуске проверки.` : '';
   }
   if (bathroomCheckCounts) bathroomCheckCounts.textContent = total
-    ? `Проверено: ${checked} из ${total}. Санузлов от 2: ${queueCount(state.confirmed)}. Санузлов меньше 2: ${queueCount(state.rejected)}. Без данных: ${queueCount(state.unknown)}. Ошибок: ${queueCount(state.failed)}. Осталось: ${queueCount(state.pending)}.`
-    : `Объявлений с неизвестным количеством санузлов: ${candidates}.`;
+    ? detailsMode
+      ? `Обработано: ${checked} из ${total}. Дополнено карточек: ${queueCount(state.enriched)}. Санузлов от 2: ${queueCount(state.confirmed)}. Санузлов меньше 2: ${queueCount(state.rejected)}. Без данных о санузлах: ${queueCount(state.unknown)}. Ошибок: ${queueCount(state.failed)}. Осталось: ${queueCount(state.pending)}.`
+      : `Проверено: ${checked} из ${total}. Санузлов от 2: ${queueCount(state.confirmed)}. Санузлов меньше 2: ${queueCount(state.rejected)}. Без данных: ${queueCount(state.unknown)}. Ошибок: ${queueCount(state.failed)}. Осталось: ${queueCount(state.pending)}.`
+    : `Объявлений с неизвестным количеством санузлов: ${candidates}. Карточек для дополнения: ${detailsCandidates}.`;
   if (bathroomCheckProgress) {
     bathroomCheckProgress.hidden = total === 0;
     bathroomCheckProgress.max = Math.max(total, 1);
     bathroomCheckProgress.value = Math.min(checked, total);
   }
-  const phase = running && checked === 0 && !state.current_url ? 'Ожидается подключение расширения' : labels[state.status];
+  const phase = running && checked === 0 && !state.current_url ? 'Ожидается подключение расширения' : running && detailsMode ? 'Идёт дополнение карточек' : labels[state.status];
   if (bathroomCheckMessage) bathroomCheckMessage.textContent = `${phase || 'Состояние проверки неизвестно'}.${state.message ? ` ${state.message}` : ''}`;
   if (bathroomCheckCurrent) {
     const currentUrl = safeExternalUrl(state.current_url);
@@ -161,6 +171,10 @@ function renderBathroomCheck(state) {
     bathroomCheckButtons.start.hidden = active;
     bathroomCheckButtons.start.disabled = bathroomCheckBusy || candidates === 0;
   }
+  if (bathroomCheckButtons.details) {
+    bathroomCheckButtons.details.hidden = active;
+    bathroomCheckButtons.details.disabled = bathroomCheckBusy || detailsCandidates === 0;
+  }
   if (bathroomCheckButtons.pause) bathroomCheckButtons.pause.hidden = !running;
   if (bathroomCheckButtons.resume) bathroomCheckButtons.resume.hidden = !paused;
   if (bathroomCheckButtons.cancel) bathroomCheckButtons.cancel.hidden = !active;
@@ -170,7 +184,7 @@ function renderBathroomCheck(state) {
 }
 
 function updateBathroomCheck(state) {
-  const nextSignature = `${state.job_id || ''}:${state.status}:${queueCount(state.checked)}`;
+  const nextSignature = `${state.job_id || ''}:${state.mode || 'bathrooms'}:${state.status}:${queueCount(state.checked)}`;
   const changed = bathroomCheckSignature !== null && bathroomCheckSignature !== nextSignature;
   bathroomCheckSignature = nextSignature;
   renderBathroomCheck(state);
@@ -199,13 +213,16 @@ async function loadBathroomCheckStatus() {
   }
 }
 
-async function controlBathroomCheck(action) {
+async function controlBathroomCheck(action, mode = 'bathrooms') {
   if (bathroomCheckBusy) return;
   bathroomCheckRevision += 1;
   bathroomCheckBusy = true;
   if (bathroomCheckState) renderBathroomCheck(bathroomCheckState);
   try {
-    const response = await fetch(`${bathroomCheckApi}/${action}`, {method:'POST'});
+    const options = action === 'start'
+      ? {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({mode})}
+      : {method:'POST'};
+    const response = await fetch(`${bathroomCheckApi}/${action}`, options);
     const state = await readJson(response);
     if (!response.ok) throw new Error(state.detail || 'Не удалось изменить состояние автопроверки');
     updateBathroomCheck(state);
@@ -224,7 +241,7 @@ async function controlBathroomCheck(action) {
 }
 
 for (const [action, button] of Object.entries(bathroomCheckButtons)) {
-  button?.addEventListener('click', () => { void controlBathroomCheck(action); });
+  button?.addEventListener('click', () => { void controlBathroomCheck(action === 'details' ? 'start' : action, action === 'details' ? 'details' : 'bathrooms'); });
 }
 if (bathroomCheckPanel) {
   void loadBathroomCheckStatus();
@@ -338,6 +355,10 @@ async function loadComparisons() {
 }
 
 function render(listings) {
+  const openDetails = new Set();
+  grid?.querySelectorAll('article[id^="listing-"] details[data-details-key][open]').forEach(detail => {
+    openDetails.add(`${detail.closest('article').id}:${detail.dataset.detailsKey}`);
+  });
   savedUrls = new Set(listings.map(item => normalizeUrl(item.source_url)));
   savedListingIds = new Map(listings.map(item => [normalizeUrl(item.source_url), item.id]));
   const minScore = Number(filter?.value || 0);
@@ -367,19 +388,23 @@ function render(listings) {
       ? `https://yandex.ru/map-widget/v1/?ll=${encodeURIComponent(`${item.longitude},${item.latitude}`)}&z=16&pt=${encodeURIComponent(`${item.longitude},${item.latitude},pm2rdm`)}&l=map`
       : null;
     const scoreClass = item.assessment.score < 85 ? 'medium' : '';
-    const photos = (item.photo_urls || []).slice(0, 4);
+    const photos = [...new Set((Array.isArray(item.photo_urls) ? item.photo_urls : []).map(safeExternalUrl).filter(Boolean))];
+    const previewPhotos = photos.slice(0, 4);
     const ai = item.ai_analysis || {};
     const history = item.price_history || [];
     const latestChange = history[0]?.change_kzt;
     const mortgage = item.mortgage_supported === true ? 'Указана' : item.mortgage_supported === false ? 'Не предусмотрена' : 'Не указана';
     const seller = [item.seller_name, item.seller_type].filter(Boolean).join(' · ') || 'Не указан';
+    const propertyDetails = item.property_details && typeof item.property_details === 'object' && !Array.isArray(item.property_details)
+      ? Object.entries(item.property_details).filter(([key, value]) => key.trim() && typeof value === 'string' && value.trim()) : [];
     const complexDescriptionUrl = safeExternalUrl(item.complex_description_source_url);
     const complexDescriptionSource = ({listing:'Объявление', developer:'Сайт застройщика', manual:'Ручной ввод'})[item.complex_description_source_kind] || 'Источник не указан';
     const twogisRating = Number(item.twogis_rating);
     const twogisReviews = Number(item.twogis_review_count || 0);
     const twogisLine = item.twogis_name ? `<div class="twogis-review"><b>2GIS</b> ${Number.isFinite(twogisRating) && twogisReviews ? `★ ${twogisRating.toFixed(1)}/5 · ${twogisReviews} отзывов` : 'оценка и отзывы не опубликованы'}${item.twogis_url ? ` · <a href="${escapeHtml(item.twogis_url)}" target="_blank" rel="noopener noreferrer">Открыть в 2GIS →</a>` : ''}</div>` : '';
     return `<article class="listing card" id="listing-${item.id}" tabindex="-1" aria-label="Карточка квартиры: ${escapeHtml(title)}">
-      ${photos.length ? `<div class="listing-photos">${photos.map((photo, index) => `<img class="listing-photo ${index ? 'thumbnail' : ''}" src="${escapeHtml(photo)}" alt="Фото квартиры ${index + 1}" loading="lazy" referrerpolicy="no-referrer">`).join('')}</div>` : ''}
+      ${previewPhotos.length ? `<div class="listing-photos">${previewPhotos.map((photo, index) => `<img class="listing-photo ${index ? 'thumbnail' : ''}" src="${escapeHtml(photo)}" alt="Фото квартиры ${index + 1}" loading="lazy" referrerpolicy="no-referrer">`).join('')}</div>` : ''}
+      ${photos.length ? `<details class="listing-all-photos" data-details-key="photos"><summary>Все фотографии (${photos.length})</summary><div class="listing-gallery">${photos.map((photo, index) => `<a href="${escapeHtml(photo)}" target="_blank" rel="noopener noreferrer" aria-label="Открыть фото ${index + 1} в новой вкладке"><img src="${escapeHtml(photo)}" alt="Фото квартиры ${index + 1}" loading="lazy" referrerpolicy="no-referrer"><span>Фото ${index + 1} ↗</span></a>`).join('')}</div></details>` : ''}
       <div class="listing-top"><div><h3>${escapeHtml(title)}</h3><div class="meta">${escapeHtml(location)}</div></div><div class="rating ${scoreClass}">${item.assessment.score}</div></div>
       <div class="price">${money.format(item.price_kzt)}</div>
       <div class="meta">${item.rooms} комн. · ${number.format(item.area_m2)} м² · ${money.format(item.assessment.price_per_m2)}/м² · этаж ${item.floor || '—'}/${item.floors_total || '—'}</div>
@@ -387,18 +412,23 @@ function render(listings) {
       ${mapWidgetUrl ? `<div class="listing-map"><iframe src="${escapeHtml(mapWidgetUrl)}" title="Расположение квартиры: ${escapeHtml(title)}" loading="lazy" allowfullscreen></iframe></div>` : ''}
       ${mapUrl ? `<a class="location-link" href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener noreferrer">${hasCoordinates ? 'Открыть большую карту' : 'Найти адрес на карте'} →</a>${hasCoordinates ? '<p class="meta map-fallback">Если карта не загрузилась, воспользуйтесь ссылкой выше.</p>' : '<p class="meta">Координаты не получены. Карта найдёт дом по указанному адресу.</p>'}` : ''}
       ${locationMissing ? '<div class="meta location-missing">Адрес и координаты не указаны</div>' : ''}
-      <div class="listing-details"><div>${bathroomBadge(item)}</div><div><b>Ипотека:</b> ${mortgage}</div><div><b>Автор объявления:</b> ${escapeHtml(seller)}</div></div>
+      <div class="listing-details"><div>${bathroomBadge(item)}</div><div><b>Состояние / ремонт:</b> ${escapeHtml(item.repair_condition || 'Не указано')}</div><div><b>Ипотека:</b> ${mortgage}</div><div><b>Автор объявления:</b> ${escapeHtml(seller)}</div></div>
       ${item.building_year || item.building_type ? `<div class="meta">${item.building_year ? `Построен ${item.building_year}` : ''}${item.building_year && item.building_type ? ' · ' : ''}${escapeHtml(item.building_type || '')}</div>` : ''}
       ${twogisLine}
-      <details class="complex-description"><summary>Описание ЖК</summary>${item.complex_description ? `<p style="white-space:pre-wrap">${escapeHtml(item.complex_description)}</p><p class="meta">${escapeHtml(complexDescriptionSource)}${complexDescriptionUrl ? ` · <a href="${escapeHtml(complexDescriptionUrl)}" target="_blank" rel="noopener noreferrer">Источник →</a>` : ''}${item.complex_description_observed_at ? ` · получено ${escapeHtml(dateTime.format(new Date(item.complex_description_observed_at)))}` : ''}</p>` : '<p class="meta">Описание ЖК не получено. Его можно добавить из объявления, сайта застройщика или вручную.</p>'}</details>
+      <details class="seller-description" data-details-key="seller-description"><summary>Описание объявления</summary>${item.description ? `<p class="seller-description-text">${escapeHtml(item.description)}</p>` : '<p class="meta">Описание объявления не получено.</p>'}</details>
+      <details class="property-details" data-details-key="property-details"><summary>Все характеристики (${propertyDetails.length})</summary>${propertyDetails.length ? `<dl class="property-details-list">${propertyDetails.map(([key, value]) => `<div><dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl>` : '<p class="meta">Дополнительные характеристики не получены.</p>'}${item.details_imported_at ? `<p class="meta">Характеристики получены ${escapeHtml(dateTime.format(new Date(item.details_imported_at)))}</p>` : ''}</details>
+      <details class="complex-description" data-details-key="complex-description"><summary>Описание ЖК</summary>${item.complex_description ? `<p style="white-space:pre-wrap">${escapeHtml(item.complex_description)}</p><p class="meta">${escapeHtml(complexDescriptionSource)}${complexDescriptionUrl ? ` · <a href="${escapeHtml(complexDescriptionUrl)}" target="_blank" rel="noopener noreferrer">Источник →</a>` : ''}${item.complex_description_observed_at ? ` · получено ${escapeHtml(dateTime.format(new Date(item.complex_description_observed_at)))}` : ''}</p>` : '<p class="meta">Описание ЖК не получено. Его можно добавить из объявления, сайта застройщика или вручную.</p>'}</details>
       ${latestChange ? `<div class="price-change ${latestChange < 0 ? 'down' : 'up'}">${latestChange < 0 ? '↓' : '↑'} ${money.format(Math.abs(latestChange))} между последними записями</div>` : ''}
-      <details class="price-history"><summary>История цены (${history.length})</summary>${history.length ? `<ol>${history.map(snapshot => `<li>${escapeHtml(dateTime.format(new Date(snapshot.observed_at)))} — ${escapeHtml(money.format(snapshot.price_kzt))}${snapshot.change_kzt ? ` (${snapshot.change_kzt > 0 ? '+' : '−'}${escapeHtml(money.format(Math.abs(snapshot.change_kzt)))})` : ''}</li>`).join('')}</ol>` : '<p>Пока нет записей о цене.</p>'}</details>
+      <details class="price-history" data-details-key="price-history"><summary>История цены (${history.length})</summary>${history.length ? `<ol>${history.map(snapshot => `<li>${escapeHtml(dateTime.format(new Date(snapshot.observed_at)))} — ${escapeHtml(money.format(snapshot.price_kzt))}${snapshot.change_kzt ? ` (${snapshot.change_kzt > 0 ? '+' : '−'}${escapeHtml(money.format(Math.abs(snapshot.change_kzt)))})` : ''}</li>`).join('')}</ol>` : '<p>Пока нет записей о цене.</p>'}</details>
       <span class="verdict">${escapeHtml(item.assessment.verdict)}</span>
       ${ai.summary ? `<div class="ai-summary"><b>AI-анализ</b><p>${escapeHtml(ai.summary)}</p></div>` : ''}
       <div class="listing-actions"><button class="check-listing secondary-action" data-listing-id="${item.id}" type="button">↻ Проверить квартиру</button></div>
       ${sourceUrl ? `<a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">Открыть объявление →</a>` : ''}
     </article>`;
   }).join('');
+  grid.querySelectorAll('article[id^="listing-"] details[data-details-key]').forEach(detail => {
+    detail.open = openDetails.has(`${detail.closest('article').id}:${detail.dataset.detailsKey}`);
+  });
 }
 
 async function checkListingNow(id, button) {
@@ -698,6 +728,8 @@ form?.addEventListener('submit', async event => {
   const data = new FormData(form);
   const payload = {
     source:'manual', source_url:data.get('source_url'), title:data.get('title') || '2-комнатная квартира в Астане', city:'Астана',
+    description:data.get('description')?.trim() || null,
+    repair_condition:data.get('repair_condition')?.trim() || null,
     district:data.get('district') || null, residential_complex:data.get('residential_complex') || null,
     complex_description:data.get('complex_description')?.trim() || null,
     complex_description_source_kind:data.get('complex_description')?.trim() ? data.get('complex_description_source_kind') : null,

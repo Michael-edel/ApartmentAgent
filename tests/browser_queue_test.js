@@ -14,7 +14,7 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
       local:{async get(key) {return {[key]:clone(env.storage[key])};}, async set(values) {Object.assign(env.storage,clone(values));}},
       sync:{async get() {return {enabled:true,apiOrigin:'http://localhost:8000'};}},
     },
-    runtime:{getURL:path => `chrome-extension://fixture/${path}`},
+    runtime:{getURL:path => `chrome-extension://fixture/${path}`,getManifest:() => ({version:'0.2.0'})},
     alarms:{
       async create(name, value) {env.alarms.set(name, clone(value));},
       async clear(name) {return env.alarms.delete(name);},
@@ -46,7 +46,7 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
     const path = url.slice('http://localhost:8000/api/v1/search/bathroom-check'.length);
     const body = options.body ? JSON.parse(options.body) : null;
     env.requests.push({path,body});
-    let result = {job_id:env.jobId,status:env.status,current_url:env.lease?.url || null};
+    let result = {job_id:env.jobId,status:env.status,current_url:env.lease?.url || null,mode:env.mode || 'bathrooms'};
     if (path === '/claim') {
       if (!env.lease && env.status === 'running') env.lease = env.tasks.shift() || null;
       result = {...result,task:env.lease,wait_seconds:15};
@@ -128,6 +128,9 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   await worker.imported({tab:{id:tabId}}, {bathrooms_count:null});
   assert.equal(env.outcomes.length, 0, 'unknown fields wait for the content deadline');
   await worker.imported({tab:{id:tabId}}, {bathrooms_count:2});
+  assert.equal(env.outcomes.length, 0, 'even a known bathroom waits for late author/description/gallery');
+  assert.ok(env.tabs.has(tabId));
+  await worker.finished({tab:{id:tabId}}, 'imported');
   assert.deepEqual(env.outcomes, ['imported']);
   assert.deepEqual(env.removed, [tabId]);
   assert.equal(env.state().task, null);
@@ -146,6 +149,7 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   await pauseWorker.kick(appSender);
   assert.ok(paused.tabs.has(pausedId), 'pause must not close the current leased page');
   await pauseWorker.imported({tab:{id:pausedId}}, {bathrooms_count:1});
+  await pauseWorker.finished({tab:{id:pausedId}}, 'imported');
   assert.deepEqual(paused.outcomes, ['imported']);
   paused.now += 30000;
   await pauseWorker.kick(appSender);
@@ -312,6 +316,7 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
     const knownWorker = reset.worker();
     await knownWorker.start();
     await knownWorker.imported({tab:{id:reset.state().task.tab_id}}, {bathrooms_count:2});
+    await knownWorker.finished({tab:{id:reset.state().task.tab_id}}, 'imported');
     assert.equal(reset.state().unreadable_streak, 0);
   }
 
@@ -339,6 +344,7 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
 
   // Existing ordinary import still saves public fields and returns its card.
   let backgroundListener;
+  let rejectImport = false;
   const importHooks = [];
   vm.runInNewContext(fs.readFileSync('browser-extension/background.js', 'utf8'), {
     importScripts() {},
@@ -351,7 +357,9 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
     async fetch(url, options) {
       assert.equal(url, 'http://localhost:8000/api/v1/listings/browser-import');
       assert.equal(JSON.parse(options.body).bathrooms_count, 2);
-      return {ok:true, async json() {return {id:7,bathrooms_count:2,assessment:{score:95}};}};
+      return rejectImport
+        ? {ok:false,status:422,async json() {return {detail:[{loc:['body','floor'],msg:'floor cannot exceed floors_total',input:'sensitive-test-input'}]};}}
+        : {ok:true, async json() {return {id:7,bathrooms_count:2,assessment:{score:95}};}};
     },
   });
   const ordinaryResponse = await new Promise(resolve => backgroundListener({type:'apartment-agent-import',payload:{bathrooms_count:2}}, {tab:{id:77}}, resolve));
@@ -359,6 +367,35 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   assert.equal(ordinaryResponse.listing.id, 7);
   assert.equal(importHooks[0].sender.tab.id, 77);
   assert.equal(importHooks[0].payload.bathrooms_count, 2);
+  rejectImport = true;
+  const badResponse = await new Promise(resolve => backgroundListener({type:'apartment-agent-import',payload:{bathrooms_count:2}}, {tab:{id:77}}, resolve));
+  assert.equal(badResponse.ok,false);
+  assert.match(badResponse.error,/floor: floor cannot exceed floors_total/);
+  assert.doesNotMatch(badResponse.error,/object Object|sensitive-test-input/);
+
+  const details = environment();
+  details.mode = 'details';
+  const detailsWorker = details.worker();
+  await detailsWorker.start();
+  assert.equal(details.requests.find(item => item.path === '/claim').body.extension_version,'0.2.0');
+  const detailId = details.state().task.tab_id;
+  const pendingDetail = await detailsWorker.imported({tab:{id:detailId}}, {bathrooms_count:2,details_extracted:false});
+  assert.equal(pendingDetail.waiting_details,true);
+  assert.equal(details.outcomes.length,0);
+  await detailsWorker.imported({tab:{id:detailId}}, {bathrooms_count:2,details_extracted:true});
+  assert.equal(details.outcomes.length,0,'full details still wait for the 12 second observation finish');
+  await detailsWorker.finished({tab:{id:detailId}},'imported');
+  assert.deepEqual(details.outcomes,['imported']);
+  assert.equal(details.tabs.has(detailId),false);
+
+  const detailsUnknownBath = environment();
+  detailsUnknownBath.mode = 'details';
+  const unknownBathDetailsWorker = detailsUnknownBath.worker();
+  await unknownBathDetailsWorker.start();
+  const unknownBathId = detailsUnknownBath.state().task.tab_id;
+  await unknownBathDetailsWorker.imported({tab:{id:unknownBathId}}, {bathrooms_count:null,details_extracted:true});
+  await unknownBathDetailsWorker.finished({tab:{id:unknownBathId}},'imported');
+  assert.deepEqual(detailsUnknownBath.outcomes,['imported'],'details mode accepts a fully read page even when bath count is genuinely absent');
 
   // Server complete committed, then MV3 died before persisting task=null.
   for (const pausedAfterComplete of [false,true]) {

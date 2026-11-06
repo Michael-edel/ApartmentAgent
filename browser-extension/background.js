@@ -1,6 +1,14 @@
 importScripts('queue-worker.js');
 
 const DEFAULTS = {enabled: true, apiOrigin: ''};
+const importError = (detail, status) => {
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) return detail.map(item => {
+    const field = Array.isArray(item?.loc) ? item.loc.filter(part => part !== 'body').join('.') : '';
+    return `${field ? `${field}: ` : ''}${typeof item?.msg === 'string' ? item.msg : 'некорректное значение'}`;
+  }).join('; ').slice(0,1000);
+  return `HTTP ${status}: сервер отклонил данные объявления`;
+};
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.storage.sync.get(DEFAULTS, current => {
@@ -37,9 +45,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         body: JSON.stringify(message.payload),
       });
       const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
-      await ApartmentAgentBathroomQueue.imported(sender, message.payload);
-      sendResponse({ok: true, listing: body});
+      if (!response.ok) throw new Error(importError(body.detail, response.status));
+      const queue = await ApartmentAgentBathroomQueue.imported(sender, message.payload);
+      sendResponse({ok: true, listing: body, waiting_details:queue?.waiting_details === true, observing:queue?.observing === true});
     } catch (error) {
       sendResponse({ok: false, error: error instanceof Error ? error.message : 'Ошибка импорта'});
     }
