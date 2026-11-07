@@ -10,6 +10,7 @@
 .listing .twogis-review a{display:inline;margin:0;font-size:12px}
 .form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
 .search-price-control{margin-top:12px}
+.pledge-flag,.search-facts .pledge-flag{display:inline-block;padding:3px 8px;border:1px solid #fecaca;border-radius:8px;background:#fef2f2;color:#991b1b;font-weight:700}
 @media(max-width:420px){.form-grid{grid-template-columns:1fr}}
 .price-comparison{margin-top:14px;padding:12px;border:1px solid var(--line);border-radius:14px;background:#f8fafc;color:#46576b;font-size:13px;line-height:1.4}.price-comparison>b{color:#17365d}.price-comparison p{margin:5px 0 9px}.price-comparison>small{display:block;margin-top:9px;color:var(--muted)}.comparison-row{display:flex;justify-content:space-between;gap:10px;padding:5px 0;flex-wrap:wrap}.comparison-row b{color:#17365d}.comparison-row small{color:var(--muted)}
 .checkbox{display:flex!important;align-items:center;gap:8px}.checkbox input{width:20px;height:20px;flex:none}

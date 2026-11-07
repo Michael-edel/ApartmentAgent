@@ -4,7 +4,7 @@ from sqlalchemy.engine import Connection
 # create_all intentionally remains the first step; these definitions only cover
 # columns introduced after the initial MVP schema was deployed.
 _COLUMNS: dict[str, dict[str, str]] = {
-    "search_preferences": {"max_price_kzt": "BIGINT", "min_area_m2": "DOUBLE PRECISION", "max_area_m2": "DOUBLE PRECISION", "min_bathrooms": "INTEGER"},
+    "search_preferences": {"max_price_kzt": "BIGINT", "min_area_m2": "DOUBLE PRECISION", "max_area_m2": "DOUBLE PRECISION", "min_bathrooms": "INTEGER", "exclude_pledged": "BOOLEAN"},
     "listings": {
         "complex_description": "TEXT",
         "complex_description_source_url": "TEXT",
@@ -23,6 +23,7 @@ _COLUMNS: dict[str, dict[str, str]] = {
         "repair_evidence": "VARCHAR(500)",
         "mortgage_source_kind": "VARCHAR(20)",
         "mortgage_evidence": "VARCHAR(500)",
+        "is_pledged": "BOOLEAN",
         "property_details": "JSON NOT NULL DEFAULT '{}'",
         "details_imported_at": "TIMESTAMP WITH TIME ZONE",
         "seller_name": "VARCHAR(200)",
@@ -43,6 +44,7 @@ _COLUMNS: dict[str, dict[str, str]] = {
     "price_snapshots": {"price_per_m2": "BIGINT"},
     "search_results": {
         "mortgage_supported": "BOOLEAN",
+        "is_pledged": "BOOLEAN",
         "bathrooms_count": "INTEGER",
         "bathrooms_count_is_lower_bound": "BOOLEAN NOT NULL DEFAULT FALSE",
         "import_status": "VARCHAR(30) DEFAULT 'pending'",

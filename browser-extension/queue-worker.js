@@ -282,7 +282,7 @@
           const detail = String(error || '').slice(0, 600);
           await complete('error', `Три страницы подряд не передали обязательные данные. Проверьте доступ к объявлениям и настройки расширения.${detail ? ` Последняя страница: ${detail}` : ''}`);
         }
-        else await complete('unknown', String(error || '').slice(0, 1000));
+        else await complete(reason === 'unavailable' ? 'unavailable' : 'unknown', String(error || '').slice(0, 1000));
       }
       else await complete(outcome === 'blocked' ? 'blocked' : 'error', String(error || 'Не удалось прочитать объявление').slice(0, 1000));
     }),

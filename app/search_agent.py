@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from app.config import get_settings
 from app.database import SessionLocal
 from app.importer import ListingImportError, import_krisha_listing
-from app.krisha_search import KrishaSearchBlocked
+from app.krisha_search import KrishaSearchBlocked, normalize_krisha_listing_url
 from app.listing_service import persist_listing, sync_search_result_facts
 from app.models import Listing, SearchHistory, SearchPreference, SearchResult
 from app.mortgage import parse_mortgage_text
@@ -42,7 +42,8 @@ class SearchImportCandidate:
     url: str
 
 
-def _priority(title: str, snippet: str | None, mortgage_supported: bool | None = None) -> str:
+def _priority(title: str, snippet: str | None, mortgage_supported: bool | None = None,
+              is_pledged: bool | None = None) -> str:
     result = analyze_search_result(
         title,
         snippet,
@@ -51,6 +52,7 @@ def _priority(title: str, snippet: str | None, mortgage_supported: bool | None =
         max_area=settings.max_area_m2,
         target_rooms=settings.target_rooms,
         mortgage_supported=mortgage_supported,
+        is_pledged=is_pledged,
     )
     if result["score"] >= 85:
         return "urgent"
@@ -82,7 +84,13 @@ def _row_matches_target(row: SearchResult) -> bool:
     ))
 
 
-def _row_matches_basic(row: SearchResult) -> bool:
+def _row_hidden_by_pledge(row: SearchResult) -> bool:
+    return settings.exclude_pledged and getattr(row, "is_pledged", None) is True
+
+
+def _row_matches_basic(row: SearchResult, *, include_pledged: bool = False) -> bool:
+    if not include_pledged and _row_hidden_by_pledge(row):
+        return False
     return is_target_search_result(
         row.title,
         row.snippet,
@@ -112,12 +120,20 @@ async def _save_items(
         if _matches_target(item):
             accepted_by_url[item.url] = item
     accepted_items = list(accepted_by_url.values())
+    accepted_count = len(accepted_items)
     new_found = 0
     candidates: list[SearchImportCandidate] = []
     now = datetime.now(UTC)
     async with SessionLocal() as session:
+        known_pledges = {
+            normalize_krisha_listing_url(url) or url: status
+            for url, status in (await session.execute(
+                select(Listing.source_url, Listing.is_pledged).where(Listing.is_pledged.is_not(None))
+            )).all()
+        } if accepted_items else {}
         for item in accepted_items:
             existing = await session.scalar(select(SearchResult).where(SearchResult.url == item.url))
+            is_pledged = known_pledges.get(normalize_krisha_listing_url(item.url) or item.url)
             bathrooms_count = parse_bathrooms_count(f"{item.title or ''} {item.snippet or ''}")
             mortgage_supported = parse_mortgage_text(f"{item.title or ''} {item.snippet or ''}")
             if existing:
@@ -129,11 +145,16 @@ async def _save_items(
                 else:
                     existing.title = item.title or existing.title
                     existing.snippet = item.snippet or existing.snippet
+                    if is_pledged is not None:
+                        existing.is_pledged = is_pledged
                     if mortgage_supported is not None:
                         existing.mortgage_supported = mortgage_supported
                     if bathrooms_count is not None:
                         existing.bathrooms_count = bathrooms_count
                         existing.bathrooms_count_is_lower_bound = bathrooms_is_lower_bound(f"{item.title or ''} {item.snippet or ''}")
+                if _row_hidden_by_pledge(existing):
+                    accepted_count -= 1
+                    continue
                 if existing.import_status != "imported" or existing.imported_listing_id is None:
                     candidates.append(SearchImportCandidate(result_id=existing.id, url=existing.url))
                 continue
@@ -145,28 +166,32 @@ async def _save_items(
                 snippet=item.snippet,
                 bathrooms_count=bathrooms_count,
                 mortgage_supported=mortgage_supported,
+                is_pledged=is_pledged,
                 bathrooms_count_is_lower_bound=bathrooms_is_lower_bound(f"{item.title or ''} {item.snippet or ''}"),
-                status=f"new:{_priority(item.title, item.snippet)}",
+                status=f"new:{_priority(item.title, item.snippet, mortgage_supported, is_pledged)}",
             )
             session.add(row)
             await session.flush()
+            if _row_hidden_by_pledge(row):
+                accepted_count -= 1
+                continue
             candidates.append(SearchImportCandidate(result_id=row.id, url=row.url))
             new_found += 1
         session.add(
             SearchHistory(
                 search_engine=provider_name,
                 query=query,
-                total_found=len(accepted_items),
+                total_found=accepted_count,
                 new_found=new_found,
                 status="ok",
                 message=(
-                    f"Отфильтровано в текущей выдаче: {len(items) - len(accepted_items)}; "
-                    f"принято: {len(accepted_items)}"
+                    f"Отфильтровано в текущей выдаче: {len(items) - accepted_count}; "
+                    f"принято: {accepted_count}"
                 ),
             )
         )
         await session.commit()
-    return new_found, len(accepted_items), candidates
+    return new_found, accepted_count, candidates
 
 
 async def _mark_import_result(
@@ -269,10 +294,10 @@ async def _fetch_one(
 
 async def run_search(rooms: int | None = None, max_price_kzt: int | None = None,
                      min_area_m2: float | None = None, max_area_m2: float | None = None,
-                     min_bathrooms: int | None = None) -> SearchSummary:
+                     min_bathrooms: int | None = None, exclude_pledged: bool | None = None) -> SearchSummary:
     async with _search_lock:
-        if rooms is not None or max_price_kzt is not None or min_area_m2 is not None or max_area_m2 is not None or min_bathrooms is not None:
-            await save_search_preference(rooms, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms)
+        if any(value is not None for value in (rooms, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms, exclude_pledged)):
+            await save_search_preference(rooms, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms, exclude_pledged)
         return await _run_search()
 
 
@@ -359,9 +384,13 @@ async def get_search_status() -> dict[str, object]:
 
     async with SessionLocal() as session:
         total = new_total = imported_total = found_hour = found_today = urgent = bathrooms_unconfirmed = 0
+        pledged_hidden = 0
         engine_counts: dict[str, int] = {}
         matching_rows = await session.stream_scalars(select(SearchResult))
         async for row in matching_rows:
+            if _row_hidden_by_pledge(row):
+                pledged_hidden += int(_row_matches_basic(row, include_pledged=True))
+                continue
             if settings.min_bathrooms and _row_matches_basic(row) and bathrooms_for_row(row) is None:
                 bathrooms_unconfirmed += 1
             if not _row_matches_target(row):
@@ -370,9 +399,11 @@ async def get_search_status() -> dict[str, object]:
             is_new = row.status.startswith("new:")
             new_total += int(is_new)
             imported_total += int(row.import_status == "imported")
-            found_hour += int(row.first_seen >= hour_ago)
-            found_today += int(row.first_seen >= day_start)
-            urgent += int(is_new and _priority(row.title or "", row.snippet, getattr(row, 'mortgage_supported', None)) == "urgent")
+            first_seen = row.first_seen if row.first_seen.tzinfo else row.first_seen.replace(tzinfo=UTC)
+            found_hour += int(first_seen >= hour_ago)
+            found_today += int(first_seen >= day_start)
+            urgent += int(is_new and _priority(row.title or "", row.snippet, getattr(row, "mortgage_supported", None),
+                                              getattr(row, "is_pledged", None)) == "urgent")
             engine_counts[row.search_engine] = engine_counts.get(row.search_engine, 0) + 1
         last_run = await session.scalar(select(func.max(SearchHistory.searched_at)))
         latest_history = (
@@ -408,6 +439,8 @@ async def get_search_status() -> dict[str, object]:
         "min_area_m2": settings.min_area_m2,
         "max_area_m2": settings.max_area_m2,
         "min_bathrooms": settings.min_bathrooms,
+        "exclude_pledged": settings.exclude_pledged,
+        "pledged_hidden_results": pledged_hidden,
         "bathrooms_unconfirmed_results": bathrooms_unconfirmed,
         "enabled": settings.search_enabled,
         "providers": settings.search_providers,
@@ -440,11 +473,13 @@ async def load_search_preference() -> None:
             settings.max_area_m2 = preference.max_area_m2
         if preference and preference.min_bathrooms in (0, 2):
             settings.min_bathrooms = preference.min_bathrooms
+        if preference and preference.exclude_pledged is not None:
+            settings.exclude_pledged = preference.exclude_pledged
 
 
 async def save_search_preference(rooms: int | None, max_price_kzt: int | None = None,
                                  min_area_m2: float | None = None, max_area_m2: float | None = None,
-                                 min_bathrooms: int | None = None) -> None:
+                                 min_bathrooms: int | None = None, exclude_pledged: bool | None = None) -> None:
     async with SessionLocal() as session:
         preference = await session.get(SearchPreference, 1)
         if preference is None:
@@ -459,6 +494,8 @@ async def save_search_preference(rooms: int | None, max_price_kzt: int | None = 
             preference.max_area_m2 = max_area_m2
         if min_bathrooms is not None:
             preference.min_bathrooms = min_bathrooms
+        if exclude_pledged is not None:
+            preference.exclude_pledged = exclude_pledged
         await session.commit()
     if rooms is not None:
         settings.target_rooms = rooms
@@ -466,6 +503,8 @@ async def save_search_preference(rooms: int | None, max_price_kzt: int | None = 
         settings.max_price_kzt = max_price_kzt
     if min_bathrooms is not None:
         settings.min_bathrooms = min_bathrooms
+    if exclude_pledged is not None:
+        settings.exclude_pledged = exclude_pledged
     if min_area_m2 is not None and max_area_m2 is not None:
         settings.min_area_m2 = min_area_m2
         settings.max_area_m2 = max_area_m2

@@ -59,6 +59,9 @@ def assess_listing(listing: ListingCreate, settings: Settings) -> ListingAssessm
     if listing.mortgage_supported is False:
         score -= 25
         reasons.append("В объявлении указано: ипотека недоступна")
+    if listing.is_pledged is True:
+        score -= 25
+        reasons.append("В залоге")
 
     if listing.twogis_rating is not None:
         review_count = listing.twogis_review_count or 0

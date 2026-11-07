@@ -79,6 +79,56 @@ def test_scope_matches_advert_and_never_seller_id_or_other_advert():
     assert _scoped_json([{"id": 456, "url": URL, "price": 99}], URL) == []
 
 
+def test_matching_ids_inside_nearby_or_broker_branches_are_not_adverts():
+    foreign = {"id": 123, "url": URL, "price": 1_000_000, "mortgageSupported": False}
+    assert _scoped_json([{"nearbyListings": [foreign], "broker_profile": {"listing": foreign}}], URL) == []
+
+
+@pytest.mark.asyncio
+async def test_semantic_property_id_and_nonempty_owner_are_used(html_response):
+    advert = rich_advert()
+    advert.update(seller={}, owner={"seller_name": "Анна", "seller_type": "Хозяин недвижимости"})
+    advert["additionalProperty"] = [
+        {"name": "Тип отделки", "propertyID": "flat.renovation", "value": "свежий ремонт"},
+        {"name": "Способ оплаты", "propertyID": "flat.mortgage", "value": {"value": False}},
+        {"name": "Статус", "propertyID": "flat.is_in_pledge", "value": {"value": False}},
+    ]
+    html_response["html"] = f'<script type="application/ld+json">{json.dumps(advert)}</script>'
+    value = await import_krisha_listing(URL)
+    assert (value.seller_name, value.seller_type) == ("Анна", "Хозяин недвижимости")
+    assert (value.repair_condition, value.repair_source_kind) == ("свежий ремонт", "field")
+    assert (value.mortgage_supported, value.mortgage_source_kind, value.mortgage_evidence) == (False, "field", None)
+    assert value.property_details["В залоге"] == "Нет"
+
+
+@pytest.mark.parametrize("badge", ["Да", "В ипотеку: Да", "Ипотека возможна"])
+@pytest.mark.asyncio
+async def test_visible_mortgage_badge_overrides_json_and_seller_prose(html_response, badge):
+    advert = rich_advert()
+    advert["description"] = "Ипотеки нет."
+    html_response["html"] = f'<script type="application/ld+json">{json.dumps(advert)}</script>' + f'''
+      <section class="nearby-adverts"><div data-testid="mortgage-status">Нет</div></section>
+      <div class="a-list__item" data-testid="mortgage-status">{badge}</div>'''
+    value = await import_krisha_listing(URL)
+    assert (value.mortgage_supported, value.mortgage_source_kind, value.mortgage_evidence) == (True, "field", None)
+
+
+@pytest.mark.parametrize("description,title,expected", [
+    ("Ипотеки нет.", "Квартира", (False, "description", "Ипотеки нет.")),
+    ("Светлая квартира. Можно под ипотеку.", "Квартира", (True, "description", "Можно под ипотеку.")),
+    ("Светлая квартира.", "Квартира. Можно в ипотеку", (True, "title", "Можно в ипотеку")),
+])
+@pytest.mark.asyncio
+async def test_mortgage_prose_keeps_literal_evidence(html_response, description, title, expected):
+    advert = rich_advert()
+    advert.update(description=description, name=title, additionalProperty=[])
+    html_response["html"] = f'<script type="application/ld+json">{json.dumps(advert)}</script>' + '''
+      <section class="nearby-adverts"><dl><dt>Ипотека</dt><dd>Нет</dd></dl></section>
+      <aside class="broker-profile"><div data-testid="mortgage-status">Нет</div></aside>'''
+    value = await import_krisha_listing(URL)
+    assert (value.mortgage_supported, value.mortgage_source_kind, value.mortgage_evidence) == expected
+
+
 @pytest.mark.asyncio
 async def test_full_json_snapshot_imports_selected_fields_and_provenance(html_response):
     html_response["html"] = '<script>window.data = ' + json.dumps({"adverts": [

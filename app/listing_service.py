@@ -7,10 +7,12 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai_service import analyze_listing
+from app.author import OWNER_FROM_DESCRIPTION, owner_type_from_description
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import Listing, PriceSnapshot, SearchResult
 from app.krisha_search import normalize_krisha_listing_url
+from app.pledge import parse_pledge_claim, pledge_field
 from app.schemas import ListingCreate
 from app.repair import parse_repair_description
 from app.mortgage import mortgage_value, parse_mortgage_claim
@@ -157,28 +159,67 @@ def sync_search_result_facts(result: SearchResult, listing: Listing, *, clear_un
     result.snippet = ", ".join(extras) or None
     if listing.mortgage_supported is not None or clear_unknown_mortgage:
         result.mortgage_supported = listing.mortgage_supported
+    if listing.is_pledged is not None:
+        result.is_pledged = listing.is_pledged
     if listing.bathrooms_count is not None:
         result.bathrooms_count = listing.bathrooms_count
         result.bathrooms_count_is_lower_bound = listing.bathrooms_count_is_lower_bound
 
 
-async def _sync_search_results(session: AsyncSession, listing: Listing, now: datetime, *, clear_unknown_mortgage: bool = False) -> None:
-    """Make every import path expose saved, confirmed fields in search results."""
-    canonical = normalize_krisha_listing_url(listing.source_url)
+async def _matching_search_results(session: AsyncSession, source_url: str) -> list[SearchResult]:
+    canonical = normalize_krisha_listing_url(source_url)
     query = select(SearchResult)
     if canonical:
         path = canonical.removeprefix("https://krisha.kz")
         query = query.where(SearchResult.url.contains(path, autoescape=True))
     else:
-        query = query.where(SearchResult.url == listing.source_url)
-    for result in (await session.scalars(query)).all():
-        if canonical and normalize_krisha_listing_url(result.url) != canonical:
-            continue
+        query = query.where(SearchResult.url == source_url)
+    rows = (await session.scalars(query)).all()
+    return [row for row in rows if not canonical or normalize_krisha_listing_url(row.url) == canonical]
+
+
+async def _sync_search_results(session: AsyncSession, listing: Listing, now: datetime, *, clear_unknown_mortgage: bool = False) -> None:
+    """Make every import path expose saved, confirmed fields in search results."""
+    for result in await _matching_search_results(session, listing.source_url):
         result.import_status = "imported"
         result.imported_listing_id = listing.id
         result.import_error = None
         result.imported_at = now
         sync_search_result_facts(result, listing, clear_unknown_mortgage=clear_unknown_mortgage)
+
+
+async def backfill_pledge_status() -> int:
+    """Apply saved pledge facts without changing other import data."""
+    changed = 0
+    async with SessionLocal() as session:
+        for listing in (await session.scalars(select(Listing))).all():
+            if listing.is_pledged is None:
+                status = pledge_field(listing.property_details or {})
+                if status is None:
+                    claim = parse_pledge_claim(listing.description)
+                    status = claim[0] if claim else None
+                if status is None:
+                    continue
+                listing.is_pledged = status
+                changed += 1
+            for result in await _matching_search_results(session, listing.source_url):
+                result.is_pledged = listing.is_pledged
+        await session.commit()
+    return changed
+
+
+async def backfill_author_types() -> int:
+    """Keep explicit author types and recover only declared ownership."""
+    changed = 0
+    async with SessionLocal() as session:
+        listings = (await session.scalars(select(Listing).where(Listing.seller_type.is_(None)))).all()
+        for listing in listings:
+            seller_type = owner_type_from_description(listing.description)
+            if seller_type is not None:
+                listing.seller_type = seller_type
+                changed += 1
+        await session.commit()
+    return changed
 
 
 async def _enrich_twogis(
@@ -268,8 +309,18 @@ async def persist_listing(
                               payload.description, payload.property_details, payload.source)
     mortgage = _mortgage_snapshot(payload.mortgage_supported, payload.mortgage_source_kind,
                                   payload.description, payload.title, payload.property_details, payload.source)
+    explicit_pledge = pledge_field(payload.property_details)
+    if explicit_pledge is None:
+        explicit_pledge = payload.is_pledged
+    pledge_claim = parse_pledge_claim(payload.description) if explicit_pledge is None else None
+    is_pledged = pledge_claim[0] if pledge_claim else explicit_pledge
+    explicit_seller_type = (payload.seller_type or "").strip() or None
+    if explicit_seller_type == OWNER_FROM_DESCRIPTION:
+        explicit_seller_type = None
+    seller_type = explicit_seller_type or owner_type_from_description(payload.description)
     payload = payload.model_copy(update={**dict(zip(_REPAIR_FIELDS, repair)), **dict(zip(_MORTGAGE_FIELDS, mortgage)),
-                                         "address": clean_listing_address(payload.address)})
+                                         "address": clean_listing_address(payload.address), "is_pledged": is_pledged,
+                                         "seller_type": seller_type})
     values = _values(payload)
     if payload.details_extracted:
         values["details_imported_at"] = now
@@ -301,7 +352,15 @@ async def persist_listing(
                 raise ListingAlreadyExists("Listing with this URL already exists")
             old_price = row.price_kzt
             protect_full_details = (row.details_imported_at is not None or row.repair_source_kind == "description"
-                                    or row.mortgage_source_kind in _TEXT_MORTGAGE_SOURCES) and not payload.details_extracted and payload.source != "manual"
+                                    or row.mortgage_source_kind in _TEXT_MORTGAGE_SOURCES
+                                    or row.seller_type == OWNER_FROM_DESCRIPTION) and not payload.details_extracted and payload.source != "manual"
+            if explicit_pledge is None and protect_full_details:
+                values.pop("is_pledged", None)
+            if explicit_seller_type is not None:
+                row.seller_type = explicit_seller_type
+            elif (not row.seller_type or row.seller_type == OWNER_FROM_DESCRIPTION) and not protect_full_details:
+                if seller_type is not None or payload.description is not None:
+                    row.seller_type = seller_type
             if repair[0] is not None:
                 trusted_existing = bool(row.repair_condition and row.repair_source_kind != "description")
                 if repair[1] != "description" or not (trusted_existing or protect_full_details):
@@ -362,7 +421,7 @@ async def persist_listing(
                     continue
                 if key == "title" and protect_full_details and row.mortgage_source_kind == "title":
                     continue
-                if key in {"source_url", "photo_urls", "twogis_checked_at"}:
+                if key in {"source_url", "photo_urls", "twogis_checked_at", "seller_type"}:
                     continue
                 if value is not None:
                     setattr(row, key, value)
@@ -378,7 +437,9 @@ async def persist_listing(
         await session.commit()
         await session.refresh(row)
 
-    payload = payload.model_copy(update={key: getattr(row, key) for key in (*_REPAIR_FIELDS, *_MORTGAGE_FIELDS)})
+    payload = payload.model_copy(update={
+        key: getattr(row, key) for key in (*_REPAIR_FIELDS, *_MORTGAGE_FIELDS, "is_pledged", "seller_type")
+    })
     assessment = assess_listing(payload, get_settings())
     if refresh_ai:
         analysis = await analyze_listing(payload, assessment)

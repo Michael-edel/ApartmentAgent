@@ -5,6 +5,8 @@ const dateTime = new Intl.DateTimeFormat('ru-RU', {day:'2-digit', month:'2-digit
 const grid = document.querySelector('#listingGrid');
 const filter = document.querySelector('#scoreFilter');
 const listingSort = document.querySelector('#listingSort');
+const listingShowPledged = document.querySelector('#listingShowPledged');
+const listingPledgeSummary = document.querySelector('#listingPledgeSummary');
 const refreshButton = document.querySelector('#refreshButton');
 const form = document.querySelector('#listingForm');
 const manualRooms = form?.querySelector('[name="rooms"]');
@@ -26,12 +28,15 @@ const searchMaxPrice = document.querySelector('#searchMaxPrice');
 const searchMinArea = document.querySelector('#searchMinArea');
 const searchMaxArea = document.querySelector('#searchMaxArea');
 const searchBathrooms = document.querySelector('#searchBathrooms');
+const searchExcludePledged = document.querySelector('#searchExcludePledged');
 let searchRoomsInitialized = false;
 let searchPriceInitialized = false;
 let searchMinAreaInitialized = false;
 let searchMaxAreaInitialized = false;
 let searchBathroomsInitialized = false;
+let searchPledgeInitialized = false;
 searchBathrooms?.addEventListener('change', () => { searchBathroomsInitialized = true; });
+searchExcludePledged?.addEventListener('change', () => { searchPledgeInitialized = true; });
 function updateCriteriaRooms() {
   const heading = document.querySelector('#criteriaRooms');
   if (heading && searchRooms) heading.textContent = `${searchRooms.value}-комнатная квартира`;
@@ -63,6 +68,7 @@ const searchResults = document.querySelector('#searchResults');
 const reloadSearchResults = document.querySelector('#refreshSearchButton');
 const bathroomCheckPanel = document.querySelector('#bathroomCheckPanel');
 const bathroomCheckCounts = document.querySelector('#bathroomCheckCounts');
+const bathroomCheckDetails = document.querySelector('#bathroomCheckDetails');
 const bathroomCheckMode = document.querySelector('#bathroomCheckMode');
 const bathroomCheckCriteria = document.querySelector('#bathroomCheckCriteria');
 const bathroomCheckProgress = document.querySelector('#bathroomCheckProgress');
@@ -146,16 +152,23 @@ function renderBathroomCheck(state) {
     if ([2, 3, 4].includes(criteria.target_rooms)) parts.push(`${criteria.target_rooms} комн.`);
     if (Number.isFinite(criteria.min_area_m2) && Number.isFinite(criteria.max_area_m2)) parts.push(`${number.format(criteria.min_area_m2)}–${number.format(criteria.max_area_m2)} м²`);
     if (Number.isSafeInteger(criteria.max_price_kzt) && criteria.max_price_kzt > 0) parts.push(`до ${money.format(criteria.max_price_kzt)}`);
+    if (criteria.exclude_pledged && !criteria.manual_import) parts.push('известные залоговые исключены');
     bathroomCheckCriteria.hidden = !state.job_id || parts.length === 0;
     bathroomCheckCriteria.textContent = criteria.manual_import
       ? 'Импорт выбранного объявления по номеру. Поисковые фильтры не ограничивают его сохранение.'
       : state.job_id && parts.length ? `Проверяются квартиры: ${parts.join(', ')}. Критерии сохранены при запуске проверки.` : '';
   }
+  const unavailable = queueCount(state.unavailable);
+  const noBath = Math.max(0, queueCount(state.unknown) - unavailable);
   if (bathroomCheckCounts) bathroomCheckCounts.textContent = total
-    ? detailsMode
-      ? `Обработано: ${checked} из ${total}. Дополнено карточек: ${queueCount(state.enriched)}. Санузлов от 2: ${queueCount(state.confirmed)}. Санузлов меньше 2: ${queueCount(state.rejected)}. Без данных о санузлах: ${queueCount(state.unknown)}. Ошибок: ${queueCount(state.failed)}. Осталось: ${queueCount(state.pending)}.`
-      : `Проверено: ${checked} из ${total}. Санузлов от 2: ${queueCount(state.confirmed)}. Санузлов меньше 2: ${queueCount(state.rejected)}. Без данных: ${queueCount(state.unknown)}. Ошибок: ${queueCount(state.failed)}. Осталось: ${queueCount(state.pending)}.`
+    ? `Обработано: ${checked} из ${total}. Карточек сохранено или обновлено: ${queueCount(state.enriched)}. Санузлов от 2: ${queueCount(state.confirmed)}. Санузлов меньше 2: ${queueCount(state.rejected)}. Без данных о санузлах: ${noBath}. ${unavailable ? `Снято с публикации: ${unavailable}. ` : ''}Ошибок: ${queueCount(state.failed)}. Осталось: ${queueCount(state.pending)}.`
     : `Объявлений с неизвестным количеством санузлов: ${candidates}. Карточек для дополнения: ${detailsCandidates}.`;
+  if (bathroomCheckDetails) {
+    const facts = state.detail_fields;
+    bathroomCheckDetails.hidden = !facts || !queueCount(state.enriched);
+    bathroomCheckDetails.textContent = bathroomCheckDetails.hidden ? '' :
+      `Ремонт, ипотека и автор получены вместе: ${queueCount(facts.complete)}. В сохранённых карточках не получено: ремонт — ${queueCount(facts.missing_repair)}, ипотека — ${queueCount(facts.missing_mortgage)}, автор — ${queueCount(facts.missing_author)}.`;
+  }
   if (bathroomCheckProgress) {
     bathroomCheckProgress.hidden = total === 0;
     bathroomCheckProgress.max = Math.max(total, 1);
@@ -303,10 +316,17 @@ function mortgageDetails(item) {
   return `<div class="mortgage-condition"><b>Ипотека:</b> ${value}${source ? `<small class="mortgage-source">${source}</small>` : ''}${evidence.trim() ? `<details class="mortgage-evidence" data-details-key="mortgage-evidence"><summary>${kind === 'title' ? 'Цитата из заголовка' : 'Цитата из описания'}</summary><blockquote>${escapeHtml(evidence)}</blockquote></details>` : ''}</div>`;
 }
 
+function pledgeBadge(item) {
+  if (item.is_pledged === true) return '<span class="pledge-flag">В залоге</span>';
+  return item.is_pledged === false ? 'Нет залога' : 'Не указано';
+}
+
 function sortListings(listings) {
   const items = [...listings];
   const sort = listingSort?.value || 'newest';
+  const pledgeOrder = item => item.is_pledged === false ? 0 : item.is_pledged === true ? 2 : 1;
   const compare = (left, right) => {
+    if (sort === 'pledge') return pledgeOrder(left) - pledgeOrder(right) || right.assessment.score - left.assessment.score || right.id - left.id;
     if (sort === 'score') return right.assessment.score - left.assessment.score || right.id - left.id;
     if (sort === 'price_m2') return left.assessment.price_per_m2 - right.assessment.price_per_m2 || left.id - right.id;
     if (sort === 'price') return left.price_kzt - right.price_kzt || left.id - right.id;
@@ -383,13 +403,22 @@ function render(listings) {
   savedUrls = new Set(listings.map(item => normalizeUrl(item.source_url)));
   savedListingIds = new Map(listings.map(item => [normalizeUrl(item.source_url), item.id]));
   const minScore = Number(filter?.value || 0);
-  const visible = sortListings(listings).filter(item => item.assessment.score >= minScore);
+  const pinnedId = /^#listing-([1-9]\d*)$/.exec(location.hash)?.[1];
+  const visible = sortListings(listings).filter(item => item.assessment.score >= minScore
+    && (listingShowPledged?.checked || item.is_pledged !== true || String(item.id) === pinnedId));
+  const hiddenPledged = listingShowPledged?.checked ? 0 : listings.filter(item => item.is_pledged === true && String(item.id) !== pinnedId).length;
+  if (listingPledgeSummary) {
+    listingPledgeSummary.hidden = hiddenPledged === 0;
+    listingPledgeSummary.textContent = hiddenPledged ? `Скрыто квартир в залоге: ${hiddenPledged}.` : '';
+  }
   const strong = listings.filter(item => item.assessment.score >= 85);
   document.querySelector('#totalCount').textContent = listings.length;
   document.querySelector('#strongCount').textContent = strong.length;
   if (!grid) return;
   if (!visible.length) {
-    grid.innerHTML = listings.length
+    grid.innerHTML = hiddenPledged && hiddenPledged === listings.length
+      ? '<section class="empty card"><strong>Все сохранённые квартиры в залоге</strong><p>Включите «Показать сохранённые квартиры в залоге», чтобы посмотреть их.</p></section>'
+      : listings.length
       ? '<section class="empty card"><strong>Нет квартир с выбранным рейтингом</strong><p>Выберите «Все», чтобы увидеть остальные квартиры.</p></section>'
       : '<section class="empty card"><strong>Сохранённых квартир пока нет</strong><p>Добавьте квартиру вручную или импортируйте объявление.</p></section>';
     return;
@@ -432,7 +461,7 @@ function render(listings) {
       ${mapWidgetUrl ? `<div class="listing-map"><iframe src="${escapeHtml(mapWidgetUrl)}" title="Расположение квартиры: ${escapeHtml(title)}" loading="lazy" allowfullscreen></iframe></div>` : ''}
       ${mapUrl ? `<a class="location-link" href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener noreferrer">${hasCoordinates ? 'Открыть большую карту' : 'Найти адрес на карте'} →</a>${hasCoordinates ? '<p class="meta map-fallback">Если карта не загрузилась, воспользуйтесь ссылкой выше.</p>' : '<p class="meta">Координаты не получены. Карта найдёт дом по указанному адресу.</p>'}` : ''}
       ${locationMissing ? '<div class="meta location-missing">Адрес и координаты не указаны</div>' : ''}
-      <div class="listing-details"><div>${bathroomBadge(item)}</div>${repairDetails(item)}${mortgageDetails(item)}<div><b>Автор объявления:</b> ${escapeHtml(seller)}</div></div>
+      <div class="listing-details"><div>${bathroomBadge(item)}</div>${repairDetails(item)}${mortgageDetails(item)}<div><b>Залог:</b> ${pledgeBadge(item)}</div><div><b>Автор объявления:</b> ${escapeHtml(seller)}</div></div>
       ${item.building_year || item.building_type ? `<div class="meta">${item.building_year ? `Построен ${item.building_year}` : ''}${item.building_year && item.building_type ? ' · ' : ''}${escapeHtml(item.building_type || '')}</div>` : ''}
       ${twogisLine}
       <details class="seller-description" data-details-key="seller-description"><summary>Описание объявления</summary>${item.description ? `<p class="seller-description-text">${escapeHtml(item.description)}</p>` : '<p class="meta">Описание объявления не получено.</p>'}</details>
@@ -551,8 +580,9 @@ async function loadSearchResults() {
     ]);
     if (!response.ok) throw new Error('Не удалось загрузить найденные ссылки');
     if (!statusResponse.ok) throw new Error('Не удалось получить параметры поиска');
-    const results = await readJson(response);
+    const found = await readJson(response);
     const status = await readJson(statusResponse);
+    const results = status.exclude_pledged === false ? found : found.filter(item => item.analysis?.is_pledged !== true);
     const strictBathrooms = status.min_bathrooms === 2;
     const items = strictBathrooms
       ? results.filter(item => Number.isInteger(item.analysis?.bathrooms_count) && item.analysis.bathrooms_count >= 2)
@@ -586,7 +616,7 @@ async function loadSearchResults() {
           <div><span class="verdict">${escapeHtml(seenLabel)}</span><h3>${escapeHtml(cleanSearchTitle(item.title))}</h3></div>
           <div class="rating ${a.score < 85 ? 'medium' : ''}">${a.score ?? '—'}</div>
         </div>
-        <div class="search-facts">${facts.map(value => `<span>${escapeHtml(value)}</span>`).join('')}${bathroomBadge(a, true)}</div>
+        <div class="search-facts">${facts.map(value => `<span>${escapeHtml(value)}</span>`).join('')}${typeof a.is_pledged === 'boolean' ? (a.is_pledged ? pledgeBadge(a) : '<span>Нет залога</span>') : ''}${bathroomBadge(a, true)}</div>
         ${reasons ? `<ul class="reason-list">${reasons}</ul>` : `<p class="meta">${escapeHtml(item.snippet || 'Откройте объявление для проверки параметров.')}</p>`}
         <div class="meta source-meta">Источник: ${escapeHtml(item.search_engine)} · обнаружено ${dateTime.format(new Date(item.first_seen))}</div>
         <div class="card-actions">
@@ -625,6 +655,10 @@ async function loadSearchStatus() {
     const response = await fetch('/api/v1/search/status');
     if (!response.ok) throw new Error('Не удалось получить статус поиска');
     const status = await readJson(response);
+    if (searchExcludePledged && !searchPledgeInitialized && typeof status.exclude_pledged === 'boolean') {
+      searchExcludePledged.checked = status.exclude_pledged;
+      searchPledgeInitialized = true;
+    }
     if (searchBathrooms && !searchBathroomsInitialized && [0, 2].includes(status.min_bathrooms)) {
       searchBathrooms.checked = status.min_bathrooms === 2;
       searchBathroomsInitialized = true;
@@ -655,7 +689,7 @@ async function loadSearchStatus() {
     document.querySelector('#importedCount').textContent = status.imported_results || 0;
     const providers = (status.providers || []).join(', ') || 'нет';
     const lastRun = status.last_run ? dateTime.format(new Date(status.last_run)) : 'ещё не выполнялся';
-    if (searchMeta) searchMeta.textContent = `Источники: ${providers}. Запросов за запуск: ${status.queries_per_run}. Последний поиск: ${lastRun}.${status.min_bathrooms === 2 ? ` Скрыто объявлений без данных о санузлах: ${Number(status.bathrooms_unconfirmed_results) || 0}.` : ''}`;
+    if (searchMeta) searchMeta.textContent = `Источники: ${providers}. Запросов за запуск: ${status.queries_per_run}. Последний поиск: ${lastRun}.${status.min_bathrooms === 2 ? ` Скрыто объявлений без данных о санузлах: ${queueCount(status.bathrooms_unconfirmed_results)}.` : ''}${status.exclude_pledged ? ` Скрыто квартир в залоге: ${queueCount(status.pledged_hidden_results)}.` : ''}`;
     const telegram = await fetch('/api/v1/notifications/status').then(readJson);
     const telegramNode = document.querySelector('#telegramStatus');
     if (telegramNode) telegramNode.textContent = telegram.configured ? `Telegram: подключён · отправлено ${telegram.sent_notifications || 0}` : 'Telegram: добавьте TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID для уведомлений';
@@ -689,7 +723,7 @@ runSearchButton?.addEventListener('click', async () => {
   try {
     const response = await fetch('/api/v1/search/run', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({rooms:Number(searchRooms?.value || 2), max_price_kzt:Number(searchMaxPrice.value), min_area_m2:Number(searchMinArea.value), max_area_m2:Number(searchMaxArea.value), min_bathrooms:searchBathrooms?.checked ? 2 : 0})
+      body:JSON.stringify({rooms:Number(searchRooms?.value || 2), max_price_kzt:Number(searchMaxPrice.value), min_area_m2:Number(searchMinArea.value), max_area_m2:Number(searchMaxArea.value), min_bathrooms:searchBathrooms?.checked ? 2 : 0, exclude_pledged:searchExcludePledged?.checked ?? true})
     });
     const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось выполнить поиск');
@@ -786,7 +820,8 @@ form?.addEventListener('submit', async event => {
     bathrooms_count:data.get('bathrooms_count') ? Number(data.get('bathrooms_count')) : null,
     floor:data.get('floor') ? Number(data.get('floor')) : null, floors_total:data.get('floors_total') ? Number(data.get('floors_total')) : null,
     building_year:data.get('building_year') ? Number(data.get('building_year')) : null, building_type:data.get('building_type') || null,
-    is_full_two_room:data.get('is_full_two_room') === 'on', mortgage_supported:data.get('mortgage_supported') === '' ? null : data.get('mortgage_supported') === 'true'
+    is_full_two_room:data.get('is_full_two_room') === 'on', mortgage_supported:data.get('mortgage_supported') === '' ? null : data.get('mortgage_supported') === 'true',
+    is_pledged:data.get('is_pledged') === 'true' ? true : data.get('is_pledged') === 'false' ? false : null
   };
   try {
     const response = await fetch('/api/v1/listings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
@@ -802,6 +837,7 @@ form?.addEventListener('submit', async event => {
 
 filter?.addEventListener('change', loadListings);
 listingSort?.addEventListener('change', loadListings);
+listingShowPledged?.addEventListener('change', loadListings);
 refreshButton?.addEventListener('click', async () => { await loadListings(); await Promise.all([loadSearchStatus(), loadSearchResults()]); });
 let lastReturnRefresh = 0;
 function refreshAfterReturn() {

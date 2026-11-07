@@ -128,6 +128,7 @@ def _payload_from_row(row: Listing) -> ListingCreate:
         twogis_url=row.twogis_url,
         is_full_two_room=row.is_full_two_room,
         mortgage_supported=row.mortgage_supported,
+        is_pledged=row.is_pledged,
         krisha_district_price_per_m2=row.krisha_district_price_per_m2,
         krisha_city_price_per_m2=row.krisha_city_price_per_m2,
         krisha_comparison_district=row.krisha_comparison_district,
@@ -341,6 +342,7 @@ class SearchRunRequest(BaseModel):
     min_area_m2: float | None = Field(default=None, strict=True, ge=0.1, le=10000, allow_inf_nan=False)
     max_area_m2: float | None = Field(default=None, strict=True, ge=0.1, le=10000, allow_inf_nan=False)
     min_bathrooms: Literal[0, 2] | None = None
+    exclude_pledged: bool | None = None
 
     @model_validator(mode="after")
     def validate_area(self) -> "SearchRunRequest":
@@ -359,6 +361,7 @@ async def run_search_now(request: SearchRunRequest | None = None) -> dict[str, o
         request.min_area_m2 if request is not None else None,
         request.max_area_m2 if request is not None else None,
         request.min_bathrooms if request is not None else None,
+        request.exclude_pledged if request is not None else None,
     )
     return {
         "queries": summary.queries,
@@ -370,6 +373,7 @@ async def run_search_now(request: SearchRunRequest | None = None) -> dict[str, o
         "import_errors": summary.import_errors,
         "import_blocked": summary.import_blocked,
         "providers": summary.providers,
+        "exclude_pledged": settings.exclude_pledged,
     }
 
 
@@ -412,6 +416,7 @@ async def search_results(limit: int = 50, only_new: bool = False, include_unconf
             max_area=settings.max_area_m2,
             target_rooms=settings.target_rooms,
             mortgage_supported=getattr(row, "mortgage_supported", None),
+            is_pledged=getattr(row, "is_pledged", None),
         )
         analysis["bathrooms_count"] = bathrooms_for_row(row)
         analysis["bathrooms_count_is_lower_bound"] = row.bathrooms_count_is_lower_bound or analysis["bathrooms_count_is_lower_bound"]

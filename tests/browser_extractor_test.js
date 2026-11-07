@@ -60,10 +60,20 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
   assert.equal(unknown.seller_name, null, file);
   assert.equal(extract(file, common, null, 'Ипотека: нет').mortgage_supported, false, file);
   assert.equal(extract(file, common, null, 'Можно в ипотеку').mortgage_supported, true, file);
+  assert.equal(extract(file, common, {mortgageSupported:false}, 'Да').mortgage_supported, true, file);
+  assert.equal(extract(file, common, {mortgageSupported:true}, 'Нет').mortgage_supported, false, file);
+  const explicitMortgage = extract(file, common, {property_details:{'Ипотека':'Нет'}}, 'Да');
+  assert.equal(explicitMortgage.mortgage_supported,true,file);
+  assert.equal(explicitMortgage.property_details['Ипотека'],'Да',file);
+  assert.equal(extract(file, common, null, 'В ипотеку не проходит').mortgage_supported, false, file);
+  assert.equal(extract(file, common, null, 'Не подходит под ипотеку').mortgage_supported, false, file);
+  assert.equal(extract(file, common, null, 'Ипотека возможна?').mortgage_supported, null, file);
   assert.equal(extract(file, `${common} Реклама: ипотека: да`).mortgage_supported, null, file);
   for (const phrase of ['Ипотеки нет', 'Ипотека жоқ', 'Ипотека жок']) {
     assert.equal(extract(file, common, null, phrase).mortgage_supported, false, file);
-    assert.equal(extract(file, common, null, null, null, null, undefined, null, phrase).mortgage_supported, false, file);
+    const description = extract(file, common, null, null, null, null, undefined, null, `${phrase}. Описание объявления.`);
+    assert.equal(description.mortgage_supported, null, `${file}: prose must be interpreted by the server with provenance`);
+    assert.equal(description.description, `${phrase}. Описание объявления.`, file);
     assert.equal(extract(file, `${common} Реклама: ${phrase}`).mortgage_supported, null, file);
   }
   for (const phrase of ['Рассчитать ипотеку', 'Квартира без ипотеки', 'С ипотекой нет проблем', 'Ипотека жоқ емес']) {
@@ -151,6 +161,7 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
     {src:'https://images.example/recommendation.jpg',parentElement:{className:'recommendations'}},
   ];
   const fullText = 'Просторная квартира с изолированными комнатами.\n\nОстаётся мебель. Возможна покупка в ипотеку.';
+  const authorBlock = {textContent:'Автор объявления Хозяин недвижимости',parentElement:{tagName:'ASIDE'}};
   const full = extract(file, '4-комнатная квартира 106.4 м² Цена 45 093 093 ₸',
     {floor:9,floorsTotal:8,year:2005,sellerName:'Старое имя',sellerType:'Компания',mortgageSupported:false},
     null,null,null,undefined,null,null, {
@@ -160,8 +171,8 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
         '.offer__price':[{textContent:'45 093 093 ₸'}],
         '.offer__info-item':propertyRows,
         '.offer__description':[{textContent:fullText,parentElement:parent}],
-        '[data-testid="seller"]':[{textContent:'Автор объявления Хозяин недвижимости',parentElement:{tagName:'ASIDE'}}],
-        '[data-testid="seller-name"]':[{textContent:'Айгуль',parentElement:{tagName:'ASIDE'}}],
+        '[data-testid="seller"]':[authorBlock],
+        '[data-testid="seller-name"]':[{textContent:'Айгуль',parentElement:authorBlock}],
         '.offer__photos img':gallery,
         'img[src]':[{src:'https://images.example/site-logo.png'}],
       },
@@ -258,6 +269,11 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
   const noMortgage = extract(file, common,null,null,null,null,undefined,null,null,{nodes:{'.offer__info-item':[property('Ипотека','Нет'),property('Ремонт','хороший')]}});
   assert.equal(noMortgage.mortgage_supported,false,file);
   assert.equal(noMortgage.repair_condition,'хороший',file);
+  const explicitPledge = extract(file, common,null,null,null,null,undefined,null,null,{nodes:{'.offer__info-item':[property('В залоге','Да')]}});
+  assert.equal(explicitPledge.property_details['В залоге'],'Да',file);
+  assert.equal(explicitPledge.mortgage_supported,null,file);
+  const prosePledge = extract(file, common,null,null,null,null,undefined,null,'Квартира находится в залоге.');
+  assert.equal(prosePledge.property_details['В залоге'],undefined,file);
   const inconsistent = extract(file, common,{floor:9,floorsTotal:8,year:2150});
   assert.equal(inconsistent.floor,null,file);
   assert.equal(inconsistent.floors_total,null,file);
@@ -397,6 +413,49 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
   assert.equal(flatRich.details_extracted,true,file);
   assert.equal(flatRich.bathrooms_count,2,file);
   assert.equal(flatRich.mortgage_supported,false,file);
+  const structuredDetails = extract(file,'Загрузка объявления',{
+    id:123,price_kzt:40000000,area_m2:100,rooms:4,seller:{},
+    owner:{seller_name:'Айгуль',seller_type:'Риелтор'},
+    data:{characteristics:{'flat.is_in_pledge':{value:false},'flat.mortgage':{label:'Да'}},
+      additionalProperty:[{name:'Состояние',propertyID:'flat.renovation',value:{value:2,label:'хороший ремонт'}}]},
+  },null,null,null,undefined,null,null,{unscopedJson:true});
+  assert.equal(structuredDetails.seller_name,'Айгуль',file);
+  assert.equal(structuredDetails.seller_type,'Риелтор',file);
+  assert.equal(structuredDetails.repair_condition,'хороший ремонт',file);
+  assert.equal(structuredDetails.property_details['В залоге'],'Нет',file);
+  assert.equal(structuredDetails.mortgage_supported,true,file);
+  const pledgeOnly = extract(file,common,{property_details:{'В залоге':true}},null,null,null,undefined,null,null);
+  assert.equal(pledgeOnly.property_details['В залоге'],'Да',file);
+  assert.equal(pledgeOnly.mortgage_supported,null,file);
+  const profile = {className:'owners',textContent:'Автор объявления Айгуль Работает в компании House'};
+  const verifiedSeller = extract(file,common,{seller:{name:'Прежний продавец',role:'Риелтор'}},null,null,null,undefined,null,null,{nodes:{
+    '[data-testid="seller"]':[profile],
+    '[data-testid="seller-name"]':[
+      {textContent:'Чужой автор',parentElement:{className:'a-card'}},
+      {textContent:'Работает в компании House',parentElement:profile},
+      {textContent:'Айгуль',parentElement:profile},
+    ],
+  }});
+  assert.equal(verifiedSeller.seller_name,'Айгуль',file);
+  assert.equal(verifiedSeller.seller_type,null,`${file}: the old seller role and employer caption do not describe the visible author`);
+  const foreignDetails = {seller_name:'Чужой автор',seller_type:'Компания',repair_condition:'евроремонт',mortgage_supported:true};
+  const scopedDetails = extract(file,common,{
+    broker:{...foreignDetails,address:{streetAddress:'Офисная улица 99'}},
+    similar_listings:[{id:999,...foreignDetails}],nearby:[{id:998,...foreignDetails}],
+    unlabelledWidget:{id:997,...foreignDetails,description:'Объявление другой квартиры'},
+  });
+  assert.equal(scopedDetails.seller_name,null,file);
+  assert.equal(scopedDetails.seller_type,null,file);
+  assert.equal(scopedDetails.repair_condition,null,file);
+  assert.equal(scopedDetails.mortgage_supported,null,file);
+  assert.equal(scopedDetails.address,null,file);
+  assert.equal(scopedDetails.description,null,file);
+  const brokerOnly = extract(file,'Загрузка объявления',{
+    broker:{id:123,price:40000000,rooms:4,area:100,...foreignDetails,address:{streetAddress:'Офисная улица 99'}},
+  },null,null,null,undefined,null,null,{unscopedJson:true});
+  assert.equal(brokerOnly.price_kzt,null,file);
+  assert.equal(brokerOnly.address,null,file);
+  assert.equal(brokerOnly.seller_name,null,file);
   for (const source of [
     `/*\nwindow.data = ${JSON.stringify(richJson)};\n*/`,
     `// window.data = ${JSON.stringify(richJson)};`,

@@ -20,6 +20,7 @@ _PATTERNS = (
     ("не новый, но аккуратный ремонт", rf"не{_SPACE}нов(?:ый|ым|ого|ом)\s*,?{_SPACE}но{_SPACE}аккуратн(?:ый|ым|ого|ом){_SPACE}{_REPAIR}"),
     ("хороший ремонт", rf"хорош(?:ий|им|его|ем){_SPACE}{_REPAIR}"),
     ("качественный ремонт", rf"качественн(?:ый|ым|ого|ом){_SPACE}{_REPAIR}"),
+    ("аккуратный ремонт", rf"аккуратн(?:ый|ым|ого|ом){_SPACE}{_REPAIR}"),
     ("свежий ремонт", rf"свеж(?:ий|им|его|ем){_SPACE}{_REPAIR}"),
     ("новый ремонт", rf"нов(?:ый|ым|ого|ом){_SPACE}{_REPAIR}"),
     ("средний ремонт", rf"средн(?:ий|им|его|ем){_SPACE}{_REPAIR}"),
@@ -37,13 +38,18 @@ _NON_APARTMENT = re.compile(r"\b(?:подъезд\w*|парадн\w*|фасад\
 _FURNITURE = re.compile(r"\bмебел\w*\b", re.I)
 _GENERIC_COMPLEX = re.compile(r"\b(?:жк|жил(?:ой|ого|ом)\s+комплекс\w*)\b", re.I)
 _HYPOTHETICAL = re.compile(r"\b(?:можно|можете|сможете|хотите|планиру\w*|предстоит|понадобится|сдела(?:ть|ем|ете)|выполним|закаж\w*|обновим|будет|будут)\b|\b(?:при|по)\s+желанию\b|\bза\s+(?:наш|ваш)\s+сч[её]т\b|\b(?:услуги|дизайн[ -]проект)\b", re.I)
+_MOVE_IN_SUFFIX = re.compile(
+    r"\s*[,—–]\s*можно\s+заехать\s+и\s+жить\b(?:\s+или\s+обновить\s+под\s+себя)?"
+    r"(?:[.!](?=\s|$)|(?=\s*$))\s*",
+    re.I,
+)
 _NEGATED_BEFORE = re.compile(r"\b(?:не\s+(?:с\s+)?|нет\s+|отсутствует\s+)$", re.I)
 _NEGATED_AFTER = re.compile(r"^\s+не\s+(?:сделан\w*|выполнен\w*|нужен\w*|требуется|делали)\b", re.I)
 _NEEDED_BEFORE = re.compile(r"\b(?:требуется|нужен|необходим|нуждается\s+в)\s+$", re.I)
 _DIRECT_PREFIX = re.compile(r"^(?:(?:в|с|улучшенная|улучшенной|качественный|качественным|качественная|новая|новой)\s*[,—:-]?\s*)*$", re.I)
 _CONDITION_LABEL = re.compile(r"\b(?:состояние(?:\s+квартиры)?|ремонт|отделка)\s*[:—-]?\s*$", re.I)
 _STATE_LABEL_AT_END = re.compile(r"(?:^|[,;])\s*состояние(?:\s+квартиры)?\s*$", re.I)
-_POSITIVE_REPAIR = {"не новый, но аккуратный ремонт", "хороший ремонт", "качественный ремонт",
+_POSITIVE_REPAIR = {"не новый, но аккуратный ремонт", "хороший ремонт", "качественный ремонт", "аккуратный ремонт",
                     "свежий ремонт", "новый ремонт", "средний ремонт", "косметический ремонт",
                     "дизайнерский ремонт", "евроремонт", "хорошее состояние",
                     "удовлетворительное состояние"}
@@ -60,7 +66,9 @@ def _excerpt(unit: str, start: int, end: int) -> str:
 
 def _claim_context(unit: str, match: re.Match, condition: str, paragraph_apartment: bool) -> bool:
     before, after = unit[:match.start()], unit[match.end():]
-    if "?" in unit or _HYPOTHETICAL.search(unit):
+    move_in_suffix = _MOVE_IN_SUFFIX.fullmatch(after)
+    claim_text = unit[:match.end()] if move_in_suffix else unit
+    if "?" in unit or _HYPOTHETICAL.search(claim_text):
         return False
     if condition != "не новый, но аккуратный ремонт" and _NEGATED_BEFORE.search(before[-50:]):
         return False
@@ -77,10 +85,11 @@ def _claim_context(unit: str, match: re.Match, condition: str, paragraph_apartme
         return False
     direct_apartment = bool(_APARTMENT.search(unit))
     apartment = direct_apartment or paragraph_apartment
+    apartment_move_in = bool(move_in_suffix) and not (_NON_APARTMENT.search(unit) or _FURNITURE.search(unit))
     if _GENERIC_COMPLEX.search(unit) and not direct_apartment:
         return False
     if condition == "хорошее состояние":
-        return direct_apartment and not _FURNITURE.search(left_clause + " " + right_clause)
+        return (direct_apartment or apartment_move_in) and not _FURNITURE.search(left_clause + " " + right_clause)
     if condition == "удовлетворительное состояние":
         # This match includes the explicit state label.  A nearby room or
         # furniture must not turn its own condition into a whole-flat claim.
@@ -90,16 +99,17 @@ def _claim_context(unit: str, match: re.Match, condition: str, paragraph_apartme
         # when the current clause explicitly names this apartment.
         return bool(_APARTMENT.search(left_clause + " " + right_clause)) and not _FURNITURE.search(left_clause + " " + right_clause)
     prefix = before.strip(_DECORATION)
-    return apartment or bool(_CONDITION_LABEL.search(before)) or bool(_DIRECT_PREFIX.fullmatch(prefix))
+    return apartment or apartment_move_in or bool(_CONDITION_LABEL.search(before)) or bool(_DIRECT_PREFIX.fullmatch(prefix))
 
 
 def _description_units(line: str):
     start = 0
     for separator in re.finditer(r"(?<=[.!?;])\s+|\s+[—–]\s+", line):
-        if separator.group().strip() in {"—", "–"} and _STATE_LABEL_AT_END.search(line[start:separator.start()]):
-            # Keep a structured-looking label and value together, including
-            # 'Этажность – 2 (5), состояние – удовлетворительное'.
-            continue
+        if separator.group().strip() in {"—", "–"}:
+            if (_STATE_LABEL_AT_END.search(line[start:separator.start()])
+                    or _MOVE_IN_SUFFIX.match(line, separator.start())):
+                # Retain the value of a state label or the context of an explicit claim.
+                continue
         yield line[start:separator.start()]
         start = separator.end()
     yield line[start:]

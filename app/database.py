@@ -17,6 +17,10 @@ async def initialize_database() -> None:
         await connection.run_sync(ensure_legacy_columns)
 
     # Enrich only descriptions already stored locally; this never requests a site.
-    from app.listing_service import backfill_repair_descriptions, backfill_mortgage_and_addresses
+    from app.listing_service import (
+        backfill_author_types, backfill_mortgage_and_addresses, backfill_pledge_status, backfill_repair_descriptions,
+    )
     await backfill_repair_descriptions()
     await backfill_mortgage_and_addresses()
+    await backfill_pledge_status()
+    await backfill_author_types()

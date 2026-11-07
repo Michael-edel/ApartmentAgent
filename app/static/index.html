@@ -10,7 +10,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
   <link rel="apple-touch-icon" href="/static/icon.svg">
-  <link rel="stylesheet" href="/static/styles.css?v=143">
+  <link rel="stylesheet" href="/static/styles.css?v=144">
   <style>.bookmarklet-code{width:100%;min-height:96px;resize:vertical;border:1px solid #d8e2ec;border-radius:12px;background:#f8fafc;color:#142033;padding:12px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}</style>
   <title>ApartmentAgent</title>
 </head>
@@ -68,16 +68,18 @@
         </label>
       </div>
       <label class="checkbox search-price-control"><input id="searchBathrooms" type="checkbox"> От 2 санузлов</label>
+      <label class="checkbox search-price-control"><input id="searchExcludePledged" type="checkbox" checked> Исключать квартиры в залоге</label>
       <p class="microcopy">Выберите критерии и нажмите «Искать сейчас». Настройки сохраняются для последующих автоматических поисков. При отборе «От 2 санузлов» показываются только подтверждённые варианты; объявления с одним санузлом или без данных о количестве скрыты.</p>
       <button id="runSearchButton" type="button">Искать сейчас</button>
       <p id="searchMessage" class="form-message" aria-live="polite"></p>
       <p id="searchMeta" class="microcopy"></p>
       <section id="bathroomCheckPanel" class="bathroom-check-panel" aria-labelledby="bathroomCheckHeading">
         <h3 id="bathroomCheckHeading">Автопроверка объявлений</h3>
-        <p class="microcopy">Для быстрого импорта по номеру нужно расширение ApartmentAgent 0.3.1 и открытый браузер. Объявления проверяются последовательно в одной вкладке. При проверке безопасности или CAPTCHA работа приостанавливается.</p>
+        <p class="microcopy">Для дополнения карточек нужно расширение ApartmentAgent 0.4.0 и открытый браузер. Нажмите «Дополнить карточки», чтобы проверить объявления без сведений о ремонте, ипотеке или авторе. При проверке безопасности работа приостанавливается.</p>
         <p id="bathroomCheckMode" class="microcopy" hidden></p>
         <p id="bathroomCheckCriteria" class="microcopy" hidden></p>
         <p id="bathroomCheckCounts" class="microcopy">Загружаю состояние проверки…</p>
+        <p id="bathroomCheckDetails" class="microcopy" hidden></p>
         <progress id="bathroomCheckProgress" max="1" value="0" aria-label="Прогресс автопроверки объявлений" hidden></progress>
         <p id="bathroomCheckMessage" class="form-message" aria-live="polite"></p>
         <p id="bathroomCheckCurrent" class="microcopy" hidden></p>
@@ -141,6 +143,7 @@
           <option value="score">Рейтинг</option>
           <option value="price_m2">Цена за м²</option>
           <option value="price">Цена</option>
+          <option value="pledge">Сначала без залога</option>
         </select>
         <select id="scoreFilter" aria-label="Минимальный рейтинг">
           <option value="" selected>Все</option>
@@ -149,6 +152,8 @@
         </select>
       </div>
     </section>
+    <label class="checkbox"><input id="listingShowPledged" type="checkbox"> Показать сохранённые квартиры в залоге</label>
+    <p id="listingPledgeSummary" class="microcopy" hidden></p>
     <section id="emptyState" class="form-card card">
       <p class="form-message">Сохранённых квартир пока нет.</p>
     </section>
@@ -180,6 +185,7 @@
         <label>Автор объявления<input name="seller_name" maxlength="200" placeholder="Если указан в объявлении"></label>
         <label>Тип автора<input name="seller_type" maxlength="100" placeholder="Например, хозяин или агент"></label>
         <label>Ипотека<select name="mortgage_supported"><option value="">Не указано</option><option value="true">Доступна</option><option value="false">Не доступна</option></select></label>
+        <label>В залоге<select name="is_pledged"><option value="">Не указано</option><option value="true">Да</option><option value="false">Нет</option></select></label>
         <div class="form-grid">
           <label>Широта<input name="latitude" type="number" step="any" min="-90" max="90" placeholder="51.128"></label>
           <label>Долгота<input name="longitude" type="number" step="any" min="-180" max="180" placeholder="71.430"></label>
@@ -200,6 +206,6 @@
     <a href="#listingGrid">★<span>Лучшие</span></a>
   </nav>
 
-  <script src="/static/app.js?v=158" defer></script>
+  <script src="/static/app.js?v=159" defer></script>
 </body>
 </html>

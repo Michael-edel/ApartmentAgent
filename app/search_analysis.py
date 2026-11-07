@@ -45,7 +45,7 @@ def _parse_price(text: str) -> tuple[int | None, bool]:
     return None, False
 
 
-def analyze_search_result(title: str, snippet: str | None, *, max_price: int, min_area: float, max_area: float, target_rooms: int = 2, mortgage_supported: bool | None = None) -> dict[str, Any]:
+def analyze_search_result(title: str, snippet: str | None, *, max_price: int, min_area: float, max_area: float, target_rooms: int = 2, mortgage_supported: bool | None = None, is_pledged: bool | None = None) -> dict[str, Any]:
     text = f"{title} {snippet or ''}".replace("\u00a0", " ")
     lower = text.lower()
     mortgage_supported = mortgage_supported if mortgage_supported is not None else parse_mortgage_text(text)
@@ -112,6 +112,9 @@ def analyze_search_result(title: str, snippet: str | None, *, max_price: int, mi
     if mortgage_supported is False:
         score -= 25
         reasons.append("В объявлении указано: ипотека недоступна")
+    if is_pledged is True:
+        score -= 25
+        reasons.append("В залоге")
     score = max(0, min(100, score))
     if score >= 85:
         verdict = "СРОЧНО ПОСМОТРЕТЬ"
@@ -130,6 +133,7 @@ def analyze_search_result(title: str, snippet: str | None, *, max_price: int, mi
         "area_m2": area,
         "rooms": rooms,
         "mortgage_supported": mortgage_supported,
+        "is_pledged": is_pledged,
         "bathrooms_count": parse_bathrooms_count(text),
         "bathrooms_count_is_lower_bound": bathrooms_is_lower_bound(text),
         "floor": floor,

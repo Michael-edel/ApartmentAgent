@@ -30,6 +30,7 @@ class SearchPreference(Base):
     min_area_m2: Mapped[float | None] = mapped_column(Float, nullable=True)
     max_area_m2: Mapped[float | None] = mapped_column(Float, nullable=True)
     min_bathrooms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    exclude_pledged: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 
 class Listing(Base):
@@ -77,6 +78,7 @@ class Listing(Base):
     )
     is_full_two_room: Mapped[bool] = mapped_column(Boolean, default=True)
     mortgage_supported: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    is_pledged: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     krisha_district_price_per_m2: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     krisha_city_price_per_m2: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     krisha_comparison_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -137,6 +139,7 @@ class SearchResult(Base):
     title: Mapped[str] = mapped_column(String(500))
     snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
     mortgage_supported: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    is_pledged: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     bathrooms_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     bathrooms_count_is_lower_bound: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     status: Mapped[str] = mapped_column(String(30), default="new", index=True)

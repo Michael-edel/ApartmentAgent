@@ -347,6 +347,7 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
     reset.now += 30000;
     await resetWorker.kick(appSender);
     await resetWorker.finished({tab:{id:reset.state().task.tab_id}}, 'unknown', '', resetReason);
+    assert.equal(reset.outcomes.at(-1), resetReason === 'unavailable' ? 'unavailable' : 'unknown');
     assert.equal(reset.state().unreadable_streak, 0, 'unavailable/complete unknown pages reset the unreadable streak');
     reset.now += 30000;
     await resetWorker.kick(appSender);

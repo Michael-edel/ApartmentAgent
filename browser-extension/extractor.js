@@ -24,12 +24,19 @@
       if (!allowAside && (current.tagName === 'ASIDE' || current.getAttribute?.('role') === 'complementary')) return true;
       const markers = `${current.className || ''} ${current.getAttribute?.('data-testid') || ''}`.split(/\s+/);
       if (markers.some(marker => /^(?:recommendations?(?:__.*|-.*)?|similar(?:__.*|-.*)?|related(?:__.*|-.*)?|advertisement|ad-banner)$/i.test(marker)
-        || /^(?:offer|listing)__(?:recommendations?|similar)(?:$|[_-])/i.test(marker))) return true;
+        || /^(?:(?:offer|listing)__(?:recommendations?|similar)|(?:a|offer|listing)-card)(?:$|[_-])/i.test(marker))) return true;
     }
     return false;
   };
   const listingNodes = (selector, allowAside = false) => [...document.querySelectorAll(selector)]
     .filter(node => visibleProperty(node) && !outsideListing(node, allowAside));
+  const inAuthorContext = node => {
+    for (let current = node; current; current = current.parentElement) {
+      const marker = `${current.className || ''} ${current.id || ''} ${current.getAttribute?.('data-testid') || ''} ${current.getAttribute?.('itemprop') || ''}`;
+      if (/(?:^|[\s_-])(?:owners?|sellers?|contacts?|agents?|authors?|advertisers?|brokers?|realtors?|company)(?=$|[\s_-])/i.test(marker)) return true;
+    }
+    return false;
+  };
   const labels = {
     'город':'Город', 'район':'Район', 'адрес':'Адрес', 'жилой комплекс':'Жилой комплекс',
     'тип дома':'Тип дома', 'год постройки':'Год постройки', 'этаж':'Этаж', 'этажей в доме':'Этажей в доме',
@@ -37,7 +44,7 @@
     'количество комнат':'Количество комнат', 'комнат':'Количество комнат',
     'состояние квартиры':'Состояние квартиры', 'ремонт':'Состояние квартиры',
     'санузел':'Санузел', 'санузлы':'Санузел', 'с/у':'Санузел',
-    'ипотека':'Ипотека', 'в ипотеку':'Ипотека', 'высота потолков':'Высота потолков',
+    'ипотека':'Ипотека', 'в ипотеку':'Ипотека', 'возможность ипотеки':'Ипотека', 'высота потолков':'Высота потолков',
     'балкон':'Балкон', 'балкон или лоджия':'Балкон', 'балкон остеклён':'Остекление балкона', 'балкон остеклен':'Остекление балкона',
     'дверь':'Дверь', 'входная дверь':'Дверь', 'интернет':'Интернет', 'мебель':'Мебель', 'меблирована':'Мебель',
     'пол':'Пол', 'парковка':'Парковка', 'безопасность':'Безопасность', 'в залоге':'В залоге',
@@ -79,30 +86,40 @@
     const semantic = semanticLabels[node.getAttribute?.('data-name')];
     return semantic && text ? [semantic,text] : null;
   };
-  for (const row of listingNodes('.offer__info-item, .a-list__item, [data-name^="flat."], [data-name^="house."], [data-name="city"], dt')) {
+  for (const row of listingNodes('.offer__info-item, .a-list__item, [data-name^="flat."], [data-name^="house."], [data-name="city"], dt').filter(node => !inAuthorContext(node))) {
     const pair = propertyPair(row);
     if (pair && pair[1] && !(pair[0] in propertyDetails) && Object.keys(propertyDetails).length < 60) propertyDetails[pair[0].slice(0,100)] = pair[1].slice(0,1500);
   }
+  const domMortgageField = propertyDetails['Ипотека'];
   const descriptionNodes = listingNodes('.offer__description, [data-testid="description"], [data-testid="advert-description"], [itemprop="description"]');
   const prose = value => String(value ?? '').replace(/\r\n?/g,'\n').split('\n').map(line => line.replace(/[ \t]+/g,' ').trim()).join('\n').trim();
-  const domDescription = descriptionNodes.map(node => prose(node.innerText ?? node.textContent))
+  const domDescription = descriptionNodes.filter(node => !inAuthorContext(node)).map(node => prose(node.innerText ?? node.textContent))
     .filter(text => text.length >= 10).sort((a,b) => b.length-a.length)[0]?.slice(0,20000) || null;
   const authorNodes = listingNodes('[data-testid="seller"], [data-testid="author"], .offer__contacts, .owners, .owner, [itemprop="seller"]', true);
-  const authorText = authorNodes.map(propertyText).join(' ');
+  const withinAuthorBlock = node => {
+    for (let current = node; current; current = current.parentElement) if (authorNodes.includes(current)) return true;
+    return false;
+  };
+  const sellerRole = /^(Хозяин(?:\s+недвижимости)?|Собственник|Специалист(?:\s+по\s+недвижимости)?|Компания|Агентство\s+недвижимости|Застройщик|Ри[еэ]лтор|Агент\s+по\s+недвижимости|Частное\s+лицо)(?=$|[\s.,;:])/i;
   const sellerTypeText = value => {
     const text = clean(value);
-    const match = text.match(/Хозяин(?:\s+недвижимости)?|Собственник|Специалист(?:\s+по\s+недвижимости)?|Компания|Агентство\s+недвижимости|Застройщик/i);
-    return match ? clean(match[0]).slice(0,100) : null;
+    const role = text.match(sellerRole)?.[0];
+    return role === text ? role : null;
   };
-  const domSellerType = sellerTypeText(authorText)
-    || listingNodes('[data-testid="seller-type"], .owners__type, .owner__type', true).map(node => sellerTypeText(propertyText(node))).find(Boolean) || null;
+  const domSellerType = listingNodes('[data-testid="seller-type"], .owners__type, .owner__type', true)
+    .filter(withinAuthorBlock).map(node => sellerTypeText(propertyText(node))).find(Boolean)
+    || authorNodes.map(node => {
+      const text = propertyText(node);
+      return text.match(/^Автор\s+объявления\s*[:—–-]?\s*(.*)$/i)?.[1]?.match(sellerRole)?.[0] || sellerTypeText(text);
+    }).find(Boolean) || null;
   const validSellerName = value => {
+    if (typeof value !== 'string') return null;
     const text = clean(value);
-    return text && text.length <= 200 && !/^(?:Автор объявления|Хозяин(?: недвижимости)?|Собственник|Специалист(?: по недвижимости)?|Компания|Агентство недвижимости|Застройщик|Показать телефоны)$/i.test(text)
+    return text && text.length <= 200 && !sellerTypeText(text) && !/^(?:Автор объявления|Показать телефоны|Работает в компании(?:\s|$))/i.test(text)
       && !/^\+?[\d ()-]{6,}$/.test(text) ? text : null;
   };
   const domSellerName = listingNodes('[data-testid="seller-name"], .owners__name, .owner__name, [itemprop="seller"] [itemprop="name"], [data-name="seller.name"]', true)
-    .map(node => validSellerName(propertyText(node))).find(Boolean) || null;
+    .filter(withinAuthorBlock).map(node => validSellerName(propertyText(node))).find(Boolean) || null;
   const hasDomEvidence = Object.keys(propertyDetails).length > 0 || !!domDescription
     || authorNodes.some(node => /Автор\s+объявления/i.test(propertyText(node))) || !!domSellerName || !!domSellerType;
   const leadingNumber = value => {
@@ -239,7 +256,8 @@
     } catch (_) { return null; }
   };
   const targetId = adIdFromUrl(location.href);
-  const excludedBranch = key => /^(?:recommendations?|recommended(?:Adverts?|Listings?|Offers?)?|other(?:Adverts?|Listings?|Offers?)|similar(?:Adverts?|Listings?|Offers?)?|related(?:Adverts?|Listings?|Offers?)?|suggestions?)$/i.test(key);
+  const excludedBranch = key => /^(?:recommendations?|recommended(?:Adverts?|Listings?|Offers?)?|other(?:Adverts?|Listings?|Offers?)|similar(?:Adverts?|Listings?|Offers?)?|related(?:Adverts?|Listings?|Offers?)?|suggestions?|nearby(?:Adverts?|Listings?|Offers?)?)$/i.test(key.replace(/[_-]/g, ''));
+  const authorBranch = key => /^(?:(?:seller|owner|advertiser|author|publisher|agent|broker|realtor|agency|realEstateAgent|contact|provider)(?:s|Profile)?)$/i.test(key.replace(/[_-]/g, ''));
   const entityTypes = item => (Array.isArray(item['@type']) ? item['@type'] : [item['@type']]).map(value => String(value || ''));
   const nonListingType = item => entityTypes(item).some(type => /^(?:Person|Organization|RealEstateAgent|PostalAddress|GeoCoordinates|Offer|AggregateOffer)$/i.test(type));
   const listingShape = item => !nonListingType(item) && (['price','price_kzt','offers','area','area_m2','areaM2','floorSize','rooms','numberOfRooms','additionalProperty','properties','property_details','mainEntity']
@@ -262,7 +280,7 @@
     const ids = identities(value);
     if (ids.length && (ids.length !== 1 || ids[0] !== targetId)) return;
     if (targetId && ids[0] === targetId && listingShape(value)) candidates.push(value);
-    for (const [key,child] of Object.entries(value)) if (!excludedBranch(key)) selectCandidate(child);
+    for (const [key,child] of Object.entries(value)) if (!excludedBranch(key) && !authorBranch(key)) selectCandidate(child);
   };
   for (const root of rawRoots) selectCandidate(root);
   const prune = (value, isRoot = false) => {
@@ -281,7 +299,7 @@
       if (entityTypes(value).some(type => /^(?:Person|Organization|RealEstateAgent)$/i.test(type))) return;
       yield value;
       for (const [key,child] of Object.entries(value)) {
-        if (!/^(?:seller|owner|advertiser|author|publisher|agent|contact|provider)$/i.test(key)) yield* walk(child);
+        if (!authorBranch(key)) yield* walk(child);
       }
     }
   }
@@ -308,35 +326,64 @@
     return [...new Set(parts)].join(', ') || null;
   };
   const findText = keys => findValue(keys, textValue);
-  const jsonListingObjects = roots.flatMap(root => [...walk(root)].filter(item => listingShape(item)));
   const jsonDetailValues = {};
+  const detailValue = value => value && typeof value === 'object' ? value.text ?? value.label ?? value.value : value;
+  const usableRepair = value => {
+    const text = detailValue(value);
+    return typeof text === 'string' && /\p{L}/u.test(text) && !/^(?:не\s+указан[оа]?|нет\s+данных|неизвестно)[.!]?$/i.test(clean(text)) ? clean(text) : null;
+  };
   const addJsonDetail = (rawLabel, rawValue) => {
-    const label = semanticLabels[rawLabel] || labels[labelKey(rawLabel)] || clean(rawLabel);
+    const label = semanticLabels[labelKey(rawLabel)] || labels[labelKey(rawLabel)] || clean(rawLabel);
     if (!label || label.length > 100 || /Автор|Реклама|Похожие|телефон|Политика|Подписаться/i.test(label)) return;
-    if (rawValue && typeof rawValue === 'object') rawValue = rawValue.value ?? rawValue.text ?? rawValue.label;
+    rawValue = detailValue(rawValue);
+    if (label === 'Состояние квартиры' && !usableRepair(rawValue)) return;
     if (!['string','number','boolean'].includes(typeof rawValue)) return;
     const value = clean(typeof rawValue === 'boolean' ? rawValue ? 'Да' : 'Нет' : rawValue);
     if (value && !(label in jsonDetailValues) && Object.keys(jsonDetailValues).length < 60) jsonDetailValues[label] = value.slice(0,1500);
   };
-  for (const item of jsonListingObjects) {
+  const jsonDetailSources = new Set(roots.flatMap(item => [item, item.details, item.data, item.attributes])
+    .filter(item => item && typeof item === 'object' && !Array.isArray(item) && !nonListingType(item)));
+  const jsonDetailField = (keys, parser) => {
+    for (const item of jsonDetailSources) for (const key of keys) {
+      const value = parser(item[key]);
+      if (value !== null) return value;
+    }
+    return null;
+  };
+  for (const item of jsonDetailSources) {
     for (const container of ['additionalProperty','properties','property_details','characteristics','parameters']) {
       const values = item[container];
       if (Array.isArray(values)) for (const value of values) {
-        if (value && typeof value === 'object') addJsonDetail(value.name ?? value.label ?? value.title ?? value.propertyID, value.value ?? value.text);
+        if (value && typeof value === 'object') {
+          const semanticKey = labelKey(value.propertyID);
+          const name = semanticLabels[semanticKey] ? semanticKey : value.name ?? value.label ?? value.title ?? value.propertyID;
+          addJsonDetail(name, value.text ?? value.value);
+        }
       }
       else if (values && typeof values === 'object') for (const [key,value] of Object.entries(values)) addJsonDetail(key,value);
     }
     for (const [key,value] of Object.entries(item)) if (semanticLabels[key]) addJsonDetail(key,value);
   }
   for (const [key,value] of Object.entries(jsonDetailValues)) if (!(key in propertyDetails) && Object.keys(propertyDetails).length < 60) propertyDetails[key] = value;
-  const jsonDescription = jsonListingObjects.map(item => typeof item.description === 'string' ? prose(item.description) : '')
+  const jsonDescription = roots.map(item => typeof item.description === 'string' ? prose(item.description) : '')
     .filter(value => value.length >= 10).sort((a,b) => b.length-a.length)[0]?.slice(0,20000) || null;
-  const jsonTitle = jsonListingObjects.map(item => typeof (item.title ?? item.headline ?? item.name) === 'string' ? clean(item.title ?? item.headline ?? item.name) : '').find(Boolean) || null;
-  const jsonSeller = jsonListingObjects.map(item => item.seller ?? item.owner ?? item.advertiser ?? item.author).find(value => value && typeof value === 'object');
-  const jsonSellerName = validSellerName(jsonSeller?.name) || findValue(['sellerName','seller_name','ownerName','owner_name','advertiserName','advertiser_name'],validSellerName);
-  const jsonSellerType = sellerTypeText(jsonSeller?.sellerType ?? jsonSeller?.type ?? jsonSeller?.role);
+  const jsonTitle = roots.map(item => typeof (item.title ?? item.headline ?? item.name) === 'string' ? clean(item.title ?? item.headline ?? item.name) : '').find(Boolean) || null;
+  const sellerKeys = ['seller', 'owner', 'advertiser', 'author'];
+  const sellerNameKeys = sellerKeys.flatMap(key => [`${key}Name`, `${key}_name`]);
+  const sellerTypeKeys = sellerKeys.flatMap(key => [`${key}Type`, `${key}_type`]);
+  const sellerDetails = (item, allowGeneric = false) => {
+    const read = (keys, validate) => keys.map(key => validate(item?.[key])).find(Boolean) || null;
+    return {
+      name: read(allowGeneric ? [...sellerNameKeys, 'name', 'displayName', 'display_name'] : sellerNameKeys, validSellerName),
+      type: read(allowGeneric ? [...sellerTypeKeys, 'role', 'type'] : sellerTypeKeys, sellerTypeText),
+    };
+  };
+  const jsonSeller = roots.flatMap(item => [sellerDetails(item), ...sellerKeys.map(key => sellerDetails(item[key], true))])
+    .find(seller => seller.name || seller.type);
+  const jsonRepair = usableRepair(jsonDetailValues['Состояние квартиры'])
+    || jsonDetailField(['repairCondition', 'repair_condition', 'renovation'], usableRepair);
   const jsonRichEvidence = !!(roots.length && jsonDescription
-    && (Object.keys(jsonDetailValues).length >= 2 || (jsonSellerName && findText(['repairCondition','repair_condition','renovation']))));
+    && (Object.keys(jsonDetailValues).length >= 2 || (jsonSeller?.name && jsonRepair)));
   const jsonComparison = {
     krisha_district_price_per_m2:findValue(['krisha_district_price_per_m2'],value => Number.isSafeInteger(Number(value)) && Number(value) > 0 && Number(value) <= 1000000000 ? Number(value) : null),
     krisha_city_price_per_m2:findValue(['krisha_city_price_per_m2'],value => Number.isSafeInteger(Number(value)) && Number(value) > 0 && Number(value) <= 1000000000 ? Number(value) : null),
@@ -361,32 +408,26 @@
     }
     return null;
   };
-  const sellerName = () => domSellerName || findValue(['sellerName', 'seller_name', 'ownerName', 'owner_name', 'advertiserName', 'advertiser_name'], value =>
-    typeof value === 'string' ? validSellerName(value) : null) || jsonSellerName;
-  const sellerType = () => domSellerType || findValue(['sellerType', 'seller_type', 'ownerType', 'owner_type', 'advertiserType', 'advertiser_type'], value =>
-    typeof value === 'string' && clean(value) ? clean(value).slice(0, 100) : null) || jsonSellerType;
   const mortgageValue = value => {
     if (typeof value === 'boolean') return value;
-    if (typeof value !== 'string') return null;
-    const normalized = clean(value).toLowerCase();
-    if (['да', 'true'].includes(normalized)) return true;
-    if (['нет', 'жоқ', 'жок', 'false'].includes(normalized)) return false;
-    return mortgageTextValue(normalized);
-  };
-  const mortgageTextValue = text => {
-    const value = clean(text);
-    if (/(?:ипотек(?:а|и|у|ой|е)\s*[:—–-]?\s*(?:нет|жоқ|жок)(?=$|[\s.,;!?])(?!\s+(?:емес|проблем|ограничений|трудностей))|ипотека\s+не\s+(?:рассматривается|проходит|подходит|предусмотрена)|не\s+прода[её]тся\s+в\s+ипотеку)/i.test(value)) return false;
-    if (/(?:ипотека\s*[:—–-]\s*да|(?:можно|возможна\s+покупка)\s+в\s+ипотеку|ипотека\s+(?:возможна|доступна)|подходит\s+под\s+ипотеку)/i.test(value)) return true;
+    const text = detailValue(value);
+    if (typeof text === 'boolean') return text;
+    if (typeof text !== 'string') return null;
+    const normalized = clean(text).replace(/[.!]+$/, '').toLowerCase();
+    if (/^(?:(?:ипотека|в ипотеку)\s*[:—–-]?\s*)?(?:да|true)$/.test(normalized)
+      || /^(?:можно в ипотеку(?: и без ипотеки)?|возможна покупка в ипотеку|ипотека (?:возможна|доступна)|в ипотеку проходит|подходит под ипотеку)$/.test(normalized)) return true;
+    if (/^(?:ипотек[аи]\s*[:—–-]?\s*)?(?:нет|жоқ|жок|false)$/.test(normalized)
+      || /^(?:ипотека не (?:рассматривается|проходит|подходит|предусмотрена|возможна|доступна)|в ипотеку не проходит|не подходит под ипотеку|не прода[её]тся в ипотеку)$/.test(normalized)) return false;
     return null;
   };
-  const mortgageSupported = () => {
-    const structured = mortgageValue(propertyDetails['Ипотека']) ?? findValue(['mortgageSupported', 'mortgage_supported', 'isMortgageAvailable'], mortgageValue);
-    const fieldText = listingNodes('[data-testid="mortgage"], [data-testid="mortgage-status"], [data-property="mortgage"]').map(propertyText).join(' ');
-    const descriptionText = domDescription || jsonDescription || '';
-    const values = [structured, mortgageTextValue(fieldText), mortgageTextValue(descriptionText), domDescription ? null : mortgageTextValue(meta('og:description') || meta('description'))];
-    if (values.includes(false)) return false;
-    return values.includes(true) ? true : null;
-  };
+  // Seller prose and the headline are sent separately so the server can retain the source and quote.
+  const domMortgageText = mortgageValue(domMortgageField) !== null ? domMortgageField
+    : listingNodes('[data-testid="mortgage"], [data-testid="mortgage-status"], [data-property="mortgage"]')
+      .filter(node => !inAuthorContext(node)).map(propertyText).find(text => mortgageValue(text) !== null);
+  if (domMortgageText) propertyDetails['Ипотека'] = domMortgageText.slice(0,1500);
+  const mortgageSupported = mortgageValue(domMortgageText)
+    ?? mortgageValue(jsonDetailValues['Ипотека'])
+    ?? jsonDetailField(['mortgageSupported', 'mortgage_supported', 'isMortgageAvailable'], mortgageValue);
   const addressFromText = value => {
     const normalized = clean(value);
     const patterns = [
@@ -408,13 +449,6 @@
     // That caption is not the apartment's location, even when it precedes h1.
     return text.length >= 5 && text.length <= 500 && !/работает\s+в\s+компании/i.test(text) ? text : null;
   };
-  const inAuthorContext = node => {
-    for (let current = node; current; current = current.parentElement) {
-      const marker = `${current.className || ''} ${current.id || ''} ${current.getAttribute?.('data-testid') || ''} ${current.getAttribute?.('itemprop') || ''}`;
-      if (/(?:^|[\s_-])(?:owners?|sellers?|contacts?|agents?|authors?|advertisers?|company)(?=$|[\s_-])/i.test(marker)) return true;
-    }
-    return false;
-  };
   const coordinate = (value, minimum, maximum) => {
     const parsed = typeof value === 'number' ? value : Number(clean(value).replace(',', '.').replace(/[^0-9+-.]/g, ''));
     return Number.isFinite(parsed) && parsed >= minimum && parsed <= maximum ? parsed : null;
@@ -434,7 +468,7 @@
   const pageCoordinates = () => {
     const nodes = document.querySelectorAll('a[href], iframe[src], [data-latitude], [data-longitude], [data-lat], [data-lng], [data-coordinates]');
     for (const node of nodes) {
-      if (!visibleProperty(node) || outsideListing(node)) continue;
+      if (!visibleProperty(node) || outsideListing(node) || inAuthorContext(node)) continue;
       const pair = coordinatePair(node.href || node.src || node.getAttribute('data-coordinates'));
       if (pair) return pair;
       const latitude = coordinate(node.getAttribute('data-latitude') || node.getAttribute('data-lat'), -90, 90);
@@ -514,7 +548,7 @@
   photos.push(meta('og:image'), meta('twitter:image'));
   const jsonPhotos = [];
   const imageKeys = new Set(['image', 'images', 'photo', 'photos', 'photoUrls', 'photo_urls', 'imageUrls', 'gallery', 'pictures']);
-  for (const item of jsonListingObjects) {
+  for (const item of roots) {
     for (const [key,value] of Object.entries(item)) {
       if (!imageKeys.has(key)) continue;
       for (const candidate of (Array.isArray(value) ? value : [value])) jsonPhotos.push(typeof candidate === 'string' ? candidate : candidate?.url || candidate?.src);
@@ -545,7 +579,7 @@
   // Both coordinates must come from the same advertised location, never from
   // two JSON snapshots or the author's office/profile.
   let jsonCoordinates = null;
-  for (const item of jsonListingObjects.flatMap(value => [value,value.geo,value.coordinates,value.location?.geo])) {
+  for (const item of roots.flatMap(value => [value,value.geo,value.coordinates,value.location?.geo])) {
     if (!item || typeof item !== 'object') continue;
     const latitudeKey = ['latitude','lat','geoLatitude','geoLat'].find(key => key in item);
     const longitudeKey = ['longitude','lng','lon','geoLongitude','geoLon'].find(key => key in item);
@@ -563,7 +597,7 @@
     source_url: location.href.split('#')[0],
     title: clean(headline || `${rooms || 2}-комнатная квартира`).slice(0,300),
     description,
-    repair_condition: (propertyDetails['Состояние квартиры'] || findText(['repairCondition', 'repair_condition', 'renovation']))?.slice(0,500) || null,
+    repair_condition: (usableRepair(propertyDetails['Состояние квартиры']) || jsonRepair)?.slice(0,500) || null,
     property_details: propertyDetails,
     details_extracted: !!(price && area && rooms && (hasDomEvidence || jsonRichEvidence)),
     city,
@@ -584,9 +618,9 @@
     building_year: buildingYear,
     building_type: /кирпич|brick/.test(buildingText) ? 'brick' : /монолит|monolith/.test(buildingText) ? 'monolith' : /панел|panel/.test(buildingText) ? 'panel' : null,
     is_full_two_room: rooms === 2,
-    mortgage_supported: mortgageSupported(),
-    seller_name: sellerName(),
-    seller_type: sellerType(),
+    mortgage_supported: mortgageSupported,
+    seller_name: domSellerName || jsonSeller?.name || null,
+    seller_type: domSellerType || (domSellerName && jsonSeller?.name && jsonSeller.name !== domSellerName ? null : jsonSeller?.type) || null,
     photo_urls: photoUrls,
   };
   return payload;

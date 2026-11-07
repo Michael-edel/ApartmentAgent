@@ -19,6 +19,8 @@
   // Deduplicate successful payloads only during this bounded observation run.
   const startedAt = Date.now();
   const deadline = startedAt + 12000;
+  const saveDeadline = deadline + 3000;
+  let finalSnapshotSeen = false;
   let observedSignature = '';
   let stableSince = startedAt;
   let lastSuccessfulSignature = '';
@@ -136,7 +138,18 @@
       notifyQueue('unknown', 'Объявление удалено или неактуально', 'unavailable');
       return;
     }
-    if (Date.now() >= deadline) { finish(); return; }
+    const settling = Date.now() >= deadline;
+    if (settling && (Date.now() >= saveDeadline || (finalSnapshotSeen && !inFlight))) {
+      finish();
+      return;
+    }
+    if (settling && inFlight) {
+      window.setTimeout(observe, 400);
+      return;
+    }
+    // The last DOM read may contain fields that arrived after the previous
+    // poll. Save that snapshot and wait briefly for the acknowledgement.
+    if (settling) finalSnapshotSeen = true;
     if (!inFlight && failures < 3 && Date.now() >= retryAfter) {
       try {
         if (extractionError) throw extractionError;
@@ -183,7 +196,8 @@
         lastError = error instanceof Error ? error.message : 'не удалось прочитать объявление';
       }
     }
-    window.setTimeout(observe, 400);
+    if (finalSnapshotSeen && !inFlight) finish();
+    else window.setTimeout(observe, 400);
   };
   window.setTimeout(observe, 1200);
 })();

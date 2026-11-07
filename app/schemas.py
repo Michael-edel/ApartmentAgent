@@ -67,6 +67,7 @@ class ListingCreate(BaseModel):
     twogis_url: str | None = Field(default=None, max_length=500)
     is_full_two_room: bool = True
     mortgage_supported: bool | None = None
+    is_pledged: bool | None = None
     krisha_district_price_per_m2: int | None = Field(default=None, gt=0, le=1_000_000_000)
     krisha_city_price_per_m2: int | None = Field(default=None, gt=0, le=1_000_000_000)
     krisha_comparison_district: str | None = Field(default=None, max_length=150)

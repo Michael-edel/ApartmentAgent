@@ -16,6 +16,7 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
   const events = [];
   const messages = [];
   const notices = [];
+  let authorText, authorBlock;
   const setTimeout = (callback, delay) => tasks.push({at: now + delay, sequence:sequence++, callback});
   const document = {
     title:'4-комнатная квартира 100 м²',
@@ -23,6 +24,10 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
     querySelector(selector) {return selector.startsWith('[data-apartment-agent-extension-message]') ? notices.find(node => !node.removed) || null : null;},
     querySelectorAll(selector) {
       const extra = extraAt(now);
+      if (authorText !== extra.author) {
+        authorText = extra.author;
+        authorBlock = authorText ? {textContent:authorText} : null;
+      }
       if (selector.startsWith('[data-apartment-agent-extension-message]')) return notices.filter(node => !node.removed);
       if (selector === 'h1, [role="heading"][aria-level="1"]') return mainHeading ? [typeof mainHeading === 'string' ? {textContent:mainHeading} : mainHeading] : [];
       if (selector.startsWith('form[action*="captcha"')) return [captchaForm, ...captchaWidgets].filter(Boolean).filter(node => {
@@ -37,8 +42,8 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
       });
       if (selector.startsWith('.offer__info-item')) return extra.properties || [];
       if (selector.startsWith('.offer__description')) return extra.description ? [{textContent:extra.description}] : [];
-      if (selector.startsWith('[data-testid="seller"]')) return extra.author ? [{textContent:extra.author}] : [];
-      if (selector.startsWith('[data-testid="seller-name"]')) return extra.name ? [{textContent:extra.name}] : [];
+      if (selector.startsWith('[data-testid="seller"]')) return authorBlock ? [authorBlock] : [];
+      if (selector.startsWith('[data-testid="seller-name"]')) return extra.name ? [{textContent:extra.name,parentElement:authorBlock}] : [];
       if (selector.startsWith('.offer__photos img')) return extra.photos || [];
       const value = fieldAt(now);
       if (value && selector.startsWith('[data-testid="bathrooms"]')) return [{textContent:value}];
@@ -149,6 +154,17 @@ assert.equal(lateDetails.outcomes.length,0,'do not close the queued page on its 
 lateDetails.advance(14000);
 assert.deepEqual(lateDetails.outcomes,['imported']);
 assert.equal(lateDetails.events[0].at,12000);
+
+const finalFields = fixture({detailsMode:true, extraAt:time => time < 11950 ? {} : {
+  author:'Автор объявления', name:'Айгуль',
+  properties:[{className:'offer__info-item',textContent:'Состояние квартиры свежий ремонт'}],
+}});
+finalFields.run();
+finalFields.advance(12000);
+assert.equal(finalFields.posted.at(-1).seller_name, 'Айгуль');
+assert.equal(finalFields.outcomes.length, 0, 'wait for acknowledgement of the final snapshot');
+finalFields.advance(12400);
+assert.deepEqual(finalFields.outcomes, ['imported']);
 
 const metadataOnlyDetails = fixture({detailsMode:true});
 metadataOnlyDetails.run();
@@ -289,6 +305,8 @@ assert.match(missing.errors[0], /Заголовок: 4-комнатная ква
 const noResponse = fixture({respond:false});
 noResponse.run();
 noResponse.advance(14000);
+assert.equal(noResponse.outcomes.length, 0, 'late acknowledgements get a short bounded wait');
+noResponse.advance(15200);
 assert.equal(noResponse.posted.length, 1, 'an in-flight request is not duplicated');
 assert.match(noResponse.messages.at(-1), /подтверждение сохранения не получено/);
 

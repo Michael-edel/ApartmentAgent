@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     max_area_m2: float = 70.0
     min_score_to_notify: int = 85
     min_bathrooms: int = 0
+    exclude_pledged: bool = True
 
     @field_validator("search_providers", mode="before")
     @classmethod
