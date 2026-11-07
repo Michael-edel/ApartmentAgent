@@ -101,7 +101,7 @@ def _mortgage_snapshot(value, source_kind, description, title, details, source):
         if explicit is not None:
             return explicit, "manual" if source == "manual" else "field", None
     description, title = description or "", title or ""
-    found = parse_mortgage_claim(description + "\n" + title)
+    found = parse_mortgage_claim(description, title=title)
     if found:
         kind = "description" if found[1] in description else "title" if found[1] in title else None
         if kind:

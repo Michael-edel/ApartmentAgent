@@ -19,11 +19,12 @@ _POSITIVE = re.compile(
     r"|\bипотеку\s+(?:рассмотрим|рассматриваем|рассматривают)\b"
     r"|\b(?:рассмотрим|рассматриваем)\s+(?:любую\s+)?ипотеку\b"
     r"|\b(?:покупка|продажа)\s+в\s+ипотеку\b"
-    r"|\bв\s+ипотеку\s+проходит\b"
+    r"|\b(?:в\s+)?ипотеку\s+проходит\b"
     r"|\b(?:возможно|доступно)\s+оформление\s+(?:(?:любого\s+вида|партн[её]рской|банковской)\s+){0,3}ипотеки\b",
     re.I,
 )
 _PAYMENT_OPTION = re.compile(r"^[\s•*✔✅☑️—–-]*ипотека\s*[,;:—–-]\s*документы\s+(?:есть|готовы|в\s+порядке)\s*[.!]?\s*$", re.I)
+_SALE_OPTIONS = re.compile(r"^[\s•*✔✅☑️—–-]*торг\s*,\s*ипотека[.!]?\s*$", re.I)
 _CASH_ONLY = re.compile(r"\bтолько\s+(?:(?:за|с|по)\s+)?наличн(?:ый|ые|ыми|ых|ым|ого)(?:\s+расч[её]т(?:ом|а)?)?\b", re.I)
 _SERVICE = re.compile(r"\b(?:консультаци\w*|калькулятор\w*|рассчит(?:ать|аем|айте)|сопровождени\w*|услуги\s+(?:по\s+)?(?:оформлени\w*|ипотек\w*))\b", re.I)
 _UNCERTAIN = re.compile(r"\b(?:не\s+уверен[аы]?|под\s+вопросом|нужно\s+уточнить|пока\s+не\s+зна\w*|в\s+будущем|после\s+(?:получения|оформления|сдачи))\b", re.I)
@@ -32,7 +33,7 @@ _CASH_PROMOTION = re.compile(r"\b(?:скидк\w*|акци\w*|торг\w*|бон
 _OTHER_PAYMENT = re.compile(r"\b(?:первоначальн\w*\s+взнос\w*|перв(?:ый|ого)\s+взнос\w*|аванс\w*|задаток\w*|комисси\w*|услуг\w*)\b", re.I)
 _SALE_CONTEXT = re.compile(r"\b(?:квартира|жиль[еёя]|апартаменты|прода[её]тся|продажа|реализуется)\b", re.I)
 _OTHER_OBJECT = re.compile(r"\b(?:(?:соседн\w*|друг\w*)\s+(?:квартир\w*|жиль\w*|объект\w*)|у\s+сосед\w*)\b", re.I)
-_QUESTION_OR_APPROVAL = re.compile(r"\b(?:проходит\s+ли|если\s+банк|после\s+одобрени\w*|при\s+одобрени\w*)\b", re.I)
+_QUESTION_OR_APPROVAL = re.compile(r"\b(?:проходит\s+ли|если|при\s+условии|после\s+одобрени\w*|при\s+одобрени\w*)\b", re.I)
 
 
 def _unit(text: str, start: int, end: int) -> tuple[str, int, int]:
@@ -60,13 +61,18 @@ def _allowed(unit: str, start: int, *, cash: bool = False) -> bool:
     return True
 
 
-def parse_mortgage_claim(text: str | None) -> tuple[bool, str] | None:
+def parse_mortgage_claim(text: str | None, *, title: str | None = None) -> tuple[bool, str] | None:
     """Return an explicit seller payment claim and literal evidence, not bank approval.
 
     Only already imported advert prose is examined. No site or mortgage service
     is requested. Cash-only and a positive option together remain ambiguous;
     an explicit mortgage refusal retains its existing priority.
+    Supplying title separately identifies text as the actual advert description.
     """
+    description = ""
+    if title is not None:
+        description = (text or "")[:20_000]
+        text = description + "\n" + title[:300]
     if not isinstance(text, str) or not text.strip():
         return None
     text = text[:22_000]  # Description (20k) plus the current advert's title (300).
@@ -83,6 +89,11 @@ def parse_mortgage_claim(text: str | None) -> tuple[bool, str] | None:
     for line in text.splitlines():
         if _PAYMENT_OPTION.fullmatch(line) and _allowed(line, 0):
             positive.append(line.strip())
+    if (_SALE_CONTEXT.search(description) and not (_SERVICE.search(description) or _OTHER_OBJECT.search(description)
+            or _UNCERTAIN.search(description) or _QUESTION_OR_APPROVAL.search(description))):
+        for line in description.splitlines():
+            if _SALE_OPTIONS.fullmatch(line):
+                positive.append(line.strip())
     for match in _CASH_ONLY.finditer(text):
         unit, start, end = _unit(text, match.start(), match.end())
         if _allowed(unit, start, cash=True):

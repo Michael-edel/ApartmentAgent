@@ -100,19 +100,27 @@ class _BathroomFieldHTMLParser(HTMLParser):
     def properties(self) -> dict[str, str]:
         result = {}
         mortgage_badge = None
-        common = ("Состояние квартиры", "Год постройки", "Жилой комплекс", "Общая площадь", "Тип дома",
+        common = ("Состояние квартиры", "Возможность ипотеки", "Год постройки", "Жилой комплекс", "Общая площадь", "Тип дома",
                   "Высота потолков", "В ипотеку", "В залоге", "Площадь кухни", "Санузел", "Санузлы",
                   "Город", "Район", "Адрес", "Ремонт", "Ипотека", "Этаж", "Площадь", "Балкон", "Парковка",
                   "Интернет", "Безопасность", "Мебель", "Дверь", "Пол", "Потолки", "Телефон", "Обмен")
+        known_labels = {name.casefold() for name in common}
         for node in self.visible_nodes():
             label = value = None
+            classes = set((node.attrs.get("class") or "").split())
             children = [child for child in node.children if isinstance(child, _FieldNode) and not child.hidden()]
-            if node.tag == "dt" and node.parent:
+            if node.parent and (node.tag == "dt" or "offer__info-title" in classes):
                 siblings = [child for child in node.parent.children if isinstance(child, _FieldNode)]
                 index = siblings.index(node)
-                if index + 1 < len(siblings) and siblings[index + 1].tag == "dd" and not siblings[index + 1].hidden():
-                    label, value = node.text(), siblings[index + 1].text()
-            elif set((node.attrs.get("class") or "").split()).intersection({"a-list__item", "offer__info-item"}):
+                if index + 1 < len(siblings):
+                    sibling = siblings[index + 1]
+                    paired = sibling.tag == "dd" if node.tag == "dt" else (
+                        "offer__info-value" in (sibling.attrs.get("class") or "").split()
+                        and node.text().rstrip(":—- ").casefold() in known_labels
+                    )
+                    if paired and not sibling.hidden() and not _in_foreign_context(sibling, include_author=True):
+                        label, value = node.text(), sibling.text()
+            elif classes.intersection({"a-list__item", "offer__info-item"}):
                 if len(children) >= 2:
                     label, value = children[0].text(), " ".join(child.text() for child in children[1:])
                 else:
@@ -124,6 +132,9 @@ class _BathroomFieldHTMLParser(HTMLParser):
                             break
                     if label is None and ":" in text:
                         label, value = text.split(":", 1)
+            field_code = node.attrs.get("data-name")
+            if label is None and field_code in {"flat.condition", "flat.renovation", "flat.mortgage"}:
+                label, value = _JSON_PROPERTY_LABELS[field_code], node.text()
             if label is None and (node.attrs.get("data-testid") in {"mortgage", "mortgage-status"}
                                   or node.attrs.get("data-property") == "mortgage"):
                 if mortgage_badge is None and not _in_foreign_context(node, include_author=True):
@@ -137,11 +148,13 @@ class _BathroomFieldHTMLParser(HTMLParser):
             if _in_foreign_context(node, include_author=True):
                 continue
             label, value = plain_detail_text(label).rstrip(":—- "), plain_detail_text(value)
-            if label.casefold() in {"ипотека", "в ипотеку"} and mortgage_value(value) is None:
-                # Some list items encode a whole statement, e.g. 'Ипотека возможна'.
-                statement = plain_detail_text(node.text())
-                if mortgage_value(statement) is not None:
-                    value = statement
+            if label.casefold() in {"ипотека", "в ипотеку", "возможность ипотеки"}:
+                label = "Ипотека"
+                if mortgage_value(value) is None:
+                    # A separate value can be 'возможна' without repeating its label.
+                    statement = f"Ипотека {value}"
+                    if mortgage_value(statement) is not None:
+                        value = statement
             if label and value and len(label) <= 100 and len(value) <= 1500 and len(result) < 60:
                 result[label] = value
         if mortgage_badge is not None and len(result) < 60 and _property_value(result, "Ипотека", "В ипотеку") is None:
@@ -306,7 +319,7 @@ def _mortgage_observation(data: list[dict[str, Any]], details: dict[str, str], d
         return False, "field", None
     if True in values:
         return True, "field", None
-    if found := parse_mortgage_claim(description + "\n" + title):
+    if found := parse_mortgage_claim(description, title=title):
         value, evidence = found
         return value, "description" if evidence in description else "title", evidence
     return None, None, None
@@ -503,11 +516,16 @@ def _json_property_details(item: dict[str, Any]) -> dict[str, str]:
         else:
             continue
         for label, value in pairs:
-            if isinstance(value, dict):
-                value = next((value[key] for key in ("value", "name", "label") if value.get(key) is not None), None)
-            if not isinstance(label, str) or isinstance(value, (dict, list)) or value is None:
+            if not isinstance(label, str):
                 continue
             label = plain_detail_text(_JSON_PROPERTY_LABELS.get(label, label)).rstrip(": ")
+            if isinstance(value, dict):
+                keys = ("value", "name", "label")
+                if label in {"Состояние квартиры", "Ремонт", "Ипотека", "В ипотеку"} and not isinstance(value.get("value"), bool):
+                    keys = ("text", "label", "name", "value")
+                value = next((value[key] for key in keys if value.get(key) not in (None, "")), None)
+            if isinstance(value, (dict, list)) or value is None:
+                continue
             if label == "В залоге" and isinstance(value, bool):
                 value = "Да" if value else "Нет"
             value = plain_detail_text(str(value))

@@ -13,7 +13,7 @@ function extract(file, text, data = null, mortgageField = null, bathroomField = 
       return name && extra.meta?.[name] ? {content:extra.meta[name]} : null;
     },
     querySelectorAll(selector) {
-      for (const [prefix,nodes] of Object.entries(extra.nodes || {})) if (selector.startsWith(prefix)) return typeof nodes === 'function' ? nodes() : nodes;
+      for (const [prefix,nodes] of Object.entries(extra.nodes || {})) if (selector.startsWith(prefix)) return typeof nodes === 'function' ? nodes(selector) : nodes;
       if (selector === 'h1' && extra.heading) return [{textContent:extra.heading}];
       if (descriptionText && selector.startsWith('.offer__description')) return [{textContent:descriptionText}];
       if (complexBlock && selector === 'h2, h3, h4') return [{textContent:complexBlock.heading, nextElementSibling:{tagName:'P', textContent:complexBlock.text, nextElementSibling:null}}];
@@ -264,6 +264,64 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
   assert.equal(sidebars.bathrooms_count,null,file);
   assert.equal(sidebars.mortgage_supported,null,file);
   assert.equal(sidebars.seller_name,null,file);
+  const ownSidebar = {tagName:'ASIDE',className:'offer__sidebar'};
+  const foreignSidebar = {tagName:'ASIDE',className:'offer__sidebar',parentElement:{className:'recommendations'}};
+  const sidebarAuthor = {className:'offer__contacts',parentElement:ownSidebar};
+  const adInSidebar = {className:'ad-banner',parentElement:ownSidebar};
+  const sidebarDescription = 'В квартире сделан свежий ремонт, окна выходят во двор.';
+  const sidebarDetails = extract(file,common,null,null,null,null,undefined,null,null,{nodes:{
+    '.offer__info-item':[
+      property('Ремонт','чужой ремонт',foreignSidebar),
+      property('Ремонт','офисный ремонт',sidebarAuthor),
+      property('Ремонт','хороший ремонт',ownSidebar),
+      property('Ипотека','Да',adInSidebar),
+      property('Ипотека','Нет',ownSidebar),
+    ],
+    '.offer__description':[
+      {textContent:'Длинное описание похожего объявления, которое нельзя брать для этой квартиры.',parentElement:foreignSidebar},
+      {textContent:'Длинное описание агентства недвижимости, которое нельзя сохранять в карточку.',parentElement:sidebarAuthor},
+      {textContent:sidebarDescription,parentElement:ownSidebar},
+    ],
+  }});
+  assert.equal(sidebarDetails.repair_condition,'хороший ремонт',file);
+  assert.equal(sidebarDetails.mortgage_supported,false,file);
+  assert.equal(sidebarDetails.description,sidebarDescription,file);
+  const sidebarBadge = extract(file,common,null,null,null,null,undefined,null,null,{nodes:{
+    '[data-testid="mortgage"]':[
+      {textContent:'Нет',parentElement:{tagName:'ASIDE'}},
+      {textContent:'Нет',parentElement:foreignSidebar},
+      {textContent:'Нет',parentElement:sidebarAuthor},
+      {textContent:'Да',parentElement:ownSidebar},
+    ],
+  }});
+  assert.equal(sidebarBadge.mortgage_supported,true,file);
+  assert.equal(sidebarBadge.details_extracted,true,file);
+  const sidebarInfo = {className:'offer__info',parentElement:ownSidebar};
+  const splitInfo = (label,value,valueClass = 'offer__info-value') => ({
+    className:'offer__info-title',textContent:label,parentElement:sidebarInfo,
+    nextElementSibling:{className:valueClass,textContent:value,parentElement:sidebarInfo},
+  });
+  const splitDetails = extract(file,common,null,null,null,null,undefined,null,null,{nodes:{
+    '.offer__info-item':selector => selector.includes('.offer__info .offer__info-title')
+      ? [splitInfo('Ремонт','офисный ремонт','company-caption'),splitInfo('Ремонт','свежий ремонт'),splitInfo('В ипотеку','проходит')] : [],
+  }});
+  assert.equal(splitDetails.repair_condition,'свежий ремонт',file);
+  assert.equal(splitDetails.mortgage_supported,true,file);
+  const nativeTerm = splitInfo('Ремонт','аккуратный ремонт','');
+  nativeTerm.tagName = 'DT';
+  nativeTerm.nextElementSibling.tagName = 'DD';
+  const nativeDetails = extract(file,common,null,null,null,null,undefined,null,null,{nodes:{'.offer__info-item':[nativeTerm]}});
+  assert.equal(nativeDetails.repair_condition,'аккуратный ремонт',file);
+  for (const [textContent,expected] of [
+    ['Ипотека возможна',true],['Ипотека недоступна',false],['Ипотека возможна?',null],
+    ['Ипотека недоступна?',null],['Ипотека возможна в другом ЖК',null],['Ипотека — рассчитать платёж',null],
+  ]) {
+    const inline = extract(file,common,null,null,null,null,undefined,null,null,{nodes:{
+      '.offer__info-item':[{className:'offer__info-item',textContent}],
+    }});
+    assert.equal(inline.mortgage_supported,expected,`${file}: ${textContent}`);
+    if (expected !== null) assert.equal(inline.property_details['Ипотека'],textContent,file);
+  }
   const badCalc = extract(file, common,null,null,null,null,undefined,null,null,{nodes:{'.offer__info-item':[property('Ипотека','Рассчитать ипотеку')]}});
   assert.equal(badCalc.mortgage_supported,null,file);
   const noMortgage = extract(file, common,null,null,null,null,undefined,null,null,{nodes:{'.offer__info-item':[property('Ипотека','Нет'),property('Ремонт','хороший')]}});

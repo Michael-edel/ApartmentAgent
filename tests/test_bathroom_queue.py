@@ -281,7 +281,7 @@ async def test_details_mode_includes_saved_only_and_known_two_but_respects_minim
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", [None, "0.1.10", "0.3.1", "invalid"])
+@pytest.mark.parametrize("version", [None, "0.1.10", "0.3.1", "0.4.0", "invalid"])
 async def test_details_requires_new_extension_before_any_task_is_leased(env, version):
     await seed(env)
     await queue.bathroom_check_start(queue.StartRequest(mode="details"))
@@ -292,7 +292,7 @@ async def test_details_requires_new_extension_before_any_task_is_leased(env, ver
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", [queue.DETAILS_EXTENSION_RELEASE, "0.4.0.1"])
+@pytest.mark.parametrize("version", [queue.DETAILS_EXTENSION_RELEASE, f"{queue.DETAILS_EXTENSION_RELEASE}.1"])
 async def test_details_known_count_still_requires_new_full_import(env, version):
     await seed(env, count=2)
     await store_count(env, "https://krisha.kz/a/show/100", 2)

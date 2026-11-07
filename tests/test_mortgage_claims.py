@@ -22,6 +22,8 @@ from app.mortgage import mortgage_value, parse_mortgage_claim, parse_mortgage_te
     ("В ипотеку проходит", True),
     ("ГОРЯЧКА В ИПОТЕКУ ПРОХОДИТ !", True),
     ("Квартира в ипотеку проходит.", True),
+    ("Документы в порядке, ипотеку проходит.", True),
+    ("Ипотеку проходит.", True),
     ("Только за наличный расчет", False),
     ("ДОКУМЕНТЫ ДДУ это ТОЛЬКО ЗА НАЛИЧНЫЕ РАСЧЕТ ИЛИ ОБМЕН НА КВАРТИРУ или на ДОМ возле Астаны.", False),
     ("Только наличными.", False),
@@ -33,6 +35,7 @@ from app.mortgage import mortgage_value, parse_mortgage_claim, parse_mortgage_te
     ("Ипотека недоступна.", False),
     ("Не подходит под ипотеку.", False),
     ("В ипотеку не проходит.", False),
+    ("Ипотеку не проходит.", False),
     ("Ипотеки нет. Консультация по ипотеке бесплатная.", False),
     ("Ипотеки нет. Можно в ипотеку.", False),
 ])
@@ -58,6 +61,10 @@ def test_explicit_seller_claims_have_literal_evidence(text, expected):
     "Только наличный расчёт. Ипотека возможна.",
     "Только за наличные, также можно под ипотеку.",
     "В ипотеку проходит?",
+    "Ипотеку проходит?",
+    "Если ипотеку проходит, продадим.",
+    "Ипотеку проходит, если оформим документы.",
+    "Другая квартира ипотеку проходит.",
     "В ипотеку проходит ли квартира",
     "Не уверен, в ипотеку проходит.",
     "Нужно уточнить, в ипотеку проходит.",
@@ -71,6 +78,26 @@ def test_explicit_seller_claims_have_literal_evidence(text, expected):
 def test_services_promotions_questions_and_conflicts_stay_unknown(text):
     assert parse_mortgage_claim(text) is None
     assert parse_mortgage_text(text) is None
+
+
+@pytest.mark.parametrize("description,title,expected", [
+    ("Продаётся квартира.\nТорг, ипотека!", "Квартира", (True, "Торг, ипотека!")),
+    ("Продаётся квартира.\nТорг, ипотека!\nИпотеки нет.", "Квартира", (False, "Ипотеки нет.")),
+    ("Продаётся квартира.\nТорг, ипотека!\nТолько наличными.", "Квартира", None),
+    ("Продаётся квартира.", "Торг, ипотека!", None),
+    ("Продаётся квартира. Торг, ипотека!", "Квартира", None),
+    ("Продаётся квартира.\nТорг, ипотека?", "Квартира", None),
+    ("Продаётся квартира.\nТорг,\nипотека!", "Квартира", None),
+    ("Продаётся квартира.\nЕсли банк одобрит:\nТорг, ипотека!", "Квартира", None),
+    ("Продаётся квартира.\nКалькулятор ипотеки:\nТорг, ипотека!", "Квартира", None),
+    ("Соседняя квартира.\nТорг, ипотека!", "Квартира", None),
+])
+def test_shorthand_terms_apply_only_to_separate_line_of_own_description(description, title, expected):
+    assert parse_mortgage_claim(description, title=title) == expected
+
+
+def test_shorthand_terms_in_generic_search_text_stay_unknown():
+    assert parse_mortgage_text("Продаётся квартира.\nТорг, ипотека!") is None
 
 
 def test_nonexclusive_cash_does_not_override_a_positive_option():

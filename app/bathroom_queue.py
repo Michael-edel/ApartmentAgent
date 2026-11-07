@@ -42,9 +42,9 @@ router = APIRouter(prefix="/api/v1/search/bathroom-check", tags=["bathroom-check
 _queue_lock = asyncio.Lock()
 LEASE_SECONDS = 120
 GAP_SECONDS = 15
-DETAILS_EXTENSION_RELEASE = "0.4.0"
+DETAILS_EXTENSION_RELEASE = "0.4.1"
 # Changing extraction rules can justify one fresh pass over incomplete cards.
-PRIORITY_DETAILS_REVISION = 1
+PRIORITY_DETAILS_REVISION = 2
 _finished = {"confirmed", "rejected", "unknown", "failed", "expired"}
 
 
@@ -358,9 +358,13 @@ async def bathroom_check_claim(request: ClaimRequest) -> dict:
         if job.criteria.get("mode") == "details":
             version = request.extension_version or ""
             parts = tuple(int(part) for part in version.split(".")) if re.fullmatch(r"\d+(?:\.\d+){1,3}", version) else ()
-            release = DETAILS_EXTENSION_RELEASE if job.criteria.get("priority_details_revision") else (
-                "0.3.0" if job.criteria.get("manual_import") else "0.2.0"
-            )
+            revision = job.criteria.get("priority_details_revision")
+            if revision == 1:
+                release = "0.4.0"
+            elif revision:
+                release = DETAILS_EXTENSION_RELEASE
+            else:
+                release = "0.3.0" if job.criteria.get("manual_import") else "0.2.0"
             minimum = tuple(map(int, release.split("."))) + (0,)
             if not parts or (parts + (0,) * (4 - len(parts))) < minimum:
                 job.status = "paused"

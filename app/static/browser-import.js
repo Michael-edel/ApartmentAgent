@@ -19,17 +19,20 @@
     return true;
   };
   const propertyText = node => clean(node?.innerText ?? node?.textContent);
-  const outsideListing = (node, allowAside = false) => {
+  const outsideListing = (node, asideContext = null) => {
     for (let current = node; current; current = current.parentElement) {
-      if (!allowAside && (current.tagName === 'ASIDE' || current.getAttribute?.('role') === 'complementary')) return true;
       const markers = `${current.className || ''} ${current.getAttribute?.('data-testid') || ''}`.split(/\s+/);
+      if (current.tagName === 'ASIDE' || current.getAttribute?.('role') === 'complementary') {
+        if (asideContext !== 'author' && !(asideContext === 'offer' && markers.includes('offer__sidebar'))) return true;
+      }
       if (markers.some(marker => /^(?:recommendations?(?:__.*|-.*)?|similar(?:__.*|-.*)?|related(?:__.*|-.*)?|advertisement|ad-banner)$/i.test(marker)
         || /^(?:(?:offer|listing)__(?:recommendations?|similar)|(?:a|offer|listing)-card)(?:$|[_-])/i.test(marker))) return true;
     }
     return false;
   };
-  const listingNodes = (selector, allowAside = false) => [...document.querySelectorAll(selector)]
-    .filter(node => visibleProperty(node) && !outsideListing(node, allowAside));
+  const listingNodes = (selector, asideContext = null) => [...document.querySelectorAll(selector)]
+    .filter(node => visibleProperty(node) && !outsideListing(node, asideContext));
+  const hasClass = (node, name) => String(node?.className || '').split(/\s+/).includes(name);
   const inAuthorContext = node => {
     for (let current = node; current; current = current.parentElement) {
       const marker = `${current.className || ''} ${current.id || ''} ${current.getAttribute?.('data-testid') || ''} ${current.getAttribute?.('itemprop') || ''}`;
@@ -70,8 +73,11 @@
     const rowLabel = value => labels[labelKey(value)] || (generic && clean(value).length <= 100 && !/Автор|Реклама|Похожие|Показать телефон|Политика|Подписаться/i.test(value) ? clean(value).replace(/[:—–-]\s*$/, '') : null);
     const exact = labels[labelKey(text)];
     const sibling = node.nextElementSibling;
-    if (exact && sibling && visibleProperty(sibling) && !outsideListing(sibling)
-      && (node.tagName !== 'DT' || sibling.tagName === 'DD')) return [exact, propertyText(sibling)];
+    const separateTitle = hasClass(node, 'offer__info-title');
+    if (exact && sibling && visibleProperty(sibling) && !outsideListing(sibling, 'offer') && !inAuthorContext(sibling)
+      && (node.tagName !== 'DT' || sibling.tagName === 'DD')
+      && (!separateTitle || node.tagName === 'DT' || hasClass(sibling, 'offer__info-value'))) return [exact, propertyText(sibling)];
+    if (separateTitle) return null;
     for (const label of [...(node.children || [])]) {
       const name = rowLabel(propertyText(label));
       const value = label.nextElementSibling;
@@ -86,16 +92,17 @@
     const semantic = semanticLabels[node.getAttribute?.('data-name')];
     return semantic && text ? [semantic,text] : null;
   };
-  for (const row of listingNodes('.offer__info-item, .a-list__item, [data-name^="flat."], [data-name^="house."], [data-name="city"], dt').filter(node => !inAuthorContext(node))) {
+  const propertySelector = '.offer__info-item, .a-list__item, [data-name^="flat."], [data-name^="house."], [data-name="city"], dt, .offer__info .offer__info-title, .offer__sidebar .offer__info-title';
+  for (const row of listingNodes(propertySelector, 'offer').filter(node => !inAuthorContext(node))) {
     const pair = propertyPair(row);
     if (pair && pair[1] && !(pair[0] in propertyDetails) && Object.keys(propertyDetails).length < 60) propertyDetails[pair[0].slice(0,100)] = pair[1].slice(0,1500);
   }
   const domMortgageField = propertyDetails['Ипотека'];
-  const descriptionNodes = listingNodes('.offer__description, [data-testid="description"], [data-testid="advert-description"], [itemprop="description"]');
+  const descriptionNodes = listingNodes('.offer__description, [data-testid="description"], [data-testid="advert-description"], [itemprop="description"]', 'offer');
   const prose = value => String(value ?? '').replace(/\r\n?/g,'\n').split('\n').map(line => line.replace(/[ \t]+/g,' ').trim()).join('\n').trim();
   const domDescription = descriptionNodes.filter(node => !inAuthorContext(node)).map(node => prose(node.innerText ?? node.textContent))
     .filter(text => text.length >= 10).sort((a,b) => b.length-a.length)[0]?.slice(0,20000) || null;
-  const authorNodes = listingNodes('[data-testid="seller"], [data-testid="author"], .offer__contacts, .owners, .owner, [itemprop="seller"]', true);
+  const authorNodes = listingNodes('[data-testid="seller"], [data-testid="author"], .offer__contacts, .owners, .owner, [itemprop="seller"]', 'author');
   const withinAuthorBlock = node => {
     for (let current = node; current; current = current.parentElement) if (authorNodes.includes(current)) return true;
     return false;
@@ -106,7 +113,7 @@
     const role = text.match(sellerRole)?.[0];
     return role === text ? role : null;
   };
-  const domSellerType = listingNodes('[data-testid="seller-type"], .owners__type, .owner__type', true)
+  const domSellerType = listingNodes('[data-testid="seller-type"], .owners__type, .owner__type', 'author')
     .filter(withinAuthorBlock).map(node => sellerTypeText(propertyText(node))).find(Boolean)
     || authorNodes.map(node => {
       const text = propertyText(node);
@@ -118,7 +125,7 @@
     return text && text.length <= 200 && !sellerTypeText(text) && !/^(?:Автор объявления|Показать телефоны|Работает в компании(?:\s|$))/i.test(text)
       && !/^\+?[\d ()-]{6,}$/.test(text) ? text : null;
   };
-  const domSellerName = listingNodes('[data-testid="seller-name"], .owners__name, .owner__name, [itemprop="seller"] [itemprop="name"], [data-name="seller.name"]', true)
+  const domSellerName = listingNodes('[data-testid="seller-name"], .owners__name, .owner__name, [itemprop="seller"] [itemprop="name"], [data-name="seller.name"]', 'author')
     .filter(withinAuthorBlock).map(node => validSellerName(propertyText(node))).find(Boolean) || null;
   const hasDomEvidence = Object.keys(propertyDetails).length > 0 || !!domDescription
     || authorNodes.some(node => /Автор\s+объявления/i.test(propertyText(node))) || !!domSellerName || !!domSellerType;
@@ -415,15 +422,21 @@
     if (typeof text !== 'string') return null;
     const normalized = clean(text).replace(/[.!]+$/, '').toLowerCase();
     if (/^(?:(?:ипотека|в ипотеку)\s*[:—–-]?\s*)?(?:да|true)$/.test(normalized)
-      || /^(?:можно в ипотеку(?: и без ипотеки)?|возможна покупка в ипотеку|ипотека (?:возможна|доступна)|в ипотеку проходит|подходит под ипотеку)$/.test(normalized)) return true;
+      || /^(?:можно в ипотеку(?: и без ипотеки)?|возможна покупка в ипотеку|ипотека (?:возможна|доступна|проходит)|в ипотеку проходит|подходит под ипотеку)$/.test(normalized)) return true;
     if (/^(?:ипотек[аи]\s*[:—–-]?\s*)?(?:нет|жоқ|жок|false)$/.test(normalized)
-      || /^(?:ипотека не (?:рассматривается|проходит|подходит|предусмотрена|возможна|доступна)|в ипотеку не проходит|не подходит под ипотеку|не прода[её]тся в ипотеку)$/.test(normalized)) return false;
+      || /^(?:ипотека (?:не (?:рассматривается|проходит|подходит|предусмотрена|возможна|доступна)|невозможна|недоступна)|в ипотеку не проходит|не подходит под ипотеку|не прода[её]тся в ипотеку)$/.test(normalized)) return false;
     return null;
   };
   // Seller prose and the headline are sent separately so the server can retain the source and quote.
-  const domMortgageText = mortgageValue(domMortgageField) !== null ? domMortgageField
-    : listingNodes('[data-testid="mortgage"], [data-testid="mortgage-status"], [data-property="mortgage"]')
-      .filter(node => !inAuthorContext(node)).map(propertyText).find(text => mortgageValue(text) !== null);
+  const domMortgageStatement = value => {
+    if (!value) return null;
+    if (mortgageValue(value) !== null) return value;
+    const labelled = `Ипотека ${value}`;
+    return mortgageValue(labelled) !== null ? labelled : null;
+  };
+  const domMortgageText = domMortgageStatement(domMortgageField)
+    || listingNodes('[data-testid="mortgage"], [data-testid="mortgage-status"], [data-property="mortgage"]', 'offer')
+      .filter(node => !inAuthorContext(node)).map(node => domMortgageStatement(propertyText(node))).find(Boolean);
   if (domMortgageText) propertyDetails['Ипотека'] = domMortgageText.slice(0,1500);
   const mortgageSupported = mortgageValue(domMortgageText)
     ?? mortgageValue(jsonDetailValues['Ипотека'])
@@ -531,8 +544,8 @@
     }
     return null;
   };
-  const bathroomData = bathroomInfo(propertyDetails['Санузел']) ?? listingNodes('[data-testid="bathrooms"], [data-name="bathrooms"], [data-name="flat.toilet"], .a-list__item, .offer__info-item, dt')
-      .map(bathroomField).find(value => value !== null)
+  const bathroomData = bathroomInfo(propertyDetails['Санузел']) ?? listingNodes('[data-testid="bathrooms"], [data-name="bathrooms"], [data-name="flat.toilet"], .a-list__item, .offer__info-item, dt', 'offer')
+      .filter(node => !inAuthorContext(node)).map(bathroomField).find(value => value !== null)
     ?? findValue(['bathroomsCount', 'bathrooms_count', 'numberOfBathroomsTotal', 'numberOfBathrooms'], bathroomInfo) ?? null;
   const bathroomsCount = bathroomData?.count ?? null;
   let floor = positiveInteger((propertyFloor ? Number(propertyFloor[1]) : null) || findValue(['floor', 'floorNumber']) || (floorMatch ? Number(floorMatch[1] || floorMatch[3]) : null));
@@ -599,7 +612,7 @@
     description,
     repair_condition: (usableRepair(propertyDetails['Состояние квартиры']) || jsonRepair)?.slice(0,500) || null,
     property_details: propertyDetails,
-    details_extracted: !!(price && area && rooms && (hasDomEvidence || jsonRichEvidence)),
+    details_extracted: !!(price && area && rooms && (hasDomEvidence || domMortgageText || jsonRichEvidence)),
     city,
     district: districtFromText(propertyDetails['Город']) || districtFromText(propertyDetails['Район'], true) || districtFromText(findText(['district', 'districtName', 'areaName']), true)
       || districtFromText(findText(['regionName', 'addressRegion']))

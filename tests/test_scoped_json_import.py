@@ -113,6 +113,38 @@ async def test_visible_mortgage_badge_overrides_json_and_seller_prose(html_respo
     assert (value.mortgage_supported, value.mortgage_source_kind, value.mortgage_evidence) == (True, "field", None)
 
 
+@pytest.mark.parametrize("markup", [
+    """<aside class="offer__sidebar">
+      <div class="offer__info-title">Состояние квартиры</div><div class="offer__info-value">свежий ремонт</div>
+      <div class="offer__info-title">Возможность ипотеки</div><div class="offer__info-value">возможна</div>
+    </aside>""",
+    """<div data-name="flat.condition">свежий ремонт</div><div data-name="flat.mortgage">Да</div>""",
+])
+@pytest.mark.asyncio
+async def test_upper_detail_fields_override_json_and_exclude_foreign_panels(html_response, markup):
+    html_response["html"] = f'<script type="application/ld+json">{json.dumps(rich_advert())}</script>' + markup + '''
+      <aside class="nearby-adverts">
+        <div class="offer__info-title">Состояние квартиры</div><div class="offer__info-value">чужой ремонт</div>
+        <div data-name="flat.mortgage">Нет</div>
+      </aside>'''
+    result = await import_krisha_listing(URL)
+    assert (result.repair_condition, result.repair_source_kind) == ("свежий ремонт", "field")
+    assert (result.mortgage_supported, result.mortgage_source_kind) == (True, "field")
+
+
+@pytest.mark.asyncio
+async def test_human_readable_repair_and_mortgage_values_survive_numeric_json_codes(html_response):
+    advert = rich_advert()
+    advert["additionalProperty"] = []
+    advert["properties"] = {
+        "flat.condition": {"value": 2, "label": "хороший ремонт"},
+        "flat.mortgage": {"value": 2, "label": "Да"},
+    }
+    html_response["html"] = f'<script type="application/ld+json">{json.dumps(advert)}</script>'
+    result = await import_krisha_listing(URL)
+    assert (result.repair_condition, result.mortgage_supported) == ("хороший ремонт", True)
+
+
 @pytest.mark.parametrize("description,title,expected", [
     ("Ипотеки нет.", "Квартира", (False, "description", "Ипотеки нет.")),
     ("Светлая квартира. Можно под ипотеку.", "Квартира", (True, "description", "Можно под ипотеку.")),
