@@ -14,6 +14,7 @@ from app.search_providers import SearchItem
 
 
 PLEDGED_DESCRIPTION = "📄 Квартира в залоге, оформление через банк — всё прозрачно."
+PLEDGE_BADGE = "О квартире\nВ залоге\nБалкон\nнесколько балконов или лоджий"
 TITLE = "4-комнатная квартира · 100 м² · 40 000 000 ₸"
 
 
@@ -24,6 +25,8 @@ TITLE = "4-комнатная квартира · 100 м² · 40 000 000 ₸"
     ("Квартира не в залоге.", False),
     ("Квартира не находится в залоге.", False),
     ("Объект находится не в залоге.", False),
+    (PLEDGE_BADGE, True),
+    ("О квартире\r\nВ залоге\r\nСанузел\r\nраздельный", True),
 ])
 def test_explicit_pledge_claim_has_literal_evidence(description, status):
     claim = parse_pledge_claim(description)
@@ -44,6 +47,14 @@ def test_explicit_pledge_claim_has_literal_evidence(description, status):
     "Соседняя квартира в залоге.",
     "У соседей квартира в залоге.",
     "Квартира в залоге. Квартира не в залоге.",
+    "В залоге\nБалкон\nлоджия",
+    "О квартире\nВ залоге?\nБалкон\nлоджия",
+    "О квартире\nВ залоге\nНет\nБалкон\nлоджия",
+    "О квартире\nВ залоге\n\nБалкон\nлоджия",
+    "О квартире\nВ залоге\nБалкон\n—",
+    "О квартире\nВ залоге\nТекст рекламы\nНовая акция",
+    PLEDGE_BADGE + "\nКвартира не в залоге.",
+    PLEDGE_BADGE + "\nВ залоге: нет.",
 ])
 def test_no_pledge_inference_from_unrelated_or_uncertain_prose(description):
     assert parse_pledge_claim(description) is None
