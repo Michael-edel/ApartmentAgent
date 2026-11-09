@@ -222,6 +222,24 @@ async def test_manual_pause_allows_current_import_and_resume_continues_next(env)
 
 
 @pytest.mark.asyncio
+async def test_only_explicit_resume_of_paused_job_advances_persisted_generation(env):
+    await seed(env, ("https://krisha.kz/a/show/100", "https://krisha.kz/a/show/200"))
+    started = await queue.bathroom_check_start()
+    assert started["criteria"].get("resume_generation", 0) == 0
+    leased = await claim()
+    blocked = await complete(leased, "blocked", error="Проверка браузера")
+    assert blocked["status"] == "paused"
+    assert (await queue.bathroom_check_status())["criteria"].get("resume_generation", 0) == 0
+    resumed = await queue.bathroom_check_resume()
+    assert resumed["status"] == "running" and resumed["job_id"] == started["job_id"]
+    assert resumed["criteria"]["resume_generation"] == 1
+    assert (await queue.bathroom_check_resume())["criteria"]["resume_generation"] == 1
+    assert (await queue.bathroom_check_pause())["criteria"]["resume_generation"] == 1
+    assert (await queue.bathroom_check_resume())["criteria"]["resume_generation"] == 2
+    assert (await queue.bathroom_check_status())["criteria"]["resume_generation"] == 2
+
+
+@pytest.mark.asyncio
 async def test_pending_task_saved_elsewhere_is_resolved_without_browser_claim(env):
     await seed(env)
     await queue.bathroom_check_start()

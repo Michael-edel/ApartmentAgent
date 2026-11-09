@@ -47,8 +47,9 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
     const body = options.body ? JSON.parse(options.body) : null;
     env.requests.push({path,body});
     let result = {job_id:env.jobId,status:env.status,current_url:env.lease?.url || null,mode:env.mode || 'bathrooms'};
+    if (env.resumeGeneration !== undefined) result.criteria = {resume_generation:env.resumeGeneration};
     if (path === '/claim') {
-      if (!env.lease && env.status === 'running') env.lease = env.tasks.shift() || null;
+      if (!env.lease && env.status === 'running' && env.now >= (env.nextClaimAt || 0)) env.lease = env.tasks.shift() || null;
       result = {...result,task:env.lease,wait_seconds:15};
     } else if (path === '/complete') {
       assert.equal(body.task_id, env.lease.id);
@@ -69,6 +70,10 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
     return context.ApartmentAgentBathroomQueue;
   };
   env.state = () => env.storage[KEY];
+  env.heartbeat = async () => {
+    env.handlers.alarm({name:'apartment-agent-bathroom-heartbeat'});
+    await new Promise(setImmediate);
+  };
   return env;
 }
 
@@ -157,6 +162,7 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   await pauseWorker.kick(appSender);
   assert.equal(paused.created.length, 1);
   paused.status = 'running';
+  paused.resumeGeneration = 1;
   await pauseWorker.kick(appSender);
   assert.equal(paused.created.length, 2, 'resume opens exactly one pending task');
 
@@ -266,6 +272,10 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   offline.now += 120000;
   await offlineWorker.start();
   assert.equal(offline.created.length, 1, 'no next task after an API failure');
+  offline.failApi = false;
+  await offlineWorker.kick(appSender);
+  assert.equal(offline.state().halted, true, 'a UI wake-up cannot clear a network halt without a confirmed resume');
+  assert.equal(offline.created.length, 1);
 
   const resumed = environment(['https://krisha.kz/a/show/100']);
   const resumeWorker = resumed.worker();
@@ -273,11 +283,38 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   const preservedId = resumed.state().task.tab_id;
   await resumeWorker.finished({tab:{id:preservedId}}, 'blocked', 'Проверка браузера');
   resumed.tasks.push({id:1,url:'https://krisha.kz/a/show/100',lease_token:'retry-lease'});
-  resumed.status = 'running'; // Explicit application resume, not a heartbeat.
+  resumed.status = 'running';
+  await resumeWorker.kick(appSender);
+  assert.equal(resumed.state().halted, true, 'a bridge wake without a server generation cannot lift a CAPTCHA halt');
+  assert.equal(resumed.reloaded.length, 0);
+  resumed.resumeGeneration = 1;
   await resumeWorker.kick(appSender);
   assert.equal(resumed.created.length, 1, 'explicit resume reuses an unchanged preserved tab');
   assert.deepEqual(resumed.reloaded, [preservedId]);
   assert.equal(resumed.state().task.lease_token, 'retry-lease');
+  assert.equal(resumed.state().resume_generation, 1);
+  await resumeWorker.finished({tab:{id:preservedId}}, 'blocked', 'Проверка браузера');
+  const restartedResumeWorker = resumed.worker();
+  await restartedResumeWorker.start();
+  await resumed.heartbeat();
+  assert.equal(resumed.state().halted, true, 'restart and heartbeat preserve a second CAPTCHA pause');
+  resumed.status = 'running';
+  const claimsAfterFirstResume = resumed.requests.filter(item => item.path === '/claim').length;
+  for (const stale of [undefined, -1, '2', 1]) {
+    resumed.resumeGeneration = stale;
+    await resumed.heartbeat();
+    assert.equal(resumed.requests.filter(item => item.path === '/claim').length, claimsAfterFirstResume,
+      'absent, invalid or already observed generations cannot replay a resume');
+    assert.equal(resumed.state().resume_generation, 1);
+    assert.equal(resumed.state().halted, true);
+  }
+  resumed.tasks.push({id:1,url:'https://krisha.kz/a/show/100',lease_token:'second-retry-lease'});
+  resumed.resumeGeneration = 2;
+  await resumed.heartbeat();
+  assert.equal(resumed.requests.filter(item => item.path === '/claim').length, claimsAfterFirstResume + 1);
+  assert.equal(resumed.created.length, 1, 'a lost bridge wake still reuses the owned tab after an explicit resume');
+  assert.deepEqual(resumed.reloaded, [preservedId,preservedId]);
+  assert.equal(resumed.state().task.lease_token, 'second-retry-lease');
 
   const malicious = environment(['https://krisha.kz.attacker.test/a/show/123']);
   const invalidWorker = malicious.worker();
@@ -309,6 +346,17 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   assert.equal(unreadable.requests.some(item => item.path === '/pause'), false, 'do not overwrite the automatic error cause with a user-pause message');
   assert.match(unreadable.requests.filter(item => item.path === '/complete').at(-1).body.error, /Три страницы подряд/);
   assert.match(unreadable.state().message, /Три страницы подряд/);
+  await unreadable.heartbeat();
+  assert.equal(unreadable.created.length, 3, 'heartbeat cannot start the next task while the server remains paused');
+  unreadable.status = 'running';
+  unreadable.resumeGeneration = 1;
+  unreadable.nextClaimAt = unreadable.now + 30000;
+  await unreadable.heartbeat();
+  assert.equal(unreadable.created.length, 3, 'confirmed resume cannot bypass the server gap');
+  assert.equal(unreadable.state().unreadable_streak, 0, 'explicit resume begins a fresh run of consecutive failures');
+  unreadable.now += 30000;
+  await unreadable.heartbeat();
+  assert.equal(unreadable.created.length, 4, 'heartbeat continues the same queue after resume without a bridge wake');
 
   for (const oldStatus of ['running','paused']) {
     const staleHalted = environment();

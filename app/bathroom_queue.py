@@ -287,7 +287,7 @@ async def _change(action: str) -> dict:
         if job and job.status in {"running", "paused"}:
             if action == "pause":
                 job.status, job.message = "paused", "Проверка приостановлена пользователем."
-            elif action == "resume":
+            elif action == "resume" and job.status == "paused":
                 tasks = await _tasks(session, job)
                 retry = next((task for task in reversed(tasks)
                               if task.status == "expired" or (task.status == "failed" and task.last_outcome == "blocked")), None)
@@ -304,6 +304,11 @@ async def _change(action: str) -> dict:
                         retry.worker_id = retry.lease_token = retry.lease_expires_at = None
                         retry.completed_at = retry.error = None
                 job.status = "running" if any(task.status in {"pending", "leased"} for task in tasks) else "completed"
+                if job.status == "running":
+                    # A browser can miss the one-time notification from the dashboard.
+                    # Record the explicit resume for its next status poll.
+                    generation = job.criteria.get("resume_generation", 0)
+                    job.criteria = {**job.criteria, "resume_generation": generation + 1}
                 job.message = None
             elif action == "cancel":
                 job.status, job.message = "cancelled", "Проверка остановлена пользователем."

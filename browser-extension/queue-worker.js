@@ -147,8 +147,19 @@
   };
   const poll = async () => {
     const status = await api();
+    const sameJob = status.job_id === state.job_id;
+    const reportedGeneration = status.criteria?.resume_generation;
+    const resumeGeneration = Number.isSafeInteger(reportedGeneration) && reportedGeneration >= 0 ? reportedGeneration : 0;
+    const seenGeneration = sameJob ? state.resume_generation ?? 0 : 0;
+    state.resume_generation = Math.max(seenGeneration, resumeGeneration);
+    // A wake-up message can be lost. Only the server can confirm a same-job resume.
+    if (!sameJob || (status.status === 'running' && resumeGeneration > seenGeneration)) {
+      state.halted = false;
+      state.unreadable_streak = 0;
+      state.message = '';
+    }
     const sameLease = state.task && canonical(status.current_url) === state.task.url;
-    if (status.status === 'paused' && state.task && status.job_id === state.job_id) {
+    if (status.status === 'paused' && state.task && sameJob) {
       if (!sameLease) {
         // The server may have completed/expired the task before the worker
         // persisted its response. Keep the page for the explicit human pause.
@@ -176,12 +187,9 @@
       await chrome.alarms.clear(WAKE);
       return;
     }
-    if (status.job_id !== state.job_id) {
+    if (!sameJob) {
       const oldTask = state.task;
       state.task = null;
-      state.unreadable_streak = 0;
-      state.halted = false;
-      state.message = '';
       state.next_wake = 0;
       state.job_id = status.job_id;
       await save();
@@ -244,10 +252,6 @@
   const worker = {
     kick: sender => run(async () => {
       if (sender && !apiForBridge(sender)) return;
-      state.halted = false;
-      state.message = '';
-      // A UI command can cancel/pause immediately, but cannot shorten server gap.
-      await save();
       await poll();
     }),
     imported: (sender, payload) => run(async () => {
