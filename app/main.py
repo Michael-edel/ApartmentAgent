@@ -383,28 +383,42 @@ async def search_status() -> dict[str, object]:
 
 
 @app.get("/api/v1/search/results")
-async def search_results(limit: int = 50, only_new: bool = False, include_unconfirmed: bool = False) -> list[dict[str, object]]:
+async def search_results(
+    limit: int = 50,
+    only_new: bool = False,
+    include_unconfirmed: bool = False,
+    sort: Literal["newest", "score_desc", "score_asc", "price_asc", "price_desc",
+                  "price_m2_asc", "price_m2_desc", "area_asc", "area_desc"] = "newest",
+) -> list[dict[str, object]]:
     safe_limit = min(max(limit, 1), 200)
     async with SessionLocal() as session:
         query = select(SearchResult).order_by(SearchResult.first_seen.desc(), SearchResult.id.desc())
         if only_new:
             query = query.where(SearchResult.status.like("new:%"))
+
+        def matches_filter(row: SearchResult) -> bool:
+            if include_unconfirmed:
+                return _row_matches_basic(row) and settings.min_bathrooms > 0 and bathrooms_for_row(row) is None
+            return _row_matches_target(row)
+
         rows = []
-        offset = 0
-        batch_size = 200
-        while len(rows) < safe_limit:
-            batch = (await session.scalars(query.offset(offset).limit(batch_size))).all()
-            if not batch:
-                break
-            for row in batch:
-                matches = (_row_matches_basic(row) and settings.min_bathrooms > 0 and bathrooms_for_row(row) is None) if include_unconfirmed else _row_matches_target(row)
-                if matches:
-                    rows.append(row)
-                    if len(rows) == safe_limit:
-                        break
-            offset += len(batch)
-            if len(batch) < batch_size:
-                break
+        if sort == "newest":
+            offset = 0
+            batch_size = 200
+            while len(rows) < safe_limit:
+                batch = (await session.scalars(query.offset(offset).limit(batch_size))).all()
+                for row in batch:
+                    if matches_filter(row):
+                        rows.append(row)
+                        if len(rows) == safe_limit:
+                            break
+                offset += len(batch)
+                if len(batch) < batch_size:
+                    break
+        else:
+            # A single ordered query avoids offset shifts when new rows arrive.
+            stream = await session.stream_scalars(query.execution_options(yield_per=200))
+            rows = [row async for row in stream if matches_filter(row)]
 
     result: list[dict[str, object]] = []
     for row in rows:
@@ -439,7 +453,22 @@ async def search_results(limit: int = 50, only_new: bool = False, include_unconf
                 "analysis": analysis,
             }
         )
-    return result
+    if sort != "newest":
+        fields = {"score": "score", "price": "price_kzt", "price_m2": "price_per_m2", "area": "area_m2"}
+        field_name, direction = sort.rsplit("_", 1)
+        analysis_key = fields[field_name]
+
+        def sort_key(item: dict[str, object]) -> tuple[bool, float]:
+            analysis = item["analysis"]
+            assert isinstance(analysis, dict)
+            value = analysis[analysis_key]
+            if not isinstance(value, (int, float)):
+                return True, 0
+            return False, -value if direction == "desc" else value
+
+        # Python's stable sort preserves the existing newest/id order for ties.
+        result.sort(key=sort_key)
+    return result[:safe_limit]
 
 
 @app.post("/api/v1/search/results/{result_id}/seen")

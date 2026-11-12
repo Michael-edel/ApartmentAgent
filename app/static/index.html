@@ -10,7 +10,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
   <link rel="apple-touch-icon" href="/static/icon.svg">
-  <link rel="stylesheet" href="/static/styles.css?v=144">
+  <link rel="stylesheet" href="/static/styles.css?v=145">
   <style>.bookmarklet-code{width:100%;min-height:96px;resize:vertical;border:1px solid #d8e2ec;border-radius:12px;background:#f8fafc;color:#142033;padding:12px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}</style>
   <title>ApartmentAgent</title>
 </head>
@@ -95,12 +95,22 @@
       <p id="twogisStatus" class="microcopy"></p>
     </section>
 
-    <section class="section-heading">
+    <section class="section-heading search-results-heading">
       <div><p class="eyebrow">Найденные объявления</p><h2>Ссылки из поиска</h2></div>
-      <button id="refreshSearchButton" class="icon-button" aria-label="Обновить результаты">↻</button>
-    </section>
-    <section id="searchEmpty" class="form-card card">
-      <p class="form-message">Новых ссылок пока нет.</p>
+      <div class="section-controls">
+        <select id="searchResultsSort" aria-label="Сортировка найденных объявлений">
+          <option value="newest">Сначала новые</option>
+          <option value="score_desc">Сначала высокий рейтинг</option>
+          <option value="score_asc">Сначала низкий рейтинг</option>
+          <option value="price_asc">Общая цена по возрастанию</option>
+          <option value="price_desc">Общая цена по убыванию</option>
+          <option value="price_m2_asc">Цена за м² по возрастанию</option>
+          <option value="price_m2_desc">Цена за м² по убыванию</option>
+          <option value="area_asc">Сначала меньшая площадь</option>
+          <option value="area_desc">Сначала большая площадь</option>
+        </select>
+        <button id="refreshSearchButton" class="icon-button" aria-label="Обновить результаты">↻</button>
+      </div>
     </section>
     <section id="searchResults" class="listing-grid"></section>
 
@@ -206,6 +216,6 @@
     <a href="#listingGrid">★<span>Лучшие</span></a>
   </nav>
 
-  <script src="/static/app.js?v=159" defer></script>
+  <script src="/static/app.js?v=161" defer></script>
 </body>
 </html>

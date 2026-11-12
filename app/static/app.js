@@ -66,6 +66,8 @@ const searchMessage = document.querySelector('#searchMessage');
 const searchMeta = document.querySelector('#searchMeta');
 const searchResults = document.querySelector('#searchResults');
 const reloadSearchResults = document.querySelector('#refreshSearchButton');
+const searchResultsSort = document.querySelector('#searchResultsSort');
+let searchResultsRevision = 0;
 const bathroomCheckPanel = document.querySelector('#bathroomCheckPanel');
 const bathroomCheckCounts = document.querySelector('#bathroomCheckCounts');
 const bathroomCheckDetails = document.querySelector('#bathroomCheckDetails');
@@ -573,15 +575,18 @@ async function importSearchResult(url, button) {
 
 async function loadSearchResults() {
   if (!searchResults) return;
+  const revision = ++searchResultsRevision;
+  const params = new URLSearchParams({limit:'200', only_new:'false', sort:searchResultsSort?.value || 'newest'});
   try {
     const [response, statusResponse] = await Promise.all([
-      fetch('/api/v1/search/results?limit=200&only_new=false'),
+      fetch(`/api/v1/search/results?${params}`),
       fetch('/api/v1/search/status')
     ]);
     if (!response.ok) throw new Error('Не удалось загрузить найденные ссылки');
     if (!statusResponse.ok) throw new Error('Не удалось получить параметры поиска');
     const found = await readJson(response);
     const status = await readJson(statusResponse);
+    if (revision !== searchResultsRevision) return;
     const results = status.exclude_pledged === false ? found : found.filter(item => item.analysis?.is_pledged !== true);
     const strictBathrooms = status.min_bathrooms === 2;
     const items = strictBathrooms
@@ -630,9 +635,11 @@ async function loadSearchResults() {
     }));
     searchResults.querySelectorAll('.enrich-result:not(.saved)').forEach(button => button.addEventListener('click', () => importSearchResult(button.dataset.url, button)));
   } catch (error) {
-    if (searchMessage) searchMessage.textContent = error.message;
+    if (revision === searchResultsRevision && searchMessage) searchMessage.textContent = error.message;
   }
 }
+
+searchResultsSort?.addEventListener('change', () => { void loadSearchResults(); });
 
 function monitorBeforeOpen(link) {
   const resultId = link.dataset.resultId;
