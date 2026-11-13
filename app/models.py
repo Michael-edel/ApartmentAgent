@@ -107,6 +107,8 @@ class Listing(Base):
     address: Mapped[str | None] = mapped_column(String(500), nullable=True)
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    approximate_latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    approximate_longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     price_kzt: Mapped[int] = mapped_column(BigInteger)
     area_m2: Mapped[float] = mapped_column(Float)
     rooms: Mapped[int] = mapped_column(Integer)

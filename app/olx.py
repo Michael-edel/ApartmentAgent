@@ -8,7 +8,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import httpx
 
-from app.cities import CITY_NAMES, city_slug
+from app.cities import CITY_NAMES, city_slug, is_city_coordinate_pair
 from app.importer import ListingImportError, ListingUnavailable
 from app.mortgage import parse_mortgage_claim
 from app.schemas import ListingCreate, plain_detail_text
@@ -92,6 +92,16 @@ def is_olx_financing_service(title: str, description: str) -> bool:
                 and re.search(r'работаем с ипотекой|без первоначального взноса', description, re.I))
 
 
+def _approximate_map_point(ad: dict, city: str) -> tuple[float | None, float | None]:
+    location = ad.get('map')
+    if not isinstance(location, dict) or location.get('show_detailed') is not False:
+        return None, None
+    latitude, longitude = _number(location.get('lat')), _number(location.get('lon'))
+    if not is_city_coordinate_pair(city, latitude, longitude):
+        return None, None
+    return latitude, longitude
+
+
 def _listing(ad: dict, expected_city: str | None = None) -> ListingCreate:
     if not isinstance(ad, dict):
         raise ListingImportError('Нет данных объявления OLX')
@@ -107,6 +117,7 @@ def _listing(ad: dict, expected_city: str | None = None) -> ListingCreate:
     actual_slug = city_slug(city)
     if actual_slug not in {'astana', 'ekibastuz'} or (expected_city and city_slug(expected_city) != actual_slug):
         raise ListingImportError('Город объявления OLX не подтверждён или не совпадает с выбранным')
+    approximate_latitude, approximate_longitude = _approximate_map_point(ad, city)
     params = {p.get('key'): str(p.get('value') or '').strip() for p in ad.get('params', []) if isinstance(p, dict) and p.get('key')}
     title = str(ad.get('title') or '').strip()
     description = plain_detail_text(str(ad.get('description') or '')) or None
@@ -143,6 +154,7 @@ def _listing(ad: dict, expected_city: str | None = None) -> ListingCreate:
     try:
         return ListingCreate(source='olx-import', source_url=url, title=title, city=city, city_observed=True,
             availability_status='active',
+            approximate_latitude=approximate_latitude, approximate_longitude=approximate_longitude,
             market_type=market, district=str(location.get('districtName') or '').strip() or None, residential_complex=complex_name,
             price_kzt=int(price), area_m2=area, rooms=int(rooms), description=description,
             floor=int(floor) if floor and floor.is_integer() else None,

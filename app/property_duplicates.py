@@ -209,18 +209,24 @@ def group_listings(rows: Iterable[Any], *, target: Any | None = None, decisions:
     return groups
 
 
-def cross_platform_listing_ids(rows: Iterable[Any], decisions: Decisions) -> set[int]:
+def cross_platform_listing_groups(rows: Iterable[Any], decisions: Decisions) -> dict[int, int]:
     listings = list(rows)
     olx = {row.id for row in listings if olx_advert_id(row.source_url)}
     krisha = {row.id for row in listings if normalize_krisha_listing_url(row.source_url)}
     if not olx or not krisha:
-        return set()
-    result = set()
+        return {}
+    result = {}
     for group in group_listings(listings, decisions=decisions):
         ids = {row.id for row in group}
         if ids & olx and ids & krisha:
-            result.update(ids & (olx | krisha))
+            members = ids & (olx | krisha)
+            group_id = min(members)
+            result.update(dict.fromkeys(members, group_id))
     return result
+
+
+def cross_platform_listing_ids(rows: Iterable[Any], decisions: Decisions) -> set[int]:
+    return set(cross_platform_listing_groups(rows, decisions))
 
 
 def duplicate_hidden_ids(rows: Iterable[Any], hidden_urls: set[str], decisions: Decisions) -> set[int]:

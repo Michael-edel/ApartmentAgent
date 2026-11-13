@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app import main, search_agent
-from app.models import Base, Listing, SearchResult
+from app.models import Base, DuplicateDecision, Listing, SearchResult
 
 
 @pytest.mark.asyncio
@@ -111,19 +111,39 @@ async def test_map_marks_olx_and_krisha_and_counts_missing_coordinates(monkeypat
                        'min_bathrooms':0, 'exclude_pledged':False, 'market_type':'all'}.items():
         monkeypatch.setattr(main.settings, key, value)
     async with sessions() as session:
-        for source_url, latitude, longitude in [
-            ('https://krisha.kz/a/show/2', 51.13, 71.43),
-            ('https://www.olx.kz/d/obyavlenie/apartment-IDrfHFK.html', 51.14, 71.44),
-            ('https://www.olx.kz/d/obyavlenie/other-IDrfHFL.html', None, None),
+        for listing_id, source_url, latitude, longitude, approximate in [
+            (1, 'https://krisha.kz/a/show/2', 51.13, 71.43, None),
+            (2, 'https://www.olx.kz/d/obyavlenie/apartment-IDrfHFK.html', 51.14, 71.44, (51.15, 71.45)),
+            (3, 'https://www.olx.kz/d/obyavlenie/other-IDrfHFL.html', None, None, (51.17, 71.45)),
+            (4, 'https://www.olx.kz/d/obyavlenie/approximate-IDrfHFM.html', None, None, (51.19, 71.45)),
+            (5, 'https://www.olx.kz/d/obyavlenie/missing-IDrfHFN.html', None, None, None),
         ]:
-            session.add(Listing(source='manual', source_url=source_url, title='Квартира', city='Астана',
+            approximate_latitude, approximate_longitude = approximate or (None, None)
+            session.add(Listing(id=listing_id, source='manual', source_url=source_url, title='Квартира', city='Астана',
                                 rooms=3, area_m2=80, price_kzt=40_000_000,
-                                latitude=latitude, longitude=longitude))
+                                latitude=latitude, longitude=longitude,
+                                approximate_latitude=approximate_latitude, approximate_longitude=approximate_longitude))
+        await session.flush()
+        session.add(DuplicateDecision(first_id=1, second_id=3, decision='same'))
         await session.commit()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url='http://test') as client:
         response = await client.get('/api/v1/search/map')
         assert response.status_code == 200
         data = response.json()
-        assert {item['platform'] for item in data['items']} == {'olx','krisha'}
+        assert {(item['platform'], item['cross_platform']) for item in data['items']} == {
+            ('olx', False), ('krisha', True),
+        }
+        items = {item['listing_id']: item for item in data['items']}
+        assert set(items) == {1, 2, 4}
+        assert items[2]['latitude'] == 51.14 and not items[2].get('approximate_location')
+        assert (items[4]['latitude'], items[4]['longitude']) == (51.19, 71.45)
+        assert items[4]['approximate_location'] and items[4]['river_bank'] == 'unknown'
         assert data['without_coordinates'] == 1
+        missing = data['without_coordinates_items']
+        assert [(item['listing_id'], item['platform'], item['cross_platform']) for item in missing] == [
+            (5, 'olx', False),
+        ]
+        assert 'latitude' not in missing[0] and 'longitude' not in missing[0]
+        left_bank = (await client.get('/api/v1/search/map', params={'bank': 'left'})).json()
+        assert not any(item.get('approximate_location') for item in left_bank['items'])
     await engine.dispose()

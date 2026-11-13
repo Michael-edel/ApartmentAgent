@@ -5,6 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
+from app.cities import is_city_coordinate_pair
 from app.krisha_search import normalize_krisha_import_url
 from app.market_type import MarketType
 
@@ -56,6 +57,8 @@ class ListingCreate(BaseModel):
     address: str | None = Field(default=None, max_length=500)
     latitude: float | None = Field(default=None, ge=-90, le=90)
     longitude: float | None = Field(default=None, ge=-180, le=180)
+    approximate_latitude: float | None = Field(default=None, ge=-90, le=90)
+    approximate_longitude: float | None = Field(default=None, ge=-180, le=180)
     price_kzt: int = Field(gt=0)
     area_m2: float = Field(gt=0)
     rooms: int = Field(gt=0)
@@ -112,6 +115,13 @@ class ListingCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_floor(self) -> "ListingCreate":
+        if self.approximate_latitude is not None or self.approximate_longitude is not None:
+            from app.olx import normalize_olx_listing_url
+
+            if not normalize_olx_listing_url(str(self.source_url)):
+                raise ValueError("Примерная точка доступна только для объявления OLX.kz")
+            if not is_city_coordinate_pair(self.city, self.approximate_latitude, self.approximate_longitude):
+                raise ValueError("Примерная точка должна содержать обе координаты выбранного города")
         if self.repair_source_kind == "description" and (not self.repair_condition or not self.repair_evidence):
             raise ValueError("Для ремонта из описания нужны значение и цитата")
         if self.mortgage_source_kind in {"description", "title"} and (self.mortgage_supported is None or not self.mortgage_evidence):

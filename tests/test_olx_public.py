@@ -1,9 +1,11 @@
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from app.importer import ListingImportError
 from app.olx import _listing, _state, parse_olx_search_page
+from app.schemas import ListingCreate
 
 
 def _ad(**overrides):
@@ -35,7 +37,30 @@ def test_public_detail_uses_only_confirmed_fields():
     assert (item.bathrooms_count, item.bathrooms_count_is_lower_bound) == (2, False)
     assert item.mortgage_supported is True
     assert item.latitude is None and item.longitude is None
+    assert (item.approximate_latitude, item.approximate_longitude) == (51.1, 71.4)
     assert _listing(_ad(description='Два санузла.'), 'astana').bathrooms_count == 2
+
+
+@pytest.mark.parametrize('map_data', [
+    None,
+    {'lat': 51.1, 'lon': 71.4},
+    {'lat': 51.1, 'lon': 71.4, 'show_detailed': True},
+    {'lat': 51.1, 'lon': 71.4, 'show_detailed': 0},
+    {'lat': 51.1, 'show_detailed': False},
+    {'lat': 51.7, 'lon': 75.3, 'show_detailed': False},
+])
+def test_approximate_coordinates_require_explicit_mode_and_valid_city(map_data):
+    item = _listing(_ad(map=map_data), 'astana')
+    assert item.latitude is None and item.longitude is None
+    assert item.approximate_latitude is None and item.approximate_longitude is None
+
+
+def test_approximate_coordinate_fields_accept_only_valid_olx_pair():
+    fields = _listing(_ad(), 'astana').model_dump()
+    for change in ({'source_url': 'https://krisha.kz/a/show/123'},
+                   {'approximate_longitude': None}, {'city': 'Экибастуз'}):
+        with pytest.raises(ValidationError):
+            ListingCreate.model_validate(fields | change)
 
 
 def test_incomplete_or_wrong_city_is_rejected():

@@ -6,7 +6,11 @@
 .listing-map-close{border:0;border-radius:10px;background:#edf3f1;color:#17392f;cursor:pointer;padding:8px 12px;font-size:1rem;white-space:nowrap}
 .listing-map-content{padding:0 20px 18px;overflow:auto}.listing-map-status{min-height:1.4em;margin:4px 0 8px;font-size:.9rem;color:#526761}
 .listing-map-alert{margin:6px 0;padding:10px 12px;border-radius:9px;color:#7a3d13;background:#fff2df;font-size:.9rem}
-.listing-map-reset{margin:2px 0 9px;padding:7px 11px;border:1px solid #b9cdc4;border-radius:8px;background:#f4f8f6;color:#164d3c;cursor:pointer}.listing-map-reset:disabled{opacity:.55;cursor:default}
+.listing-map-controls{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin:2px 0 9px}
+.listing-map-filter{display:inline-flex;align-items:center;gap:8px;margin:0;color:#172d29;font-size:.9rem}
+.listing-map-filter select,.listing-map-reset{min-height:38px;padding:7px 11px;border:1px solid #b9cdc4;border-radius:8px;background:#f4f8f6;color:#164d3c;font:inherit}
+.listing-map-filter select{width:auto}
+.listing-map-reset{cursor:pointer}.listing-map-reset:disabled{opacity:.55;cursor:default}
 .listing-map-canvas{height:min(58vh,560px);min-height:300px;border-radius:12px;border:1px solid #dbe7e2;background:#eef2ef}
 .listing-map-point{background:transparent;border:0}.listing-map-pin{display:grid;place-items:center;width:30px;height:30px;border:2px solid #fff;border-radius:50% 50% 50% 4px;transform:rotate(-45deg);background:#146f55;color:white;box-shadow:0 2px 6px #0005}.listing-map-pin span{transform:rotate(45deg);font-weight:700;font-size:12px}
 .listing-map-popup{min-width:190px;max-height:220px;overflow:auto}.listing-map-entry{padding:6px 0}.listing-map-entry+.listing-map-entry{border-top:1px solid #dde9e3}.listing-map-entry strong,.listing-map-entry span{display:block;margin-bottom:3px}.listing-map-entry button{font:inherit;color:#075f48;background:none;border:0;padding:0;text-decoration:underline;cursor:pointer}.listing-map-entry a{display:inline-block;margin-right:10px}
@@ -22,3 +26,7 @@
 .listing-map-swatch.cross{background:linear-gradient(to right,#d99a00 50%,#16805d 50%)}
 .listing-map-pin.mixed,.listing-map-swatch.mixed{background:#617080;color:#fff}
 .listing-map-source{font-size:.85em;color:#526761}
+
+.listing-map-pin.approximate,.listing-map-swatch.approximate{background:#16805d;color:#fff;border:2px dashed #fff;box-shadow:0 0 0 1px #16805d,0 2px 6px #0005}
+.listing-map-swatch.approximate{width:13px;height:13px}
+.listing-map-approximate-label{color:#145943;font-size:.85em;font-weight:700}

@@ -62,3 +62,8 @@
               linear-gradient(to right, #d99a00 50%, #16805d 50%) border-box;
 }
 .olx-badge { display: inline-flex; align-items: center; border: 1px solid #16805d; border-radius: 999px; background: #e8f7ef; color: #075a3d; padding: 2px 8px; font-size: .8rem; font-weight: 700; }
+
+.listing-actions .secondary-action:not(.saved):not(.button-error){color:#fff}
+.price-comparison-content{margin-top:8px;color:#46576b;font-size:13px;line-height:1.4}
+.price-comparison-content>b{color:#17365d}
+.price-comparison-content>small{display:block;margin-top:9px;color:var(--muted)}

@@ -734,8 +734,7 @@ function renderComparison(data) {
     ${referenceRow(krisha.district_label ? `Район в блоке Krisha: ${krisha.district_label}` : 'Район в блоке Krisha', krisha.district)}
     ${referenceRow(cityLabel, krisha.city)}
     <small>Получено со страницы: ${escapeHtml(observedLabel)}. Период и размер выборки источником не переданы.${sourceUrl ? ` <a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">Источник →</a>` : ''}</small></div>` : '<p>Средние Krisha со страницы объявления пока не получены.</p>';
-  return `<b>Сравнение цены за м²</b>
-    ${krishaBlock}
+  return `${krishaBlock}
     <b>По сохранённым объявлениям</b>
     <p>Среднее по другим сохранённым объявлениям за ${Number(data.lookback_days) || 90} дней; это не средняя цена рынка.</p>
     ${comparisonSummary(district, data.district, minSamples)}
@@ -889,7 +888,7 @@ async function decideDuplicate(button) {
 }
 
 async function loadComparisons(previous = null) {
-  const nodes = [...(grid?.querySelectorAll('.price-comparison[data-listing-id]') || [])];
+  const nodes = [...(grid?.querySelectorAll('.price-comparison-content[data-listing-id]') || [])];
   await Promise.all(nodes.map(async node => {
     const cached = previous?.get(node.dataset.listingId);
     if (cached) {
@@ -999,7 +998,7 @@ function render(listings, pinnedListing = null) {
       ${window.ApartmentAgentWorkflow?.render(item) || ''}
       ${window.ApartmentAgentTracking?.render(item) || ''}
       ${item.matches_search_conditions === false ? '<p class="meta" role="note">Не проходит обязательные условия</p>' : ''}
-      <section class="price-comparison" data-listing-id="${Number(item.id)}" aria-label="Сравнение цены за квадратный метр">Загружаю сравнение цены…</section>
+      <details class="price-comparison listing-comparables" data-details-key="price-comparison"><summary>Сравнение цены за м²</summary><div class="price-comparison-content" data-listing-id="${Number(item.id)}">Загружаю сравнение цены…</div></details>
       <details class="listing-comparables" data-details-key="closest-comparables" data-comparables-id="${Number(item.id)}"><summary>Ближайшие аналоги</summary><div data-comparables-content></div></details>
       <details class="listing-comparables" data-details-key="duplicate-offers" data-duplicates-id="${Number(item.id)}"><summary>Вероятные дубли</summary><div data-duplicates-content></div></details>
       ${mapWidgetUrl ? `<div class="listing-map"><iframe src="${escapeHtml(mapWidgetUrl)}" title="Расположение квартиры: ${escapeHtml(title)}" loading="lazy" allowfullscreen></iframe></div>` : ''}
@@ -1113,7 +1112,7 @@ async function loadListings({reuseComparisons = false} = {}) {
       if (pinnedResponse.ok) pinnedListing = await readJson(pinnedResponse);
     }
     if (revision !== listingsRevision || requestCity !== activeSearchCity || requestMarketType !== activeMarketType) return false;
-    const loaded = reuseComparisons ? [...(grid?.querySelectorAll('.price-comparison[data-loaded]') || [])] : [];
+    const loaded = reuseComparisons ? [...(grid?.querySelectorAll('.price-comparison-content[data-loaded]') || [])] : [];
     const previous = new Map(loaded.map(node => [node.dataset.listingId, node]));
     render(listings, pinnedListing);
     grid?.querySelectorAll('.check-listing').forEach(button => {

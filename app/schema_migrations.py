@@ -32,6 +32,8 @@ _COLUMNS: dict[str, dict[str, str]] = {
         "address": "VARCHAR(500)",
         "latitude": "DOUBLE PRECISION",
         "longitude": "DOUBLE PRECISION",
+        "approximate_latitude": "DOUBLE PRECISION",
+        "approximate_longitude": "DOUBLE PRECISION",
         "photo_urls": "JSON NOT NULL DEFAULT '[]'",
         "twogis_name": "VARCHAR(300)",
         "twogis_rating": "DOUBLE PRECISION",

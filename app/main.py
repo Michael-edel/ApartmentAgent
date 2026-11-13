@@ -33,7 +33,7 @@ from app import olx
 from app.krisha_search import normalize_krisha_listing_url
 from app.models import BathroomCheckControl, BathroomCheckJob, BathroomCheckTask, DuplicateDecision, Listing, ListingCheck, ListingLike, ListingTargetPrice, ListingWorkflow, PriceSnapshot, SearchHistory, SearchResult
 from app.listing_tracking import tracking_summary
-from app.property_duplicates import canonical_url, confirmed_component, cross_platform_listing_ids, decision_key, duplicate_hidden_ids, group_listings, load_duplicate_decisions, offer, unique_offers
+from app.property_duplicates import canonical_url, confirmed_component, cross_platform_listing_groups, cross_platform_listing_ids, decision_key, duplicate_hidden_ids, group_listings, load_duplicate_decisions, offer, unique_offers
 from app.schemas import ListingCreate, ListingImportRequest, ListingResponse, PriceSnapshotResponse
 from app.seller import seller_category
 from app.scoring import assess_listing, listing_river_bank
@@ -665,9 +665,11 @@ async def search_map(
         hidden = await hidden_urls(session)
         saved_rows = (await session.execute(select(
             *_DUPLICATE_COLUMNS, Listing.district, Listing.latitude, Listing.longitude, Listing.is_pledged,
+            Listing.approximate_latitude, Listing.approximate_longitude,
             Listing.building_year, Listing.property_details, Listing.market_type,
         ).order_by(Listing.created_at.desc(), Listing.id.desc()))).all()
-        cross_platform_ids = cross_platform_listing_ids(saved_rows, await load_duplicate_decisions(session))
+        active_rows = [row for row in saved_rows if _favorite_key(row.source_url) not in unavailable]
+        cross_platform_groups = cross_platform_listing_groups(active_rows, await load_duplicate_decisions(session))
         saved: dict[str, Any] = {}
         for row in saved_rows:
             saved.setdefault(_favorite_key(row.source_url), row)
@@ -680,12 +682,14 @@ async def search_map(
             found.setdefault(_favorite_key(row.url), row)
 
     items: list[dict[str, object]] = []
-    without_coordinates = 0
+    without_coordinates: list[dict[str, object]] = []
     for key in dict.fromkeys([*saved, *found]):
         if key in unavailable or key in hidden:
             continue
         listing = saved.get(key)
         result = found.get(key)
+        platform = 'olx' if olx_advert_id(key) else 'krisha' if normalize_krisha_listing_url(key) else None
+        cross_platform = listing is not None and listing.id in cross_platform_groups
         if listing is not None:
             actual_market = listing.market_type or (result.market_type if result is not None else None)
             if city_slug(listing.city) != selected_city or not matches_market_type(selected_market, actual_market):
@@ -712,22 +716,28 @@ async def search_map(
             category = seller_category(role)
             if seller != 'all' and category != seller:
                 continue
+            entry = {
+                'source_url': key, 'title': listing.title, 'price_kzt': listing.price_kzt,
+                'address': listing.address, 'district': listing.district,
+                'market_type': actual_market,
+                'listing_id': listing.id, 'search_result_id': result.id if result else None,
+                'seller_category': category,
+                'platform': platform, 'cross_platform': cross_platform,
+            }
             if not is_city_coordinate_pair(listing.city, listing.latitude, listing.longitude):
-                without_coordinates += 1
+                if (bank == 'all' and platform == 'olx' and is_city_coordinate_pair(
+                        listing.city, listing.approximate_latitude, listing.approximate_longitude)):
+                    items.append({**entry, 'latitude': listing.approximate_latitude,
+                                  'longitude': listing.approximate_longitude,
+                                  'river_bank': 'unknown', 'approximate_location': True})
+                    continue
+                without_coordinates.append(entry)
                 continue
             river_bank = listing_river_bank(listing.city, listing.latitude, listing.longitude)
             if bank == 'left' and river_bank != 'left':
                 continue
-            platform = 'olx' if olx_advert_id(key) else 'krisha' if normalize_krisha_listing_url(key) else None
-            items.append({
-                'source_url': key, 'title': listing.title, 'latitude': listing.latitude,
-                'longitude': listing.longitude, 'price_kzt': listing.price_kzt,
-                'address': listing.address, 'district': listing.district,
-                'market_type': actual_market,
-                'listing_id': listing.id, 'search_result_id': result.id if result else None,
-                'river_bank': river_bank, 'seller_category': category,
-                'platform': platform, 'cross_platform': listing.id in cross_platform_ids,
-            })
+            items.append({**entry, 'latitude': listing.latitude, 'longitude': listing.longitude,
+                          'river_bank': river_bank})
         elif result is not None:
             if not city_matches(selected_city, result.city) or not _row_matches_target(result):
                 continue
@@ -735,9 +745,17 @@ async def search_map(
                 continue
             if seller != 'all' and seller_category(result.seller_type) != seller:
                 continue
-            without_coordinates += 1
+            without_coordinates.append({
+                'source_url': key, 'title': result.title,
+                'platform': platform, 'cross_platform': False,
+            })
+    exact_groups = {cross_platform_groups[item['listing_id']] for item in items
+                    if item['cross_platform'] and not item.get('approximate_location')}
+    items = [item for item in items if not item.get('approximate_location')
+             or cross_platform_groups.get(item['listing_id']) not in exact_groups]
     return {'city': selected_city, 'market_type': selected_market, 'items': items,
-            'without_coordinates': without_coordinates}
+            'without_coordinates': len(without_coordinates),
+            'without_coordinates_items': without_coordinates}
 
 
 @app.get("/api/v1/search/results")
