@@ -9,8 +9,10 @@ from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import select
 
+from app.cities import city_slug
 from app.krisha_search import normalize_krisha_listing_url
 from app.models import DuplicateDecision
+from app.olx import normalize_olx_listing_url, olx_advert_id
 from app.seller import seller_category
 
 AREA_DIFFERENCE_M2 = 0.5
@@ -22,7 +24,7 @@ _KRISHA_PHOTO = re.compile(
 
 
 def canonical_url(value: str) -> str:
-    return normalize_krisha_listing_url(value) or value.strip()
+    return normalize_krisha_listing_url(value) or normalize_olx_listing_url(value) or value.strip()
 
 
 def _house(value: str | None) -> str | None:
@@ -90,6 +92,9 @@ def confirmed_component(listing_id: int, decisions: Decisions) -> set[int]:
 def duplicate_evidence(first: Any, second: Any, *, decisions: Decisions | None = None) -> dict[str, Any] | None:
     if canonical_url(first.source_url) == canonical_url(second.source_url):
         return {'kind': 'same_url', 'shared_photos': 0}
+    first_olx, second_olx = olx_advert_id(first.source_url), olx_advert_id(second.source_url)
+    if first_olx and first_olx == second_olx:
+        return {'kind': 'same_url', 'shared_photos': 0}
     if decisions:
         decision = decisions.get(decision_key(first.id, second.id))
         if decision == 'same':
@@ -97,7 +102,8 @@ def duplicate_evidence(first: Any, second: Any, *, decisions: Decisions | None =
         if decision == 'different':
             return None
     first_city, second_city = (getattr(first, 'city', None) or '').strip().casefold(), (getattr(second, 'city', None) or '').strip().casefold()
-    if first_city and second_city and first_city != second_city:
+    if (first_city and second_city
+            and (city_slug(first_city) or first_city) != (city_slug(second_city) or second_city)):
         return None
     first_rooms, second_rooms = getattr(first, 'rooms', None), getattr(second, 'rooms', None)
     first_area, second_area = getattr(first, 'area_m2', None), getattr(second, 'area_m2', None)
@@ -119,6 +125,16 @@ def duplicate_evidence(first: Any, second: Any, *, decisions: Decisions | None =
                 or (second_lower and not first_lower and first_bathrooms < second_bathrooms)):
             return None
     house1, house2 = _house(getattr(first, 'address', None)), _house(getattr(second, 'address', None))
+    if bool(first_olx) != bool(second_olx) and house1 and house2:
+        # The two sites format street prefixes differently. Preserve house and
+        # corpus numbers, and keep contradictory explicit street types apart.
+        kind1, _, name1 = house1.partition(' ')
+        kind2, _, name2 = house2.partition(' ')
+        street_kinds = {'ул', 'проспект'}
+        if kind1 in street_kinds and kind2 not in street_kinds:
+            house1 = name1
+        if kind2 in street_kinds and kind1 not in street_kinds:
+            house2 = name2
     if house1 and house2 and house1 != house2:
         return None
     shared = len(_photos(first) & _photos(second))
@@ -199,13 +215,14 @@ def offer(row: Any, *, target: Any | None = None, decisions: Decisions | None = 
 
 def unique_offers(group: Iterable[Any], *, target: Any | None = None, decisions: Decisions | None = None) -> list[dict[str, Any]]:
     """Collapse only URL spelling variants; preserve distinct ads and prices."""
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     result: list[dict[str, Any]] = []
     rows = list(group)
     if target is not None:
         rows.sort(key=lambda row: row.id != target.id)
     for row in rows:
-        key = canonical_url(row.source_url)
+        olx_id = olx_advert_id(row.source_url)
+        key = ("olx", olx_id) if olx_id else ("url", canonical_url(row.source_url))
         if key not in seen:
             seen.add(key)
             result.append(offer(row, target=target, decisions=decisions))

@@ -13,6 +13,7 @@ from app.cities import CITY_NAMES, city_slug, is_city_coordinate_pair
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import Listing, ListingObservation, PriceSnapshot, SearchResult
+from app.olx import normalize_olx_listing_url, olx_advert_id
 from app.krisha_search import normalize_krisha_listing_url
 from app.pledge import parse_pledge_claim, pledge_field
 from app.schemas import ListingCreate
@@ -48,7 +49,7 @@ def _snapshot(listing_id: int, price_kzt: int, area_m2: float) -> PriceSnapshot:
 def _values(payload: ListingCreate) -> dict[str, object]:
     values = payload.model_dump(mode="json")
     raw_url = str(payload.source_url)
-    values["source_url"] = normalize_krisha_listing_url(raw_url) or raw_url
+    values["source_url"] = normalize_krisha_listing_url(raw_url) or normalize_olx_listing_url(raw_url) or raw_url
     return values
 
 
@@ -137,9 +138,18 @@ async def backfill_mortgage_and_addresses() -> dict[str, int]:
 
 async def _find_listing(session: AsyncSession, source_url: str) -> Listing | None:
     canonical = normalize_krisha_listing_url(source_url)
-    exact = await session.scalar(select(Listing).where(Listing.source_url == (canonical or source_url)))
-    if exact is not None or canonical is None:
+    olx_url = normalize_olx_listing_url(source_url)
+    exact = await session.scalar(select(Listing).where(Listing.source_url == (canonical or olx_url or source_url)))
+    if exact is not None:
         return exact
+    if olx_url:
+        advert_id = olx_advert_id(olx_url)
+        candidates = await session.scalars(select(Listing).where(
+            Listing.source_url.contains(f"{advert_id}.html", autoescape=True)
+        ).order_by(Listing.id))
+        return next((row for row in candidates if olx_advert_id(row.source_url) == advert_id), None)
+    if canonical is None:
+        return None
     path = canonical.removeprefix("https://krisha.kz")
     candidates = (await session.scalars(
         select(Listing).where(Listing.source_url.contains(path, autoescape=True))

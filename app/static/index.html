@@ -11,7 +11,7 @@
   <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
   <link rel="apple-touch-icon" href="/static/icon.svg">
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="/static/styles.css?v=153">
+  <link rel="stylesheet" href="/static/styles.css?v=154">
   <link rel="stylesheet" href="/static/listing-map.css?v=1">
   <link rel="stylesheet" href="/static/listing-workflow.css?v=1">
   <style>.bookmarklet-code{width:100%;min-height:96px;resize:vertical;border:1px solid #d8e2ec;border-radius:12px;background:#f8fafc;color:#142033;padding:12px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}</style>
@@ -59,6 +59,7 @@
           <option value="ekibastuz">Экибастуз</option>
         </select>
       </label>
+      <p><a id="openOlxSearch" href="https://www.olx.kz/nedvizhimost/prodazha-kvartiry/astana/" target="_blank" rel="noopener noreferrer">Смотреть на OLX.kz ↗</a> <span class="microcopy">Откроется поиск OLX в новой вкладке.</span></p>
       <label class="search-room-control">Тип рынка
         <select id="searchMarketType">
           <option value="all">Все</option>
@@ -166,6 +167,7 @@
         <button id="refreshSearchButton" class="icon-button" aria-label="Обновить результаты">↻</button>
       </div>
     </section>
+    <p class="microcopy">OLX пока не ищется автоматически. Добавьте объявление вручную — карточка появится в разделе «Квартиры». <a href="#listingForm">Добавить с OLX</a> · <a href="#savedListings">Сохранённые квартиры</a></p>
     <label class="checkbox"><input id="searchShowHidden" type="checkbox"> Показывать скрытые объявления</label>
     <section id="searchResults" class="listing-grid"></section>
 
@@ -200,7 +202,7 @@
       <p id="bookmarkletMessage" class="form-message" aria-live="polite">Сохраните скопированный код как закладку браузера. На странице Krisha откройте эту закладку один раз.</p>
     </section>
 
-    <section class="section-heading saved-listings-heading">
+    <section class="section-heading saved-listings-heading" id="savedListings">
       <div><p class="eyebrow">Мониторинг · <span id="listingCityLabel">Астана</span> · <span id="listingMarketLabel">Все типы рынка</span></p><h2>Квартиры</h2></div>
       <div class="section-controls">
         <select id="listingSort" aria-label="Сортировка квартир">
@@ -243,9 +245,12 @@
     <section class="form-card card">
       <p class="eyebrow">Ручной ввод</p>
       <h2>Добавить квартиру</h2>
+      <p>Добавить с OLX.kz: откройте объявление, скопируйте ссылку и заполните известные поля ниже. Данные автоматически по ссылке не загружаются.</p>
       <form id="listingForm">
         <label>Ссылка<input name="source_url" type="url" required></label>
+        <p id="olxManualHint" class="microcopy" hidden>Объявление OLX.kz: заполните данные вручную. При повторном сохранении карточка обновится.</p>
         <label>Заголовок<input name="title" required></label>
+        <label>Тип рынка<select name="market_type"><option value="">Не указан</option><option value="new">Новостройка</option><option value="secondary">Вторичное жильё</option></select></label>
         <label>Город<select name="city"><option value="Астана">Астана</option><option value="Экибастуз">Экибастуз</option></select></label>
         <div class="form-grid">
           <label>Цена, ₸<input name="price_kzt" type="number" required></label>
@@ -304,6 +309,6 @@
   <script src="/static/listing-workflow.js?v=1" defer></script>
   <script src="/static/listing-tracking.js?v=1" defer></script>
   <script src="/static/search-profiles.js?v=3" defer></script>
-  <script src="/static/app.js?v=173" defer></script>
+  <script src="/static/app.js?v=175" defer></script>
 </body>
 </html>

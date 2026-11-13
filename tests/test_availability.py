@@ -80,6 +80,50 @@ async def test_saved_city_scope_and_browser_import(sessions):
 
 
 @pytest.mark.asyncio
+async def test_manual_olx_update_and_cross_site_duplicate(sessions, monkeypatch):
+    olx_url = "https://www.olx.kz/d/obyavlenie/2h-komnatnaya-kvvrtira-67-kv-m-IDr7f0E.html"
+    krisha_url = "https://krisha.kz/a/show/1015478864"
+    async with sessions.begin() as session:
+        session.add(Listing(source_url=krisha_url, title="2-комнатная квартира", city="Астана",
+                            address="Ауэзова 22", rooms=2, area_m2=67.1, floor=5, floors_total=9,
+                            price_kzt=35_500_000))
+
+    async def unexpected_fetch(*args, **kwargs):
+        pytest.fail("OLX manual import and checks must not fetch an OLX page")
+
+    monkeypatch.setattr(checker, "import_krisha_listing", unexpected_fetch)
+    transport = httpx.ASGITransport(app=main.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        path = "/api/v1/listings/olx-import"
+        data = {"source_url": olx_url + "?reason=observed", "city": "Астана",
+                "title": "2-комнатная квартира на Ауэзова 22", "address": "ул. Ауэзова 22",
+                "rooms": 2, "area_m2": 67, "floor": 5, "floors_total": 9, "price_kzt": 36_000_000}
+        invalid = await client.post(path, json={**data, "source_url": olx_url.replace("olx.kz", "olx.kz.example")})
+        assert invalid.status_code == 422
+        created = await client.post(path, json=data)
+        assert created.status_code == 201
+        card = created.json()
+        assert card["source_url"] == olx_url
+        assert card["price_kzt"] == 36_000_000
+        assert card["krisha_city_price_per_m2"] is None
+        card_path = f'/api/v1/listings/{card["id"]}'
+        duplicates = (await client.get(card_path + "/duplicates")).json()
+        assert {offer["source_url"]: offer["price_kzt"] for offer in duplicates["items"]} == {
+            olx_url: 36_000_000, krisha_url: 35_500_000,
+        }
+        assert duplicates["items"][1]["evidence"]["kind"] == "same_house_floor_area"
+        assert (await client.post(card_path + "/check")).json()["status"] == "manual"
+
+        # Simulate a user entering a new price from the same ad using an updated slug.
+        variant = "https://olx.kz/kk/d/obyavlenie/novoe-nazvanie-IDr7f0E.html"
+        saved = (await client.post(path, json={**data, "source_url": variant, "price_kzt": 35_900_000})).json()
+        assert saved["id"] == card["id"] and saved["price_kzt"] == 35_900_000
+        assert len((await client.get("/api/v1/listings?city=astana")).json()) == 2
+        prices = (await client.get(card_path + "/price-history")).json()
+        assert [item["price_kzt"] for item in prices] == [35_900_000, 36_000_000]
+
+
+@pytest.mark.asyncio
 async def test_market_filter_applies_to_found_saved_map_and_favorites(sessions, monkeypatch):
     monkeypatch.setattr(main.settings, "search_city", "astana")
     async with sessions.begin() as session:

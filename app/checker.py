@@ -12,6 +12,7 @@ from app.importer import ListingArchived, ListingImportError, ListingUnavailable
 from app.listing_service import persist_listing
 from app.listing_tracking import evaluate_target_alerts
 from app.models import Listing, ListingCheck
+from app.olx import olx_advert_id
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,9 @@ async def check_listing(listing_id: int) -> ListingCheckResult:
         source_url = row.source_url
         old_price = row.price_kzt
         saved_city = city_slug(row.city)
+
+    if olx_advert_id(source_url):
+        return ListingCheckResult(listing_id, "manual", "Обновите цену вручную в карточке OLX.", old_price, None)
 
     try:
         if saved_city not in SEARCH_CITIES:
@@ -127,8 +131,10 @@ async def check_all_listings(*, city: SearchCity = "astana") -> CheckSummary:
     summary = CheckSummary()
 
     async with SessionLocal() as session:
-        rows = await session.execute(select(Listing.id, Listing.city).where(Listing.sold_at.is_(None)).order_by(Listing.id))
-        listing_ids = [row.id for row in rows if city_slug(row.city) == city]
+        rows = await session.execute(
+            select(Listing.id, Listing.city, Listing.source_url).where(Listing.sold_at.is_(None)).order_by(Listing.id)
+        )
+        listing_ids = [row.id for row in rows if city_slug(row.city) == city and not olx_advert_id(row.source_url)]
 
     for listing_id in listing_ids:
         summary.checked += 1

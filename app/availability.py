@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.krisha_search import normalize_krisha_listing_url
 from app.models import Listing, ListingCheck, SearchResult
+from app.olx import normalize_olx_listing_url, olx_advert_id
 
 
 SourceAvailability = Literal['active', 'archived', 'unavailable']
@@ -25,7 +26,7 @@ def listing_is_available():
 
 
 def availability_key(url: str) -> str:
-    return normalize_krisha_listing_url(url) or url
+    return normalize_krisha_listing_url(url) or normalize_olx_listing_url(url) or url
 
 
 async def unavailable_urls(session: AsyncSession) -> set[str]:
@@ -39,6 +40,10 @@ async def _matching_ids(session: AsyncSession, model, url: str) -> list[int]:
     column = Listing.source_url if model is Listing else SearchResult.url
     canonical = normalize_krisha_listing_url(url)
     query = select(model.id, column).order_by(model.id)
+    olx_id = olx_advert_id(url)
+    if olx_id:
+        rows = (await session.execute(query.where(column.contains(f"{olx_id}.html", autoescape=True)))).all()
+        return [row_id for row_id, row_url in rows if olx_advert_id(row_url) == olx_id]
     if canonical is None:
         rows = (await session.execute(query.where(column == url))).all()
         return [row_id for row_id, _ in rows]

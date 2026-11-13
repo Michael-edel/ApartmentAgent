@@ -28,6 +28,7 @@ from app.importer import ListingArchived, ListingImportError, ListingUnavailable
 from app.listing_service import ListingAlreadyExists, _find_listing, _matching_search_results, persist_listing
 from app.market_comparison import LOOKBACK_DAYS, compare_saved_listings
 from app.market_type import MarketFilter, matches_market_type
+from app.olx import normalize_olx_listing_url, olx_advert_id
 from app.krisha_search import normalize_krisha_listing_url
 from app.models import BathroomCheckControl, BathroomCheckJob, BathroomCheckTask, DuplicateDecision, Listing, ListingCheck, ListingLike, ListingTargetPrice, ListingWorkflow, PriceSnapshot, SearchHistory, SearchResult
 from app.listing_tracking import tracking_summary
@@ -44,6 +45,7 @@ from app.workflow import hidden_urls, router as workflow_router
 
 settings = get_settings()
 _duplicate_lock = asyncio.Lock()
+_olx_import_lock = asyncio.Lock()
 _DUPLICATE_COLUMNS = (
     Listing.id, Listing.source_url, Listing.title, Listing.city, Listing.address, Listing.rooms,
     Listing.area_m2, Listing.floor, Listing.floors_total, Listing.bathrooms_count,
@@ -233,7 +235,7 @@ async def _finish_search_result_monitor(result_id: int, source_url: str) -> None
 
 
 def _favorite_key(url: str) -> str:
-    return normalize_krisha_listing_url(url) or url
+    return canonical_url(url)
 
 
 class LikeRequest(BaseModel):
@@ -310,7 +312,24 @@ async def _save_listing(payload: ListingCreate, *, allow_existing: bool) -> List
 async def create_listing(payload: ListingCreate) -> ListingResponse:
     if city_slug(payload.city) not in SEARCH_CITIES:
         raise HTTPException(422, "Поддерживаются Астана и Экибастуз.")
+    if normalize_olx_listing_url(str(payload.source_url)):
+        return await import_olx_listing(payload)
     return await _save_listing(payload, allow_existing=False)
+
+
+@app.post("/api/v1/listings/olx-import", response_model=ListingResponse, status_code=status.HTTP_201_CREATED)
+async def import_olx_listing(payload: ListingCreate) -> ListingResponse:
+    url = normalize_olx_listing_url(str(payload.source_url))
+    if url is None:
+        raise HTTPException(422, "Вставьте ссылку на отдельное объявление OLX.kz.")
+    city = city_slug(payload.city)
+    if city not in SEARCH_CITIES:
+        raise HTTPException(422, "Поддерживаются Астана и Экибастуз.")
+    values = {"source": "manual", "source_url": HttpUrl(url), "city": CITY_NAMES[city],
+              "krisha_district_price_per_m2": None, "krisha_city_price_per_m2": None,
+              "krisha_comparison_district": None}
+    async with _olx_import_lock:
+        return await _save_listing(payload.model_copy(update=values), allow_existing=True)
 
 
 @app.post(
@@ -1063,7 +1082,9 @@ async def save_duplicate_decision(listing_id: int, other_id: int, payload: Dupli
         if len(candidates) != 2:
             raise HTTPException(404, 'Объявление не найдено')
         left, right = candidates
-        if canonical_url(left.source_url) == canonical_url(right.source_url):
+        left_olx = olx_advert_id(left.source_url)
+        if (canonical_url(left.source_url) == canonical_url(right.source_url)
+                or left_olx is not None and left_olx == olx_advert_id(right.source_url)):
             raise HTTPException(422, 'Обе карточки относятся к одной ссылке')
         if payload.decision == 'same' and city_slug(left.city) != city_slug(right.city):
             raise HTTPException(422, 'Объявления находятся в разных городах')

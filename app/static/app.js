@@ -104,6 +104,8 @@ const searchSellerFilter = document.querySelector('#searchSellerFilter');
 const searchLeftBankOnly = document.querySelector('#searchLeftBankOnly');
 function updateCriteriaCity() {
   const city = searchCity?.value || 'astana';
+  const olxLink = document.querySelector('#openOlxSearch');
+  if (olxLink) olxLink.href = `https://www.olx.kz/nedvizhimost/prodazha-kvartiry/${city === 'ekibastuz' ? 'ekibastuz' : 'astana'}/`;
   const label = document.querySelector('#criteriaCity');
   if (label) label.textContent = cityNames.get(city) || 'Астана';
   const mode = document.querySelector('#searchModeDescription');
@@ -169,6 +171,27 @@ function safeExternalUrl(value) {
     const url = new URL(value);
     return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
   } catch { return null; }
+}
+
+function isOlxUrl(value) {
+  try {
+    const url = new URL(value);
+    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && ['olx.kz', 'www.olx.kz'].includes(url.hostname);
+  } catch { return false; }
+}
+
+function olxBadge(url) {
+  return isOlxUrl(url) ? '<span class="olx-badge">OLX.kz</span>' : '';
+}
+
+function duplicateSourceBadge(url) {
+  if (isOlxUrl(url)) return olxBadge(url);
+  try {
+    if (['krisha.kz', 'www.krisha.kz'].includes(new URL(url).hostname)) return '<span class="meta">Krisha.kz</span>';
+  } catch {
+    return '';
+  }
+  return '';
 }
 
 function buildBookmarklet() {
@@ -727,7 +750,7 @@ function renderDuplicateOffers(offers, currentId, rejected = false) {
       : `<button type="button" data-duplicate-other="${otherId}" data-decision="same">Одна квартира</button><button type="button" data-duplicate-other="${otherId}" data-decision="different">Разные квартиры</button>`}</div>` : '';
     return `<li>${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${title} ↗</a>` : title}
       ${photo ? `<img src="${escapeHtml(photo)}" alt="Фото объявления" loading="lazy" referrerpolicy="no-referrer" class="duplicate-photo">` : ''}
-      <div class="duplicate-facts"><b>${escapeHtml(price)}</b>${sellerBadge(offer)}${availabilityBadge(offer)}
+      <div class="duplicate-facts"><b>${escapeHtml(price)}</b>${duplicateSourceBadge(offer.source_url)}${sellerBadge(offer)}${availabilityBadge(offer)}
       ${offer.listing_id === currentId ? '<span class="meta">Это объявление</span>' : ''}</div>
       ${evidence ? `<small class="meta">${escapeHtml(evidence)}${transitive ? ' через другие объявления' : ''}</small>` : ''}${actions}</li>`;
   }).join('')}</ul>`;
@@ -950,14 +973,14 @@ function render(listings, pinnedListing = null) {
     const twogisRating = Number(item.twogis_rating);
     const twogisReviews = Number(item.twogis_review_count || 0);
     const twogisLine = item.twogis_name ? `<div class="twogis-review"><b>2GIS</b> ${Number.isFinite(twogisRating) && twogisReviews ? `★ ${twogisRating.toFixed(1)}/5 · ${twogisReviews} отзывов` : 'оценка и отзывы не опубликованы'}${item.twogis_url ? ` · <a href="${escapeHtml(item.twogis_url)}" target="_blank" rel="noopener noreferrer">Открыть в 2GIS →</a>` : ''}</div>` : '';
-    return `<article class="listing card" id="listing-${item.id}" tabindex="-1" aria-label="Карточка квартиры: ${escapeHtml(title)}">
+    return `<article class="listing card${isOlxUrl(item.source_url) ? ' olx-source' : ''}" id="listing-${item.id}" tabindex="-1" aria-label="Карточка квартиры: ${escapeHtml(title)}">
       ${pinnedListing && item.id === pinnedListing.id ? `<p class="meta" role="note">Карточка вне выбранного города или типа рынка показана по прямой ссылке. Критерии не изменены.</p>` : ''}
       ${previewPhotos.length ? `<div class="listing-photos">${previewPhotos.map((photo, index) => `<img class="listing-photo ${index ? 'thumbnail' : ''}" src="${escapeHtml(photo)}" alt="Фото квартиры ${index + 1}" loading="lazy" referrerpolicy="no-referrer">`).join('')}</div>` : ''}
       ${photos.length ? `<details class="listing-all-photos" data-details-key="photos"><summary>Все фотографии (${photos.length})</summary><div class="listing-gallery">${photos.map((photo, index) => `<a href="${escapeHtml(photo)}" target="_blank" rel="noopener noreferrer" aria-label="Открыть фото ${index + 1} в новой вкладке"><img src="${escapeHtml(photo)}" alt="Фото квартиры ${index + 1}" loading="lazy" referrerpolicy="no-referrer"><span>Фото ${index + 1} ↗</span></a>`).join('')}</div></details>` : ''}
       <div class="listing-top"><div><h3>${escapeHtml(title)}</h3><div class="meta">${escapeHtml(location)}</div></div><div class="rating ${scoreClass}">${item.assessment.score}</div></div>
       <div class="price">${money.format(item.price_kzt)}</div>
       <div class="meta">${item.rooms} комн. · ${number.format(item.area_m2)} м² · ${money.format(item.assessment.price_per_m2)}/м² · этаж ${item.floor || '—'}/${item.floors_total || '—'}</div>
-      <div class="listing-bank">${marketBadge(item)}${riverBankBadge(item)}${availabilityBadge(item)}</div>
+      <div class="listing-bank">${olxBadge(item.source_url)}${marketBadge(item)}${riverBankBadge(item)}${availabilityBadge(item)}</div>
       ${likeControl(item, 'listings')}
       ${hiddenControls(item, 'listing')}
       ${window.ApartmentAgentWorkflow?.render(item) || ''}
@@ -990,11 +1013,25 @@ function render(listings, pinnedListing = null) {
       <span class="verdict">${escapeHtml(item.assessment.verdict)}</span>
       <details class="listing-comparables" data-details-key="score-reasons"><summary>Почему такая оценка</summary>${Array.isArray(item.assessment.reasons) && item.assessment.reasons.length ? `<ul>${item.assessment.reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join('')}</ul>` : '<p class="meta">Нет дополнительных замечаний к критериям.</p>'}</details>
       ${ai.summary ? `<div class="ai-summary"><b>AI-анализ</b><p>${escapeHtml(ai.summary)}</p></div>` : ''}
-      <div class="listing-actions"><button class="check-listing secondary-action" data-listing-id="${item.id}" type="button">↻ Проверить квартиру</button>
+      <div class="listing-actions">${isOlxUrl(item.source_url) ? `<button class="edit-olx secondary-action" data-listing-id="${Number(item.id)}" type="button">Обновить данные OLX</button>` : `<button class="check-listing secondary-action" data-listing-id="${item.id}" type="button">↻ Проверить квартиру</button>`}
         <button class="panel-action sale-action" data-sale-id="${Number(item.id)}" data-mark-sold="${item.availability !== 'sold'}" type="button">${item.availability === 'sold' ? 'Снять отметку «Продана»' : 'Отметить проданной'}</button></div>
       ${sourceUrl ? `<a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">Открыть объявление →</a>` : ''}
     </article>`;
   }).join('');
+  grid.querySelectorAll('.edit-olx').forEach(button => button.addEventListener('click', () => {
+    const item = displayedListings.find(entry => Number(entry.id) === Number(button.dataset.listingId));
+    if (!item || !isOlxUrl(item.source_url) || !form) return;
+    const fields = ['source_url', 'title', 'city', 'market_type', 'price_kzt', 'area_m2', 'rooms', 'bathrooms_count', 'floor', 'floors_total', 'building_year', 'district', 'repair_condition', 'description', 'residential_complex', 'complex_description', 'complex_description_source_kind', 'complex_description_source_url', 'address', 'seller_name', 'seller_type', 'latitude', 'longitude', 'building_type', 'mortgage_supported', 'is_pledged', 'is_full_two_room'];
+    for (const name of fields) {
+      const control = form.elements.namedItem(name);
+      if (!control) continue;
+      if (control.type === 'checkbox') control.checked = item[name] === true;
+      else control.value = item[name] == null ? '' : String(item[name]);
+    }
+    manualSourceUrl?.dispatchEvent(new Event('input'));
+    form.scrollIntoView({behavior:'smooth', block:'start'});
+    form.querySelector('[name="price_kzt"]')?.focus({preventScroll:true});
+  }));
   grid.querySelectorAll('article[id^="listing-"] details[data-details-key]').forEach(detail => {
     detail.open = openDetails.has(`${detail.closest('article').id}:${detail.dataset.detailsKey}`);
   });
@@ -1191,12 +1228,12 @@ async function loadSearchResults() {
       const imported = importStatus === 'imported' || isSaved;
       const importLabel = imported ? 'Сохранено в карточку' : importStatus === 'queued' ? 'Мониторинг запущен' : importStatus === 'blocked' ? 'Источник ограничил импорт' : importStatus === 'error' ? 'Импорт не удался — повторить' : 'Сохранить объявление';
       const seenLabel = item.status === 'seen' ? 'Просмотрено' : priorityLabel(item.priority);
-      return `<article class="listing card ${priorityClass(item.priority)} ${item.status === 'seen' ? 'result-seen' : ''}">
+      return `<article class="listing card ${priorityClass(item.priority)} ${item.status === 'seen' ? 'result-seen' : ''}${isOlxUrl(item.url) ? ' olx-source' : ''}">
         <div class="listing-top">
           <div><span class="verdict">${escapeHtml(seenLabel)}</span><h3>${escapeHtml(cleanSearchTitle(item.title))}</h3></div>
           <div class="rating ${a.score < 85 ? 'medium' : ''}">${a.score ?? '—'}</div>
         </div>
-        <div class="search-facts">${facts.map(value => `<span>${escapeHtml(value)}</span>`).join('')}${marketBadge(item)}${typeof a.is_pledged === 'boolean' ? (a.is_pledged ? pledgeBadge(a) : '<span>Нет залога</span>') : ''}${bathroomBadge(a, true)}${sellerBadge(item)}${riverBankBadge(item)}</div>
+        <div class="search-facts">${olxBadge(item.url)}${facts.map(value => `<span>${escapeHtml(value)}</span>`).join('')}${marketBadge(item)}${typeof a.is_pledged === 'boolean' ? (a.is_pledged ? pledgeBadge(a) : '<span>Нет залога</span>') : ''}${bathroomBadge(a, true)}${sellerBadge(item)}${riverBankBadge(item)}</div>
         ${likeControl(item, 'search/results')}
         ${hiddenControls(item, 'search')}
         ${reasons ? `<ul class="reason-list">${reasons}</ul>` : `<p class="meta">${escapeHtml(item.snippet || 'Откройте объявление для проверки параметров.')}</p>`}
@@ -1441,12 +1478,19 @@ importForm?.addEventListener('submit', async event => {
   }
 });
 
+const manualSourceUrl = form?.querySelector('[name="source_url"]');
+const olxManualHint = document.querySelector('#olxManualHint');
+manualSourceUrl?.addEventListener('input', () => {
+  if (olxManualHint) olxManualHint.hidden = !isOlxUrl(manualSourceUrl.value.trim());
+});
+
 form?.addEventListener('submit', async event => {
   event.preventDefault();
   if (message) message.textContent = 'Проверяю квартиру…';
   const data = new FormData(form);
   const payload = {
-    source:'manual', source_url:data.get('source_url'), title:data.get('title') || 'Квартира', city:data.get('city') || 'Астана',
+    source:'manual', source_url:String(data.get('source_url') || '').trim(), title:data.get('title') || 'Квартира', city:data.get('city') || 'Астана',
+    market_type:data.get('market_type') || null,
     description:data.get('description')?.trim() || null,
     repair_condition:data.get('repair_condition')?.trim() || null,
     district:data.get('district') || null, residential_complex:data.get('residential_complex') || null,
@@ -1466,10 +1510,18 @@ form?.addEventListener('submit', async event => {
     is_pledged:data.get('is_pledged') === 'true' ? true : data.get('is_pledged') === 'false' ? false : null
   };
   try {
-    const response = await fetch('/api/v1/listings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+    const response = await fetch(isOlxUrl(payload.source_url) ? '/api/v1/listings/olx-import' : '/api/v1/listings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
     const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось сохранить квартиру');
-    if (message) message.textContent = `Сохранено. Рейтинг ${body.assessment.score}/100 — ${body.assessment.verdict}`;
+    if (message) {
+      message.textContent = `Сохранено. Рейтинг ${body.assessment.score}/100 — ${body.assessment.verdict}`;
+      if (isOlxUrl(payload.source_url) && Number.isSafeInteger(body.id) && body.id > 0) {
+        const link = document.createElement('a');
+        link.href = `#listing-${body.id}`;
+        link.textContent = 'Открыть сохранённую карточку';
+        message.append(' ', link);
+      }
+    }
     await loadListings();
     await loadSearchResults();
   } catch (error) {

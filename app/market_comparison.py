@@ -6,8 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Iterable
 
 from app.cities import CITY_NAMES, city_slug, is_city_coordinate_pair
-from app.krisha_search import normalize_krisha_listing_url
-from app.property_duplicates import Decisions, availability, group_listings, unique_offers, _timestamp
+from app.property_duplicates import Decisions, availability, canonical_url, group_listings, unique_offers, _timestamp
 from app.seller import seller_category
 
 LOOKBACK_DAYS = 90
@@ -30,10 +29,6 @@ def _district(value: str | None) -> str | None:
         "баиконурскии": "баиконур", "баиконур": "баиконур", "баиконыр": "баиконур",
     }
     return aliases.get(text, text or None)
-
-
-def _url(value: str) -> str:
-    return normalize_krisha_listing_url(value) or value.strip()
 
 
 def _utc(value: datetime) -> datetime:
@@ -133,7 +128,7 @@ def nearest_comparables(target: Any, rows: Iterable[Any], *, now: datetime, deci
             continue
         row = max(eligible, key=lambda candidate: (seller_category(getattr(candidate, 'seller_type', None)) == 'owner',
                                                    _timestamp(candidate), candidate.id))
-        url = _url(row.source_url)
+        url = canonical_url(row.source_url)
         # Preserve the best offer as representative, but don't lose a match
         # solely because that offer omits facts known on another active ad.
         complex_row = row
@@ -191,7 +186,7 @@ def compare_saved_listings(target: Any, rows: Iterable[Any], *, now: datetime | 
     city_known = target_city is not None
     city_values: list[float] = []
     district_values: list[float] = []
-    seen = {_url(target.source_url)}
+    seen = {canonical_url(target.source_url)}
     # Keep only the newest observation if the same Krisha listing has legacy URL variants.
     candidates = sorted(
         (row for row in rows if row.last_imported_at is not None),
@@ -208,7 +203,7 @@ def compare_saved_listings(target: Any, rows: Iterable[Any], *, now: datetime | 
             or not math.isfinite(row.area_m2) or row.area_m2 <= 0
         ):
             continue
-        url = _url(row.source_url)
+        url = canonical_url(row.source_url)
         if url in seen:
             continue
         seen.add(url)
