@@ -150,6 +150,7 @@ class PriceSnapshotResponse(BaseModel):
 
 class ListingResponse(ListingCreate):
     id: int
+    cross_platform: bool = False
     hidden: bool = False
     hidden_duplicate: bool = False
     workflow_stage: Literal['new', 'call', 'viewing', 'viewed', 'rejected'] = 'new'

@@ -173,11 +173,26 @@ function safeExternalUrl(value) {
   } catch { return null; }
 }
 
-function isOlxUrl(value) {
+function listingPlatform(value) {
   try {
     const url = new URL(value);
-    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && ['olx.kz', 'www.olx.kz'].includes(url.hostname);
-  } catch { return false; }
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return '';
+    if (['olx.kz', 'www.olx.kz'].includes(url.hostname)) return 'olx';
+    if (['krisha.kz', 'www.krisha.kz'].includes(url.hostname)) return 'krisha';
+  } catch {
+    return '';
+  }
+  return '';
+}
+
+function isOlxUrl(value) {
+  return listingPlatform(value) === 'olx';
+}
+
+function sourceFrameClass(url, crossPlatform) {
+  const platform = listingPlatform(url);
+  if (!platform) return '';
+  return crossPlatform ? 'cross-platform-source' : `${platform}-source`;
 }
 
 function olxBadge(url) {
@@ -186,12 +201,7 @@ function olxBadge(url) {
 
 function duplicateSourceBadge(url) {
   if (isOlxUrl(url)) return olxBadge(url);
-  try {
-    if (['krisha.kz', 'www.krisha.kz'].includes(new URL(url).hostname)) return '<span class="meta">Krisha.kz</span>';
-  } catch {
-    return '';
-  }
-  return '';
+  return listingPlatform(url) === 'krisha' ? '<span class="meta">Krisha.kz</span>' : '';
 }
 
 function buildBookmarklet() {
@@ -869,8 +879,9 @@ async function decideDuplicate(button) {
       const body = await response.json().catch(() => ({}));
       throw new Error(typeof body.detail === 'string' ? body.detail : 'Не удалось сохранить решение.');
     }
-    delete content.dataset.state;
-    await loadDuplicateOffers(details);
+    await loadListings({reuseComparisons:true});
+    await loadSearchResults();
+    grid?.querySelector(`details[data-duplicates-id="${id}"] summary`)?.focus({preventScroll:true});
   } catch (error) { if (message) message.textContent = error.message || 'Не удалось сохранить решение. Повторите попытку.'; }
   finally { button.disabled = false; }
 }
@@ -973,7 +984,7 @@ function render(listings, pinnedListing = null) {
     const twogisRating = Number(item.twogis_rating);
     const twogisReviews = Number(item.twogis_review_count || 0);
     const twogisLine = item.twogis_name ? `<div class="twogis-review"><b>2GIS</b> ${Number.isFinite(twogisRating) && twogisReviews ? `★ ${twogisRating.toFixed(1)}/5 · ${twogisReviews} отзывов` : 'оценка и отзывы не опубликованы'}${item.twogis_url ? ` · <a href="${escapeHtml(item.twogis_url)}" target="_blank" rel="noopener noreferrer">Открыть в 2GIS →</a>` : ''}</div>` : '';
-    return `<article class="listing card${isOlxUrl(item.source_url) ? ' olx-source' : ''}" id="listing-${item.id}" tabindex="-1" aria-label="Карточка квартиры: ${escapeHtml(title)}">
+    return `<article class="listing card ${sourceFrameClass(item.source_url, item.cross_platform)}" id="listing-${item.id}" tabindex="-1" aria-label="Карточка квартиры: ${escapeHtml(title)}">
       ${pinnedListing && item.id === pinnedListing.id ? `<p class="meta" role="note">Карточка вне выбранного города или типа рынка показана по прямой ссылке. Критерии не изменены.</p>` : ''}
       ${previewPhotos.length ? `<div class="listing-photos">${previewPhotos.map((photo, index) => `<img class="listing-photo ${index ? 'thumbnail' : ''}" src="${escapeHtml(photo)}" alt="Фото квартиры ${index + 1}" loading="lazy" referrerpolicy="no-referrer">`).join('')}</div>` : ''}
       ${photos.length ? `<details class="listing-all-photos" data-details-key="photos"><summary>Все фотографии (${photos.length})</summary><div class="listing-gallery">${photos.map((photo, index) => `<a href="${escapeHtml(photo)}" target="_blank" rel="noopener noreferrer" aria-label="Открыть фото ${index + 1} в новой вкладке"><img src="${escapeHtml(photo)}" alt="Фото квартиры ${index + 1}" loading="lazy" referrerpolicy="no-referrer"><span>Фото ${index + 1} ↗</span></a>`).join('')}</div></details>` : ''}
@@ -1228,7 +1239,7 @@ async function loadSearchResults() {
       const imported = importStatus === 'imported' || isSaved;
       const importLabel = imported ? 'Сохранено в карточку' : importStatus === 'queued' ? 'Мониторинг запущен' : importStatus === 'blocked' ? 'Источник ограничил импорт' : importStatus === 'error' ? 'Импорт не удался — повторить' : 'Сохранить объявление';
       const seenLabel = item.status === 'seen' ? 'Просмотрено' : priorityLabel(item.priority);
-      return `<article class="listing card ${priorityClass(item.priority)} ${item.status === 'seen' ? 'result-seen' : ''}${isOlxUrl(item.url) ? ' olx-source' : ''}">
+      return `<article class="listing card ${priorityClass(item.priority)} ${item.status === 'seen' ? 'result-seen' : ''} ${sourceFrameClass(item.url, item.cross_platform)}">
         <div class="listing-top">
           <div><span class="verdict">${escapeHtml(seenLabel)}</span><h3>${escapeHtml(cleanSearchTitle(item.title))}</h3></div>
           <div class="rating ${a.score < 85 ? 'medium' : ''}">${a.score ?? '—'}</div>

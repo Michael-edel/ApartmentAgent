@@ -32,7 +32,7 @@ from app.olx import normalize_olx_listing_url, olx_advert_id
 from app.krisha_search import normalize_krisha_listing_url
 from app.models import BathroomCheckControl, BathroomCheckJob, BathroomCheckTask, DuplicateDecision, Listing, ListingCheck, ListingLike, ListingTargetPrice, ListingWorkflow, PriceSnapshot, SearchHistory, SearchResult
 from app.listing_tracking import tracking_summary
-from app.property_duplicates import canonical_url, confirmed_component, decision_key, duplicate_hidden_ids, group_listings, load_duplicate_decisions, offer, unique_offers
+from app.property_duplicates import canonical_url, confirmed_component, cross_platform_listing_ids, decision_key, duplicate_hidden_ids, group_listings, load_duplicate_decisions, offer, unique_offers
 from app.schemas import ListingCreate, ListingImportRequest, ListingResponse, PriceSnapshotResponse
 from app.seller import seller_category
 from app.scoring import assess_listing, listing_river_bank
@@ -254,11 +254,12 @@ async def _set_liked(session, url: str, liked: bool) -> None:
 
 
 def _to_response(row: Listing, *, liked: bool = False, workflow: ListingWorkflow | None = None,
-                 hidden_duplicate: bool = False) -> ListingResponse:
+                 hidden_duplicate: bool = False, cross_platform: bool = False) -> ListingResponse:
     payload = _payload_from_row(row)
     assessment = assess_listing(payload, settings)
     return ListingResponse(
         id=row.id,
+        cross_platform=cross_platform,
         liked=liked,
         hidden=workflow.hidden if workflow else False,
         workflow_stage=workflow.stage if workflow else 'new',
@@ -292,9 +293,11 @@ async def _load_listing_response(listing_id: int) -> ListingResponse:
         key = _favorite_key(row.source_url) if row is not None else None
         liked = key is not None and await session.get(ListingLike, key) is not None
         workflow = await session.get(ListingWorkflow, key) if key is not None else None
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found")
-    return _to_response(row, liked=liked, workflow=workflow)
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found")
+        rows = (await session.execute(select(*_DUPLICATE_COLUMNS))).all()
+        cross_platform = listing_id in cross_platform_listing_ids(rows, await load_duplicate_decisions(session))
+    return _to_response(row, liked=liked, workflow=workflow, cross_platform=cross_platform)
 
 
 async def _save_listing(payload: ListingCreate, *, allow_existing: bool) -> ListingResponse:
@@ -753,9 +756,6 @@ async def search_results(
         unavailable = await unavailable_urls(session)
         hidden = await hidden_urls(session)
         hidden_duplicates = set()
-        if hidden:
-            all_listings = (await session.execute(select(*_DUPLICATE_COLUMNS))).all()
-            hidden_duplicates = duplicate_hidden_ids(all_listings, hidden, await load_duplicate_decisions(session))
         query = select(SearchResult).order_by(SearchResult.first_seen.desc(), SearchResult.id.desc())
         if only_new:
             query = query.where(SearchResult.status.like("new:%"))
@@ -824,6 +824,12 @@ async def search_results(
             rows = [row for row in rows if seller_category(effective_seller_type(row)) == seller]
         if bank == "left":
             rows = [row for row in rows if banks.get(row.imported_listing_id, "unknown") == "left"]
+        cross_platform_ids = set()
+        if any(row.imported_listing_id is not None for row in rows):
+            duplicate_rows = (await session.execute(select(*_DUPLICATE_COLUMNS))).all()
+            decisions = await load_duplicate_decisions(session)
+            cross_platform_ids = cross_platform_listing_ids(duplicate_rows, decisions)
+            hidden_duplicates = duplicate_hidden_ids(duplicate_rows, hidden, decisions)
         liked_urls = set(await session.scalars(select(ListingLike.url)))
 
     result: list[dict[str, object]] = []
@@ -869,6 +875,7 @@ async def search_results(
                 "priority": "urgent" if analysis["score"] >= 85 else "good" if analysis["score"] >= 65 else "normal",
                 "import_status": row.import_status,
                 "imported_listing_id": row.imported_listing_id,
+                "cross_platform": row.imported_listing_id in cross_platform_ids,
                 "seller_type": effective_seller_type(row),
                 "seller_category": seller_category(effective_seller_type(row)),
                 "import_error": row.import_error,
@@ -1002,9 +1009,13 @@ async def list_listings(
         liked_urls = set(await session.scalars(select(ListingLike.url)))
         workflows = {row.url: row for row in await session.scalars(select(ListingWorkflow))}
         hidden = {row.url for row in workflows.values() if row.hidden}
-        hidden_duplicates = duplicate_hidden_ids(rows, hidden, await load_duplicate_decisions(session)) if hidden else set()
+        decisions = await load_duplicate_decisions(session)
+        hidden_duplicates = duplicate_hidden_ids(rows, hidden, decisions)
+        duplicate_rows = (await session.execute(select(*_DUPLICATE_COLUMNS))).all()
+        cross_platform_ids = cross_platform_listing_ids(duplicate_rows, decisions)
     items = [_to_response(row, liked=_favorite_key(row.source_url) in liked_urls,
-                          workflow=workflows.get(_favorite_key(row.source_url)), hidden_duplicate=row.id in hidden_duplicates)
+                          workflow=workflows.get(_favorite_key(row.source_url)), hidden_duplicate=row.id in hidden_duplicates,
+                          cross_platform=row.id in cross_platform_ids)
              for row in rows]
     if seller != "all":
         items = [item for item in items if item.seller_category == seller]
@@ -1053,7 +1064,7 @@ async def listing_duplicates(listing_id: int) -> dict[str, object]:
     target = next((row for row in rows if row.id == listing_id), None)
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found")
-    group = next(group for group in group_listings(rows, target=target, decisions=decisions)
+    group = next(group for group in group_listings(rows, decisions=decisions)
                  if any(row.id == listing_id for row in group))
     items = unique_offers(group, target=target, decisions=decisions)
     rejected = [offer(row) for row in rows if decisions.get(decision_key(listing_id, row.id)) == 'different']

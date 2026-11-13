@@ -83,10 +83,18 @@ async def test_saved_city_scope_and_browser_import(sessions):
 async def test_manual_olx_update_and_cross_site_duplicate(sessions, monkeypatch):
     olx_url = "https://www.olx.kz/d/obyavlenie/2h-komnatnaya-kvvrtira-67-kv-m-IDr7f0E.html"
     krisha_url = "https://krisha.kz/a/show/1015478864"
+    monkeypatch.setattr(main.settings, "search_city", "astana")
+    monkeypatch.setattr(main.settings, "market_type", "all")
     async with sessions.begin() as session:
-        session.add(Listing(source_url=krisha_url, title="2-комнатная квартира", city="Астана",
-                            address="Ауэзова 22", rooms=2, area_m2=67.1, floor=5, floors_total=9,
-                            price_kzt=35_500_000))
+        krisha = Listing(source_url=krisha_url, title="2-комнатная квартира", city="Астана",
+                         address="Ауэзова 22", rooms=2, area_m2=67.1, floor=5, floors_total=9,
+                         price_kzt=35_500_000)
+        session.add(krisha)
+        await session.flush()
+        krisha_id = krisha.id
+        session.add(SearchResult(url=krisha_url, city="astana", imported_listing_id=krisha_id,
+                                 search_engine="fixture", query="",
+                                 title="2-комнатная квартира, 67,1 м², 35 500 000 тг"))
 
     async def unexpected_fetch(*args, **kwargs):
         pytest.fail("OLX manual import and checks must not fetch an OLX page")
@@ -107,6 +115,9 @@ async def test_manual_olx_update_and_cross_site_duplicate(sessions, monkeypatch)
         assert card["price_kzt"] == 36_000_000
         assert card["krisha_city_price_per_m2"] is None
         card_path = f'/api/v1/listings/{card["id"]}'
+        assert card["cross_platform"] is True
+        assert (await client.get(card_path)).json()["cross_platform"] is True
+        assert (await client.get("/api/v1/search/results")).json()[0]["cross_platform"] is True
         duplicates = (await client.get(card_path + "/duplicates")).json()
         assert {offer["source_url"]: offer["price_kzt"] for offer in duplicates["items"]} == {
             olx_url: 36_000_000, krisha_url: 35_500_000,
@@ -121,6 +132,12 @@ async def test_manual_olx_update_and_cross_site_duplicate(sessions, monkeypatch)
         assert len((await client.get("/api/v1/listings?city=astana")).json()) == 2
         prices = (await client.get(card_path + "/price-history")).json()
         assert [item["price_kzt"] for item in prices] == [35_900_000, 36_000_000]
+        decision_path = card_path + f"/duplicates/{krisha_id}"
+        assert (await client.put(decision_path, json={"decision": "different"})).status_code == 200
+        assert not any(item["cross_platform"] for item in (await client.get("/api/v1/listings")).json())
+        assert (await client.get("/api/v1/search/results")).json()[0]["cross_platform"] is False
+        assert (await client.put(decision_path, json={"decision": "same"})).status_code == 200
+        assert all(item["cross_platform"] for item in (await client.get("/api/v1/listings")).json())
 
 
 @pytest.mark.asyncio
