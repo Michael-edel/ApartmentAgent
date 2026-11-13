@@ -5,6 +5,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any, Iterable
 
+from app.cities import CITY_NAMES, city_slug, is_city_coordinate_pair
 from app.krisha_search import normalize_krisha_listing_url
 from app.property_duplicates import availability, group_listings, unique_offers, _timestamp
 from app.seller import seller_category
@@ -29,11 +30,6 @@ def _district(value: str | None) -> str | None:
         "баиконурскии": "баиконур", "баиконур": "баиконур", "баиконыр": "баиконур",
     }
     return aliases.get(text, text or None)
-
-
-def _is_astana(value: str | None) -> bool:
-    text = re.sub(r"[^\w]+", "", (value or "").casefold())
-    return text in {"астана", "astana", "нурсултан", "нұрсұлтан"}
 
 
 def _url(value: str) -> str:
@@ -96,9 +92,7 @@ def _address_key(value: str | None) -> str | None:
 
 def _coordinates(row: Any) -> tuple[float, float] | None:
     lat, lon = getattr(row, 'latitude', None), getattr(row, 'longitude', None)
-    if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
-        return None
-    if not (math.isfinite(lat) and math.isfinite(lon) and 50 <= lat <= 52 and 69 <= lon <= 73):
+    if not is_city_coordinate_pair(row.city, lat, lon):
         return None
     return float(lat), float(lon)
 
@@ -112,7 +106,8 @@ def _distance_m(first: tuple[float, float], second: tuple[float, float]) -> floa
 
 def nearest_comparables(target: Any, rows: Iterable[Any], *, now: datetime) -> dict[str, Any]:
     """Recent comparable saved cards, not a market-wide sample."""
-    city_known = _is_astana(target.city)
+    target_city = city_slug(target.city)
+    city_known = target_city is not None
     complex_name = _complex_name(getattr(target, 'residential_complex', None))
     target_coords = _coordinates(target)
     same_complex: list[dict[str, Any]] = []
@@ -128,7 +123,7 @@ def nearest_comparables(target: Any, rows: Iterable[Any], *, now: datetime) -> d
             timestamp = getattr(row, 'last_imported_at', None)
             if (availability(row) != 'active' or timestamp is None
                     or not (now - timedelta(days=LOOKBACK_DAYS) <= _utc(timestamp) <= now)
-                    or not _is_astana(row.city) or not row.price_kzt or row.price_kzt <= 0
+                    or city_slug(row.city) != target_city or not row.price_kzt or row.price_kzt <= 0
                     or not row.area_m2 or not math.isfinite(row.area_m2) or row.area_m2 <= 0
                     or getattr(row, 'rooms', None) is None or getattr(target, 'rooms', None) is None
                     or row.rooms != target.rooms or not target.area_m2 * 0.8 <= row.area_m2 <= target.area_m2 * 1.2):
@@ -191,7 +186,8 @@ def compare_saved_listings(target: Any, rows: Iterable[Any], *, now: datetime | 
     rows = list(rows)
     target_price = target.price_kzt / target.area_m2
     district = _district(target.district)
-    city_known = _is_astana(target.city)
+    target_city = city_slug(target.city)
+    city_known = target_city is not None
     city_values: list[float] = []
     district_values: list[float] = []
     seen = {_url(target.source_url)}
@@ -201,7 +197,7 @@ def compare_saved_listings(target: Any, rows: Iterable[Any], *, now: datetime | 
         key=lambda row: _utc(row.last_imported_at), reverse=True,
     )
     for row in candidates:
-        if row.id == target.id or not _is_astana(row.city):
+        if row.id == target.id or not city_known or city_slug(row.city) != target_city:
             continue
         timestamp = _utc(row.last_imported_at)
         if timestamp < now - timedelta(days=LOOKBACK_DAYS) or timestamp > now:
@@ -227,6 +223,7 @@ def compare_saved_listings(target: Any, rows: Iterable[Any], *, now: datetime | 
         "source": "saved_listings",
         "krisha": observed_krisha_comparison(target, target_price),
         "district_label": target.district,
+        "city_label": CITY_NAMES.get(target_city),
         "city": _stats(city_values, target_price, unknown=None if city_known else "city_unknown"),
         "district": _stats(
             district_values, target_price,

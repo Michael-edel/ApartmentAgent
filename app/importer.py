@@ -8,6 +8,7 @@ from urllib.parse import unquote, urlparse, urlunparse
 import httpx
 from pydantic import HttpUrl
 
+from app.cities import CITY_NAMES, city_slug, is_city_coordinate_pair
 from app.schemas import ListingCreate, plain_detail_text
 from app.mortgage import mortgage_value, parse_mortgage_claim
 from app.krisha_search import normalize_krisha_import_url
@@ -755,20 +756,15 @@ def _coordinate(value: Any) -> float | None:
     if isinstance(value, str):
         cleaned = value.strip().replace(",", ".")
         try:
-            return float(re.sub(r"[^0-9+-.]", "", cleaned))
+            return float(cleaned)
         except ValueError:
             return None
     return None
 
 
 def _is_astana_coordinate_pair(latitude: float | None, longitude: float | None) -> bool:
-    """Accept only coordinates inside the configured Astana search area."""
-    return (
-        latitude is not None
-        and longitude is not None
-        and 50 <= latitude <= 52
-        and 69 <= longitude <= 73
-    )
+    """Keep the legacy Astana check for existing callers."""
+    return is_city_coordinate_pair("astana", latitude, longitude)
 
 
 def _find_numeric(data: list[Any], keys: set[str], minimum: float, maximum: float) -> float | None:
@@ -904,7 +900,7 @@ def _address_from_text(value: str) -> str | None:
         ),
         re.compile(
             r"(?:№\s*\d+\s*[:：]\s*|Продажа[^:—]{0,120}[:：]\s*)"
-            r"(?P<address>[^—\n]{3,120}?),\s*(?:Астана|Astana)\b",
+            r"(?P<address>[^—\n]{3,120}?),\s*(?:Астана|Astana|Алматы|Almaty|Шымкент|Shymkent|Караганда|Karaganda|Павлодар|Pavlodar)\b",
             re.IGNORECASE,
         ),
         re.compile(
@@ -934,7 +930,7 @@ def _find_html_coordinate(html: str, keys: set[str], minimum: float, maximum: fl
     return candidate if candidate is not None and minimum <= candidate <= maximum else None
 
 
-def _coordinates_from_html(html: str) -> tuple[float | None, float | None]:
+def _coordinates_from_html(html: str, city: str = "Астана") -> tuple[float | None, float | None]:
     decoded = unquote(html)
     match = re.search(
         r"(?:[?&#](?:ll|center|pt|coords|coordinates)=)"
@@ -951,12 +947,12 @@ def _coordinates_from_html(html: str) -> tuple[float | None, float | None]:
         longitude = None
     if latitude is not None and not -90 <= latitude <= 90:
         latitude = None
-    if not _is_astana_coordinate_pair(latitude, longitude):
+    if not is_city_coordinate_pair(city, latitude, longitude):
         return None, None
     return latitude, longitude
 
 
-def _visible_coordinate_pair(parser: _BathroomFieldHTMLParser) -> tuple[float | None, float | None]:
+def _visible_coordinate_pair(parser: _BathroomFieldHTMLParser, city: str = "Астана") -> tuple[float | None, float | None]:
     for node in parser.visible_nodes():
         current, unrelated = node, False
         while current is not None:
@@ -968,12 +964,12 @@ def _visible_coordinate_pair(parser: _BathroomFieldHTMLParser) -> tuple[float | 
         if unrelated:
             continue
         for key in ("href", "src"):
-            pair = _coordinates_from_html(str(node.attrs.get(key) or ""))
-            if _is_astana_coordinate_pair(*pair):
+            pair = _coordinates_from_html(str(node.attrs.get(key) or ""), city)
+            if is_city_coordinate_pair(city, *pair):
                 return pair
         latitude = _coordinate(node.attrs.get("data-latitude") or node.attrs.get("data-lat"))
         longitude = _coordinate(node.attrs.get("data-longitude") or node.attrs.get("data-lng"))
-        if _is_astana_coordinate_pair(latitude, longitude):
+        if is_city_coordinate_pair(city, latitude, longitude):
             return latitude, longitude
     return None, None
 
@@ -1019,7 +1015,7 @@ def _embedded_number(html: str, keys: set[str], minimum: float, maximum: float) 
     return None
 
 
-async def import_krisha_listing(source_url: str) -> ListingCreate:
+async def import_krisha_listing(source_url: str, *, expected_city: str | None = None) -> ListingCreate:
     source_url = normalize_krisha_import_url(source_url) or ""
     parsed = urlparse(source_url)
     host = (parsed.hostname or "").lower()
@@ -1174,7 +1170,18 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
     visible_city = _property_value(property_details, "Город")
     if visible_city:
         visible_city = re.sub(r"\s*показать на карте.*$", "", visible_city, flags=re.I).strip()
-    city = re.split(r",", visible_city)[0].strip() if visible_city else (_find_text(data, {"city"}) or "Астана")
+    city_evidence = visible_city or _find_text(data, {"city"})
+    if not city_evidence:
+        # Only the offer's own headline may provide a locality; never scan body,
+        # descriptions or recommendation cards for another city's name.
+        for component in headline.split(","):
+            candidate = component.strip()
+            if city_slug(candidate):
+                city_evidence = candidate
+                break
+    city = (city_evidence or (expected_city if city_slug(expected_city) else None) or "Астана").split(",", 1)[0].strip()
+    if city_slug(city):
+        city = CITY_NAMES[city_slug(city)]
     district = _property_value(property_details, "Район") or (_find_district([], visible_city) if visible_city else None) or _find_district(data, combined)
     residential_complex = _find_text(
         data,
@@ -1193,13 +1200,13 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
                or _find_address(data) or _address_from_text(combined))
     # Coordinates form an indivisible observation. Never combine one coordinate
     # from one JSON object with another object or a later DOM observation.
-    latitude, longitude = _visible_coordinate_pair(detail_parser)
-    if not _is_astana_coordinate_pair(latitude, longitude):
+    latitude, longitude = _visible_coordinate_pair(detail_parser, city)
+    if not is_city_coordinate_pair(city, latitude, longitude):
         latitude = longitude = None
         for row in data:
             pair = (_find_coordinate([row], {"latitude"}, -90, 90),
                     _find_coordinate([row], {"longitude"}, -180, 180))
-            if _is_astana_coordinate_pair(*pair):
+            if is_city_coordinate_pair(city, *pair):
                 latitude, longitude = pair
                 break
     photo_urls = meta_images + _find_image_urls(data)
@@ -1210,10 +1217,11 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
     )
     seller_name, seller_type = _seller_fields(detail_parser, data)
     repair_condition = _property_value(property_details, "Состояние квартиры", "Ремонт") or _find_text(data, {"repairCondition"})
-    title = (title or f"{rooms}-комнатная квартира в Астане")[:300]
+    title = (title or f"{rooms}-комнатная квартира, {city}")[:300]
     description = description[:20_000]
     mortgage_supported, mortgage_source_kind, mortgage_evidence = _mortgage_observation(data, property_details, description, title)
-    comparison_fields = _krisha_comparison_fields(detail_parser)
+    comparison_fields = (_krisha_comparison_fields(detail_parser) if city_slug(city) == "astana"
+                         else {"krisha_district_price_per_m2": None, "krisha_city_price_per_m2": None, "krisha_comparison_district": None})
     for key in ("krisha_district_price_per_m2", "krisha_city_price_per_m2"):
         if comparison_fields[key] is None:
             value = _find_numeric(data, {key}, 1, 1_000_000_000)
@@ -1242,6 +1250,7 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
         title=title,
         description=description or None,
         city=city,
+        city_observed=bool(city_evidence or city_slug(expected_city)),
         district=district,
         residential_complex=residential_complex,
         address=address,

@@ -1,7 +1,7 @@
 {
-  "name": "ApartmentAgent — квартиры Астаны",
+  "name": "ApartmentAgent — поиск квартир",
   "short_name": "Квартиры",
-  "description": "Мониторинг, рейтинг и финансовая оценка квартир в Астане",
+  "description": "Мониторинг и сравнение квартир в городах Казахстана",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

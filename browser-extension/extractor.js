@@ -531,7 +531,7 @@
     const patterns = [
       /\d{1,2}\s*(?:из|\/)\s*\d{1,2}\s*(?:этаж|эт\.)\s*,\s*([^—–]{3,180})(?:\s*[—–]|$)/i,
       /\d{2,3}(?:[.,]\d+)?\s*(?:м²|м2)\s*,\s*([^—–·]{3,160}\s\d+[A-Za-zА-Яа-яЁё]?(?:\/\d+[A-Za-zА-Яа-яЁё]?)?)(?:\s*[—–·]|$)/i,
-      /(?:№\s*\d+\s*[:：]\s*|Продажа[^:—]{0,120}[:：]\s*)([^—]{3,120}?),\s*(?:Астана|Astana)(?![А-Яа-яЁё])/i,
+      /(?:№\s*\d+\s*[:：]\s*|Продажа[^:—]{0,120}[:：]\s*)([^—]{3,120}?),\s*(?:Астана|Astana|Алматы|Almaty|Шымкент|Shymkent|Караганда|Karaganda|Павлодар|Pavlodar)(?![А-Яа-яЁё])/i,
       /(?:^|[^\p{L}])((?:ул\.?|улица|просп\.?|проспект|пер\.?|переулок|мкр\.?|микрорайон|шоссе|набережная)\s+[^,;]{2,80},?\s+\d+[A-Za-zА-Яа-яЁё]?(?:\/\d+)?)/iu,
     ];
     for (const pattern of patterns) {
@@ -548,12 +548,24 @@
     return text.length >= 5 && text.length <= 500 && !/работает\s+в\s+компании/i.test(text) ? text : null;
   };
   const coordinate = (value, minimum, maximum) => {
-    const parsed = typeof value === 'number' ? value : Number(clean(value).replace(',', '.').replace(/[^0-9+-.]/g, ''));
+    const raw = clean(value).replace(',', '.');
+    const parsed = typeof value === 'number' ? value : /^[-+]?\d+(?:\.\d+)?$/.test(raw) ? Number(raw) : NaN;
     return Number.isFinite(parsed) && parsed >= minimum && parsed <= maximum ? parsed : null;
   };
-  const isAstanaCoordinates = (latitude, longitude) => latitude !== null && longitude !== null
-    && latitude >= 50 && latitude <= 52 && longitude >= 69 && longitude <= 73;
-  const coordinatePair = value => {
+  const cityAliases = {
+    'астана':'astana', 'astana':'astana', 'нур-султан':'astana', 'нұр-сұлтан':'astana',
+    'алматы':'almaty', 'almaty':'almaty', 'алма-ата':'almaty',
+    'шымкент':'shymkent', 'shymkent':'shymkent', 'караганда':'karaganda',
+    'қарағанды':'karaganda', 'karaganda':'karaganda', 'karagandy':'karaganda',
+    'павлодар':'pavlodar', 'pavlodar':'pavlodar'
+  };
+  const cityNames = {astana:'Астана', almaty:'Алматы', shymkent:'Шымкент', karaganda:'Караганда', pavlodar:'Павлодар'};
+  const cityKey = value => cityAliases[clean(value).split(',')[0].replace(/^(?:город|г\.)\s*/i, '').trim().toLowerCase()];
+  const isCityCoordinates = (city, latitude, longitude) => {
+    const bounds = {astana:[50,52,69,73], almaty:[42.8,43.7,76,77.8], shymkent:[41.8,42.7,69,70.2], karaganda:[49.4,50.5,72.2,74.3], pavlodar:[51.6,53,75.9,78.5]}[cityKey(city)];
+    return !!bounds && latitude !== null && longitude !== null && latitude >= bounds[0] && latitude <= bounds[1] && longitude >= bounds[2] && longitude <= bounds[3];
+  };
+  const coordinatePair = (value, city) => {
     let decoded = String(value || '');
     try { decoded = decodeURIComponent(decoded); } catch (_) { /* keep original */ }
     const match = decoded.match(/(?:[?&#](?:ll|center|pt|coords|coordinates)=)([-+]?\d{1,3}(?:\.\d+)?)[,%20]+([-+]?\d{1,2}(?:\.\d+)?)/i)
@@ -561,17 +573,17 @@
     if (!match) return null;
     const longitude = coordinate(match[1], -180, 180);
     const latitude = coordinate(match[2], -90, 90);
-    return isAstanaCoordinates(latitude, longitude) ? {latitude, longitude} : null;
+    return isCityCoordinates(city, latitude, longitude) ? {latitude, longitude} : null;
   };
-  const pageCoordinates = () => {
+  const pageCoordinates = city => {
     const nodes = document.querySelectorAll('a[href], iframe[src], [data-latitude], [data-longitude], [data-lat], [data-lng], [data-coordinates]');
     for (const node of nodes) {
       if (!visibleProperty(node) || outsideListing(node) || inAuthorContext(node)) continue;
-      const pair = coordinatePair(node.href || node.src || node.getAttribute('data-coordinates'));
+      const pair = coordinatePair(node.href || node.src || node.getAttribute('data-coordinates'), city);
       if (pair) return pair;
       const latitude = coordinate(node.getAttribute('data-latitude') || node.getAttribute('data-lat'), -90, 90);
       const longitude = coordinate(node.getAttribute('data-longitude') || node.getAttribute('data-lng'), -180, 180);
-      if (isAstanaCoordinates(latitude, longitude)) return {latitude, longitude};
+      if (isCityCoordinates(city, latitude, longitude)) return {latitude, longitude};
     }
     return null;
   };
@@ -676,7 +688,9 @@
     && (Object.keys(propertyDetails).length >= 2 || domDescription)
     && !/проверка\s+(?:браузера|безопасности)|подтвердите.{0,30}(?:человек|робот)|access\s+denied/i.test(pageText));
   const cityText = clean(propertyDetails['Город'] || findText(['city', 'addressLocality']));
-  const city = cityText ? cityText.split(',')[0].replace(/^Город\s+/i,'').replace(/\s+(?:р\s*-\s*н|район)\s+.*$/i,'').trim().slice(0,100) : 'Астана';
+  const headlineCity = headline.split(',').map(part => clean(part)).find(part => cityKey(part));
+  const rawCity = (cityText || headlineCity || 'Астана').split(',')[0].replace(/^(?:Город|г\.)\s*/i,'').trim().slice(0,100);
+  const city = cityNames[cityKey(rawCity)] || rawCity;
   const addressNodes = listingNodes('[itemprop="streetAddress"], [data-testid*="address" i], [class*="address" i]');
   let addressFallbackText = fallbackText;
   for (const node of [...authorNodes,...addressNodes.filter(inAuthorContext)]) {
@@ -688,7 +702,7 @@
       .map(propertyText).find(value => value.length <= 180 && validPropertyAddress(value))
     || findValue(['streetAddress', 'formattedAddress', 'fullAddress', 'addressLine', 'displayAddress', 'address'], value => validPropertyAddress(textValue(value?.streetAddress ?? value))) || addressFromText(addressFallbackText);
   const complex = propertyDetails['Жилой комплекс'] || findText(['complexName', 'residentialComplex', 'housingComplex', 'residentialComplexName']) || (headline.match(/ЖК\s*[«"]?([^»".,;]{2,100})/i)?.[1]?.trim() || null);
-  const coordinates = pageCoordinates();
+  const coordinates = pageCoordinates(city);
   // Both coordinates must come from the same advertised location, never from
   // two JSON snapshots or the author's office/profile.
   let jsonCoordinates = null;
@@ -698,10 +712,10 @@
     const longitudeKey = ['longitude','lng','lon','geoLongitude','geoLon'].find(key => key in item);
     if (!latitudeKey || !longitudeKey) continue;
     const latitude = coordinate(item[latitudeKey],-90,90), longitude = coordinate(item[longitudeKey],-180,180);
-    if (isAstanaCoordinates(latitude,longitude)) { jsonCoordinates = {latitude,longitude}; break; }
+    if (isCityCoordinates(city,latitude,longitude)) { jsonCoordinates = {latitude,longitude}; break; }
   }
   const locationCoordinates = coordinates || jsonCoordinates;
-  const domComparison = krishaComparison();
+  const domComparison = cityKey(city) === 'astana' ? krishaComparison() : {};
   const comparison = Object.fromEntries(Object.keys(jsonComparison).map(key => [key,domComparison[key] ?? jsonComparison[key]]));
   const payload = {
     source: 'browser-extension',
@@ -715,6 +729,7 @@
     property_details: propertyDetails,
     details_extracted: !!(price && area && rooms && (hasDomEvidence || domMortgageText || jsonRichEvidence)),
     city,
+    city_observed: !!(cityText || headlineCity),
     district: districtFromText(propertyDetails['Город']) || districtFromText(propertyDetails['Район'], true) || districtFromText(findText(['district', 'districtName', 'areaName']), true)
       || districtFromText(findText(['regionName', 'addressRegion']))
       || districtFromText(fallbackText),

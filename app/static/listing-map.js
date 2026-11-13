@@ -1,5 +1,6 @@
 (() => {
   'use strict';
+  const cityCenters = {astana:[51.128,71.43], almaty:[43.238,76.889], shymkent:[42.32,69.59], karaganda:[49.806,73.085], pavlodar:[52.287,76.967]};
   let active = null;
   const fmt = new Intl.NumberFormat('ru-RU');
   const node = (tag, text, className) => {
@@ -79,6 +80,7 @@
       .then(data => {
         if (active !== state || !dialog.open) return;
         const items = Array.isArray(data.items) ? data.items.filter(validPoint) : [];
+        const cityCenter = cityCenters[data.city] || cityCenters[options.city] || cityCenters.astana;
         const missing = Number.isFinite(data.without_coordinates) ? data.without_coordinates : 0;
         const updateList = visible => {
           status.textContent = `На карте: ${fmt.format(items.length)}. В видимой области: ${fmt.format(visible.length)}. Без координат: ${fmt.format(missing)}.`;
@@ -92,7 +94,7 @@
           updateList(items); return;
         }
         // Closing the dialog can remove the map during a zoom transition.
-        const map = L.map(canvas, {zoomAnimation:false}).setView([51.128,71.43], 11); state.map = map;
+        const map = L.map(canvas, {zoomAnimation:false}).setView(cityCenter, 11); state.map = map;
         let tileErrors = 0, tileSucceeded = false;
         const tiles = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
           maxZoom:19, attribution:'&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors'
@@ -116,7 +118,7 @@
         const fitAll = () => {
           if (positions.length === 1) map.setView(positions[0],15,{animate:false});
           else if (positions.length > 1) map.fitBounds(positions, {padding:[30,30], maxZoom:15, animate:false});
-          else map.setView([51.128,71.43],11,{animate:false});
+          else map.setView(cityCenter,11,{animate:false});
         };
         reset.hidden = false; reset.disabled = !positions.length; reset.addEventListener('click', fitAll);
         fitAll();

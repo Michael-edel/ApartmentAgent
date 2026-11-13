@@ -9,6 +9,7 @@ from xml.etree import ElementTree
 import httpx
 
 from app.config import get_settings
+from app.cities import CITY_NAMES
 from app.krisha_search import search_krisha_direct as fetch_krisha_direct
 
 settings = get_settings()
@@ -73,7 +74,7 @@ def _clean_web_query(query: str) -> str:
     cleaned = re.sub(r"\b(?:55|60|65|70)\s*м(?:²|2)?\b", " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\b30\s*000\s*000\b", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned or "krisha.kz астана 2-комнатная квартира"
+    return cleaned or f"krisha.kz {CITY_NAMES[settings.search_city]} квартира"
 
 
 async def search_bing_rss(query: str) -> list[SearchItem]:

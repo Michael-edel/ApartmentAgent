@@ -213,3 +213,58 @@ async def test_import_preserves_bathrooms_lower_bound(monkeypatch):
     result = await import_krisha_listing("https://krisha.kz/a/show/123")
     assert result.bathrooms_count == 2
     assert result.bathrooms_count_is_lower_bound is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("city,latitude,longitude", [
+    ("Астана", 51.128, 71.43), ("Алматы", 43.2389, 76.8897),
+    ("Шымкент", 42.315, 69.59), ("Караганда", 49.806, 73.086),
+    ("Павлодар", 52.287, 76.967),
+])
+async def test_import_city_coordinates(monkeypatch, city, latitude, longitude):
+    import json
+    data = {"@type":"Apartment", "url":"https://krisha.kz/a/show/123",
+            "address":{"addressLocality":city}, "geo":{"latitude":latitude,"longitude":longitude}}
+    html = '<h1>3-комнатная квартира 80 м²</h1><div class="offer__price">45 000 000 ₸</div><script type="application/ld+json">' + json.dumps(data, ensure_ascii=False) + '</script>'
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url): return httpx.Response(200, text=html, request=httpx.Request('GET', url))
+    monkeypatch.setattr(httpx, 'AsyncClient', FakeClient)
+    listing = await import_krisha_listing('https://krisha.kz/a/show/123')
+    assert (listing.city, listing.latitude, listing.longitude) == (city, latitude, longitude)
+
+
+def test_city_coordinate_checks_reject_wrong_and_nonfinite_pairs():
+    from app.cities import is_city_coordinate_pair
+    assert not is_city_coordinate_pair('Алматы', 51.128, 71.43)
+    assert not is_city_coordinate_pair('Косшы', 51.128, 71.43)
+    assert not is_city_coordinate_pair('Астана', float('nan'), 71.43)
+
+
+@pytest.mark.asyncio
+async def test_expected_city_used_only_when_offer_city_is_absent(monkeypatch):
+    import json
+    class FakeClient:
+        data = {}
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url):
+            payload = {"@type":"Apartment", "url":url, **self.data}
+            html = '<h1>3-комнатная квартира 80 м²</h1><div class="offer__price">45 000 000 ₸</div><script type="application/ld+json">' + json.dumps(payload, ensure_ascii=False) + '</script>'
+            return httpx.Response(200, text=html, request=httpx.Request('GET', url))
+    monkeypatch.setattr(httpx, 'AsyncClient', FakeClient)
+    missing = await import_krisha_listing('https://krisha.kz/a/show/123')
+    assert missing.city == 'Астана' and missing.city_observed is False
+    expected = await import_krisha_listing('https://krisha.kz/a/show/123', expected_city='almaty')
+    assert expected.city == 'Алматы' and expected.city_observed is True
+    assert 'city_observed' not in expected.model_dump()
+    FakeClient.data = {'city':'Шымкент'}
+    observed = await import_krisha_listing('https://krisha.kz/a/show/123', expected_city='almaty')
+    assert observed.city == 'Шымкент' and observed.city_observed is True
+
+
+def test_title_address_supports_other_cities():
+    assert _address_from_text('Продажа квартиры №123: Абая 10, Алматы') == 'Абая 10'

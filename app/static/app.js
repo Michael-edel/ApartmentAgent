@@ -29,6 +29,13 @@ const bookmarkletMessage = document.querySelector('#bookmarkletMessage');
 const runChecksButton = document.querySelector('#runChecksButton');
 const checkMessage = document.querySelector('#checkMessage');
 const runSearchButton = document.querySelector('#runSearchButton');
+const searchCity = document.querySelector('#searchCity');
+const manualCity = form?.querySelector('[name="city"]');
+const cityNames = new Map([['astana', 'Астана'], ['almaty', 'Алматы'], ['shymkent', 'Шымкент'], ['karaganda', 'Караганда'], ['pavlodar', 'Павлодар']]);
+let searchCityInitialized = false;
+let manualCityInitialized = false;
+let activeSearchCity = 'astana';
+manualCity?.addEventListener('change', () => { manualCityInitialized = true; });
 const searchRooms = document.querySelector('#searchRooms');
 const searchMinPrice = document.querySelector('#searchMinPrice');
 const searchMaxPrice = document.querySelector('#searchMaxPrice');
@@ -89,6 +96,22 @@ const reloadSearchResults = document.querySelector('#refreshSearchButton');
 const searchResultsSort = document.querySelector('#searchResultsSort');
 const searchSellerFilter = document.querySelector('#searchSellerFilter');
 const searchLeftBankOnly = document.querySelector('#searchLeftBankOnly');
+function updateCriteriaCity() {
+  const city = searchCity?.value || 'astana';
+  const label = document.querySelector('#criteriaCity');
+  if (label) label.textContent = cityNames.get(city) || 'Астана';
+  if (searchLeftBankOnly) {
+    searchLeftBankOnly.disabled = city !== 'astana';
+    if (searchLeftBankOnly.disabled) searchLeftBankOnly.checked = false;
+  }
+  const hint = document.querySelector('#bankCriteriaHint');
+  if (hint) hint.textContent = city === 'astana' ? 'Берег определяется по координатам объявления.' : 'Фильтр левого берега доступен для Астаны.';
+}
+searchCity?.addEventListener('change', () => {
+  searchCityInitialized = true;
+  updateCriteriaCity();
+  if (manualCity && !manualCityInitialized) manualCity.value = cityNames.get(searchCity.value) || 'Астана';
+});
 let searchResultsRevision = 0;
 const bathroomCheckPanel = document.querySelector('#bathroomCheckPanel');
 const bathroomCheckCounts = document.querySelector('#bathroomCheckCounts');
@@ -178,6 +201,7 @@ function renderBathroomCheck(state) {
   if (bathroomCheckCriteria) {
     const criteria = state.criteria || {};
     const parts = [];
+    if (cityNames.has(criteria.city)) parts.push(cityNames.get(criteria.city));
     if ([2, 3, 4].includes(criteria.target_rooms)) parts.push(`от ${criteria.target_rooms} комн.`);
     if (Number.isFinite(criteria.min_area_m2)) parts.push(`${formatAreaRange(criteria.min_area_m2, criteria.max_area_m2)} м²`);
     if (Number.isSafeInteger(criteria.max_price_kzt) && criteria.max_price_kzt > 0) parts.push(formatPriceRange(criteria.min_price_kzt, criteria.max_price_kzt));
@@ -581,7 +605,7 @@ function sortListings(listings) {
 
 function comparisonSummary(label, values, minSamples) {
   if (values?.status === 'city_unknown') {
-    return `<div class="comparison-row"><span>${escapeHtml(label)}</span><span>Город не подтверждён как Астана</span></div>`;
+    return `<div class="comparison-row"><span>${escapeHtml(label)}</span><span>Город не подтверждён</span></div>`;
   }
   if (!values || values.status === 'district_unknown') {
     return `<div class="comparison-row"><span>${escapeHtml(label)}</span><span>Район не указан</span></div>`;
@@ -600,6 +624,7 @@ function renderComparison(data) {
   const asOf = new Date(data.as_of);
   const dateLabel = Number.isNaN(asOf.getTime()) ? 'дата неизвестна' : dateTime.format(asOf);
   const district = data.district_label ? `Район: ${data.district_label}` : 'Район';
+  const cityLabel = data.city_label || (data.city?.status === 'city_unknown' ? 'Город' : 'Астана');
   const minSamples = Number(data.min_samples) || 5;
   const krisha = data.krisha || {};
   const hasKrisha = krisha.district?.status === 'ok' || krisha.city?.status === 'ok';
@@ -614,14 +639,14 @@ function renderComparison(data) {
   const sourceUrl = safeExternalUrl(krisha.source_url);
   const krishaBlock = hasKrisha ? `<div class="krisha-comparison"><b>Средние из блока Krisha</b>
     ${referenceRow(krisha.district_label ? `Район в блоке Krisha: ${krisha.district_label}` : 'Район в блоке Krisha', krisha.district)}
-    ${referenceRow('Астана', krisha.city)}
+    ${referenceRow(cityLabel, krisha.city)}
     <small>Получено со страницы: ${escapeHtml(observedLabel)}. Период и размер выборки источником не переданы.${sourceUrl ? ` <a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">Источник →</a>` : ''}</small></div>` : '<p>Средние Krisha со страницы объявления пока не получены.</p>';
   return `<b>Сравнение цены за м²</b>
     ${krishaBlock}
     <b>По сохранённым объявлениям</b>
     <p>Среднее по другим сохранённым объявлениям за ${Number(data.lookback_days) || 90} дней; это не средняя цена рынка.</p>
     ${comparisonSummary(district, data.district, minSamples)}
-    ${comparisonSummary('Астана', data.city, minSamples)}
+    ${comparisonSummary(cityLabel, data.city, minSamples)}
     <small>Срез: ${escapeHtml(dateLabel)}. Цена предложения; объявления могут быть подобраны по вашим фильтрам.</small>`;
 }
 
@@ -645,7 +670,7 @@ function renderClosestComparables(data) {
     const missing = {
       complex_unknown:'Название ЖК не указано.',
       coordinates_unknown:'Координаты квартиры не указаны.',
-      city_unknown:'Подбор аналогов доступен для Астаны.',
+      city_unknown:'Город квартиры не подтверждён.',
     }[group.status];
     if (missing) return `<section class="comparable-group"><h4>${heading}</h4><p>${missing}</p></section>`;
     const items = group.items.map(item => {
@@ -1092,6 +1117,12 @@ async function loadSearchStatus() {
     const response = await fetch('/api/v1/search/status');
     if (!response.ok) throw new Error('Не удалось получить статус поиска');
     const status = await readJson(response);
+    if (cityNames.has(status.city)) {
+      activeSearchCity = status.city;
+      if (searchCity && !searchCityInitialized) searchCity.value = status.city;
+      if (manualCity && !manualCityInitialized) manualCity.value = cityNames.get(status.city);
+      updateCriteriaCity();
+    }
     if (searchExcludePledged && !searchPledgeInitialized && typeof status.exclude_pledged === 'boolean') {
       searchExcludePledged.checked = status.exclude_pledged;
       searchPledgeInitialized = true;
@@ -1177,7 +1208,7 @@ runSearchButton?.addEventListener('click', async () => {
   try {
     const response = await fetch('/api/v1/search/run', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({rooms:Number(searchRooms?.value || 2), min_price_kzt:minimumPrice, max_price_kzt:maximumPrice, min_area_m2:Number(searchMinArea.value), max_area_m2:maximumArea, min_bathrooms:searchBathrooms?.checked ? 2 : 0, exclude_pledged:searchExcludePledged?.checked ?? true, ...(ownerOnly ? {seller:'owner'} : {})})
+      body:JSON.stringify({city:searchCity?.value || 'astana', rooms:Number(searchRooms?.value || 2), min_price_kzt:minimumPrice, max_price_kzt:maximumPrice, min_area_m2:Number(searchMinArea.value), max_area_m2:maximumArea, min_bathrooms:searchBathrooms?.checked ? 2 : 0, exclude_pledged:searchExcludePledged?.checked ?? true, ...(ownerOnly ? {seller:'owner'} : {})})
     });
     const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось выполнить поиск');
@@ -1267,7 +1298,7 @@ form?.addEventListener('submit', async event => {
   if (message) message.textContent = 'Проверяю квартиру…';
   const data = new FormData(form);
   const payload = {
-    source:'manual', source_url:data.get('source_url'), title:data.get('title') || '2-комнатная квартира в Астане', city:'Астана',
+    source:'manual', source_url:data.get('source_url'), title:data.get('title') || 'Квартира', city:data.get('city') || 'Астана',
     description:data.get('description')?.trim() || null,
     repair_condition:data.get('repair_condition')?.trim() || null,
     district:data.get('district') || null, residential_complex:data.get('residential_complex') || null,
@@ -1311,6 +1342,7 @@ document.querySelector('#openListingsMap')?.addEventListener('click', () => {
     return;
   }
   window.ApartmentAgentMap.open({
+    city: activeSearchCity,
     seller: searchSellerFilter?.value || 'all',
     bank: searchLeftBankOnly?.checked ? 'left' : 'all',
     openCard: jumpToSavedListing,

@@ -58,3 +58,42 @@ async def test_map_includes_all_matches_without_fabricating_pins(monkeypatch):
         assert [item['source_url'].split('/')[-1] for item in owner['items']] == ['1']
         assert owner['without_coordinates'] == 1
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_selected_city_filters_pins_and_search_before_limit(monkeypatch):
+    engine = create_async_engine('sqlite+aiosqlite:///:memory:')
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(main, 'SessionLocal', sessions)
+    for key, value in {'search_city': 'almaty', 'target_rooms': 3, 'min_area_m2': 70,
+                       'max_area_m2': None, 'max_price_kzt': 50_000_000, 'min_bathrooms': 0}.items():
+        monkeypatch.setattr(main.settings, key, value)
+    title = '3-комнатная квартира 80 м² 40000000 ₸'
+    async with sessions() as session:
+        session.add_all([
+            Listing(id=11, source_url='https://krisha.kz/a/show/11', title=title, city='Алматы',
+                    price_kzt=40_000_000, rooms=3, area_m2=80, latitude=43.24, longitude=76.89),
+            Listing(id=12, source_url='https://krisha.kz/a/show/12', title=title, city='Астана',
+                    price_kzt=40_000_000, rooms=3, area_m2=80, latitude=51.128, longitude=71.43),
+        ])
+        await session.flush()
+        session.add_all([
+            SearchResult(id=21, url='https://krisha.kz/a/show/11', query='test', search_engine='krisha_direct',
+                         title=title, city=None, imported_listing_id=11),
+            SearchResult(id=22, url='https://krisha.kz/a/show/12', query='test', search_engine='krisha_direct',
+                         title=title, city='almaty', imported_listing_id=12),
+            SearchResult(id=23, url='https://krisha.kz/a/show/23', query='test', search_engine='krisha_direct',
+                         title=title, city=None),
+        ])
+        await session.commit()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url='http://test') as client:
+        for sort in ('newest', 'score_desc'):
+            results = (await client.get('/api/v1/search/results', params={'limit': 1, 'sort': sort})).json()
+            assert [(row['id'], row['city']) for row in results] == [(21, 'Алматы')]
+        result = (await client.get('/api/v1/search/map')).json()
+        assert result['city'] == 'almaty'
+        assert [item['listing_id'] for item in result['items']] == [11]
+        assert result['without_coordinates'] == 0
+    await engine.dispose()

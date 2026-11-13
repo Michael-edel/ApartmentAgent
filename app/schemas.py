@@ -43,6 +43,7 @@ class ListingCreate(BaseModel):
     details_extracted: bool = Field(default=False, exclude=True)
     availability_status: Literal['active', 'archived'] | None = Field(default=None, exclude=True)
     city: str = "Астана"
+    city_observed: bool | None = Field(default=None, exclude=True)
     district: str | None = None
     residential_complex: str | None = None
     complex_description: str | None = Field(default=None, max_length=5000)

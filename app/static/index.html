@@ -19,7 +19,7 @@
 <body>
   <header class="topbar" id="top">
     <div>
-    <span class="eyebrow">ASTANA PROPERTY SCOUT<span id="appVersion"></span></span>
+    <span class="eyebrow">PROPERTY SCOUT<span id="appVersion"></span></span>
       <h1>ApartmentAgent</h1>
     </div>
     <button id="refreshButton" class="icon-button" aria-label="Обновить">↻</button>
@@ -30,7 +30,7 @@
       <div>
         <p class="muted">Ваши критерии</p>
         <h2 id="criteriaRooms">От 2 комнат</h2>
-        <p>Астана · <span id="criteriaArea">55–70</span> м² · <span id="criteriaPrice">до 30 000 000 ₸</span></p>
+        <p><span id="criteriaCity">Астана</span> · <span id="criteriaArea">55–70</span> м² · <span id="criteriaPrice">до 30 000 000 ₸</span></p>
       </div>
       <div class="score-badge">85+</div>
     </section>
@@ -52,6 +52,15 @@
         <article class="stat"><span>Срочных</span><strong id="urgentCount">0</strong></article>
         <article class="stat"><span>Автоимпорт</span><strong id="importedCount">0</strong></article>
       </div>
+      <label class="search-room-control">Город
+        <select id="searchCity">
+          <option value="astana">Астана</option>
+          <option value="almaty">Алматы</option>
+          <option value="shymkent">Шымкент</option>
+          <option value="karaganda">Караганда</option>
+          <option value="pavlodar">Павлодар</option>
+        </select>
+      </label>
       <label class="search-room-control">Минимальное количество комнат
         <select id="searchRooms">
           <option value="2">От 2 комнат</option>
@@ -87,8 +96,8 @@
       <label class="checkbox search-price-control"><input id="searchBathrooms" type="checkbox"> От 2 санузлов</label>
       <label class="checkbox search-price-control"><input id="searchExcludePledged" type="checkbox" checked> Исключать квартиры в залоге</label>
       <label class="checkbox search-price-control"><input id="searchLeftBankOnly" type="checkbox"> Только левый берег в результатах</label>
-      <p class="microcopy">Берег определяется по координатам объявления. <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap</a></p>
-      <p class="microcopy">Комнаты, цена, площадь, санузлы и условие залога сохраняются для автоматических поисков. При отборе «От 2 санузлов» показываются только объявления с подтверждённым количеством.</p>
+      <p class="microcopy"><span id="bankCriteriaHint">Берег определяется по координатам объявления.</span> <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap</a></p>
+      <p class="microcopy">Выберите город и другие критерии, затем нажмите «Искать сейчас». Они сохраняются для автоматических поисков. При отборе «От 2 санузлов» показываются только объявления с подтверждённым количеством.</p>
       <button id="runSearchButton" type="button">Искать сейчас</button>
       <p id="searchMessage" class="form-message" aria-live="polite"></p>
       <p id="searchMeta" class="microcopy"></p>
@@ -210,6 +219,7 @@
       <form id="listingForm">
         <label>Ссылка<input name="source_url" type="url" required></label>
         <label>Заголовок<input name="title" required></label>
+        <label>Город<select name="city"><option value="Астана">Астана</option><option value="Алматы">Алматы</option><option value="Шымкент">Шымкент</option><option value="Караганда">Караганда</option><option value="Павлодар">Павлодар</option></select></label>
         <div class="form-grid">
           <label>Цена, ₸<input name="price_kzt" type="number" required></label>
           <label>Площадь, м²<input name="area_m2" type="number" step="0.1" required></label>
@@ -263,7 +273,7 @@
   </nav>
 
   <script src="/static/vendor/leaflet/leaflet.js" defer></script>
-  <script src="/static/listing-map.js?v=2" defer></script>
-  <script src="/static/app.js?v=169" defer></script>
+  <script src="/static/listing-map.js?v=3" defer></script>
+  <script src="/static/app.js?v=170" defer></script>
 </body>
 </html>

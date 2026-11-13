@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -8,6 +9,7 @@ from sqlalchemy import func, select
 
 from app.availability import availability_key, set_source_availability, unavailable_urls
 from app.config import get_settings
+from app.cities import CITY_NAMES, SearchCity, city_matches, city_slug
 from app.database import SessionLocal
 from app.importer import ListingArchived, ListingImportError, ListingUnavailable, import_krisha_listing
 from app.krisha_search import KrishaSearchBlocked, normalize_krisha_listing_url
@@ -52,6 +54,7 @@ class SearchSummary:
 class SearchImportCandidate:
     result_id: int
     url: str
+    city: SearchCity = "astana"
 
 
 def _priority(title: str, snippet: str | None, mortgage_supported: bool | None = None,
@@ -120,13 +123,36 @@ def _row_matches_basic(row: SearchResult, *, include_pledged: bool = False) -> b
 
 def _rotated_queries() -> list[str]:
     rooms = settings.target_rooms
-    queries = ["Астана квартиры продажа krisha.kz", "Астана квартиры продажа левый берег krisha.kz"]
-    queries += [f"Астана {count}-комнатная квартира продажа krisha.kz" for count in range(rooms, 6)]
-    queries += [f"Астана квартиры продажа {district} krisha.kz" for district in DISTRICTS]
+    name = CITY_NAMES[settings.search_city]
+    queries = [f"{name} квартиры продажа krisha.kz"]
+    if settings.search_city == 'astana':
+        queries.append('Астана квартиры продажа левый берег krisha.kz')
+    queries += [f"{name} {count}-комнатная квартира продажа krisha.kz" for count in range(rooms, 6)]
+    if settings.search_city == 'astana':
+        queries += [f"{name} квартиры продажа {district} krisha.kz" for district in DISTRICTS]
     count = min(max(settings.search_queries_per_run, 1), len(queries))
     slot = int(datetime.now(UTC).timestamp() // (max(settings.search_interval_minutes, 15) * 60))
     start = (slot * count) % len(queries)
     return [queries[(start + offset) % len(queries)] for offset in range(count)]
+
+
+_CITY_WORDS = {
+    'astana': r'астана|astana|нур[- ]?султан|нұр[- ]?сұлтан',
+    'almaty': r'алматы|алма[- ]?ата|almaty',
+    'shymkent': r'шымкент|shymkent',
+    'karaganda': r'караганда|қарағанды|karaganda|karagandy',
+    'pavlodar': r'павлодар|pavlodar',
+}
+
+
+def _secondary_city_confirmed(item: SearchItem) -> bool:
+    """Avoid treating a city-specific web query as proof of a result's location."""
+    text = f'{item.title or ""} {item.snippet or ""}'.casefold()
+    observed = {
+        city for city, words in _CITY_WORDS.items()
+        if re.search(rf'(?<!\w)(?:{words})(?!\w)(?!\s+(?:район|р-н|р\.\s*н))', text)
+    }
+    return observed == {settings.search_city}
 
 
 async def _save_items(
@@ -136,7 +162,7 @@ async def _save_items(
 ) -> tuple[int, int, list[SearchImportCandidate]]:
     accepted_by_url: dict[str, SearchItem] = {}
     for item in items:
-        if _matches_target(item):
+        if _matches_target(item) and (provider_name not in {'brave', 'bing_rss'} or _secondary_city_confirmed(item)):
             accepted_by_url[item.url] = item
     accepted_items = list(accepted_by_url.values())
     accepted_count = len(accepted_items)
@@ -144,15 +170,29 @@ async def _save_items(
     candidates: list[SearchImportCandidate] = []
     now = datetime.now(UTC)
     async with SessionLocal() as session:
-        known_pledges = {
-            normalize_krisha_listing_url(url) or url: status
-            for url, status in (await session.execute(
-                select(Listing.source_url, Listing.is_pledged).where(Listing.is_pledged.is_not(None))
-            )).all()
-        } if accepted_items else {}
+        known_pledges: dict[str, bool] = {}
+        known_cities: dict[str, set[SearchCity | None]] = {}
+        if accepted_items:
+            for url, city, pledged in (await session.execute(
+                select(Listing.source_url, Listing.city, Listing.is_pledged)
+            )).all():
+                key = normalize_krisha_listing_url(url) or url
+                if city and city.strip():
+                    known_cities.setdefault(key, set()).add(city_slug(city))
+                if pledged is not None:
+                    known_pledges[key] = pledged
         for item in accepted_items:
             existing = await session.scalar(select(SearchResult).where(SearchResult.url == item.url))
             krisha_url = normalize_krisha_listing_url(item.url) if provider_name == "krisha_direct" else None
+            canonical = normalize_krisha_listing_url(item.url) or item.url
+            known = known_cities.get(canonical)
+            if known and known != {settings.search_city}:
+                accepted_count -= 1
+                continue
+            if (existing and existing.city and city_slug(existing.city) != settings.search_city
+                    and provider_name != 'krisha_direct'):
+                accepted_count -= 1
+                continue
             seller_type = item.seller_type if krisha_url and seller_category(item.seller_type) != "unknown" else None
             if krisha_url and seller_type:
                 await fill_seller_from_krisha_search(session, krisha_url, seller_type)
@@ -160,6 +200,7 @@ async def _save_items(
             bathrooms_count = parse_bathrooms_count(f"{item.title or ''} {item.snippet or ''}")
             mortgage_supported = parse_mortgage_text(f"{item.title or ''}\n{item.snippet or ''}")
             if existing:
+                existing.city = settings.search_city
                 existing.last_seen = now
                 if seller_type:
                     existing.seller_type = seller_type
@@ -181,10 +222,11 @@ async def _save_items(
                     accepted_count -= 1
                     continue
                 if existing.import_status != "imported" or existing.imported_listing_id is None:
-                    candidates.append(SearchImportCandidate(result_id=existing.id, url=existing.url))
+                    candidates.append(SearchImportCandidate(result_id=existing.id, url=existing.url, city=settings.search_city))
                 continue
             row = SearchResult(
                 url=item.url,
+                city=settings.search_city,
                 search_engine=provider_name,
                 query=query,
                 title=item.title,
@@ -201,11 +243,12 @@ async def _save_items(
             if _row_hidden_by_pledge(row):
                 accepted_count -= 1
                 continue
-            candidates.append(SearchImportCandidate(result_id=row.id, url=row.url))
+            candidates.append(SearchImportCandidate(result_id=row.id, url=row.url, city=settings.search_city))
             new_found += 1
         session.add(
             SearchHistory(
                 search_engine=provider_name,
+                city=settings.search_city,
                 query=query,
                 total_found=accepted_count,
                 new_found=new_found,
@@ -263,7 +306,10 @@ async def _auto_import(candidates: list[SearchImportCandidate]) -> tuple[int, in
             blocked += 1
             continue
         try:
-            payload = await import_krisha_listing(candidate.url)
+            payload = (await import_krisha_listing(candidate.url) if candidate.city == "astana" else
+                       await import_krisha_listing(candidate.url, expected_city=candidate.city))
+            if city_slug(payload.city) != candidate.city:
+                raise ValueError("Город объявления не совпадает с выбранным городом поиска")
             saved = await persist_listing(payload, allow_existing=True, notify=True)
             await _mark_import_result(
                 candidate,
@@ -301,6 +347,7 @@ async def _save_provider_status(
     async with SessionLocal() as session:
         session.add(
             SearchHistory(
+                city=settings.search_city,
                 search_engine=provider_name,
                 query=query,
                 total_found=0,
@@ -328,12 +375,13 @@ async def run_search(rooms: int | None = None, max_price_kzt: int | None = None,
                      min_area_m2: float | None = None, max_area_m2: float | None = None,
                      min_bathrooms: int | None = None, exclude_pledged: bool | None = None,
                      *, max_area_m2_is_set: bool = False, seller: str | None = None,
-                     min_price_kzt: int | None = None, min_price_kzt_is_set: bool = False) -> SearchSummary:
+                     min_price_kzt: int | None = None, min_price_kzt_is_set: bool = False,
+                     city: SearchCity | None = None) -> SearchSummary:
     async with _search_lock:
-        if max_area_m2_is_set or min_price_kzt_is_set or any(value is not None for value in (rooms, min_price_kzt, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms, exclude_pledged)):
+        if max_area_m2_is_set or min_price_kzt_is_set or any(value is not None for value in (rooms, min_price_kzt, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms, exclude_pledged, city)):
             await save_search_preference(rooms, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms, exclude_pledged,
                                          max_area_m2_is_set=max_area_m2_is_set, min_price_kzt=min_price_kzt,
-                                         min_price_kzt_is_set=min_price_kzt_is_set)
+                                         min_price_kzt_is_set=min_price_kzt_is_set, city=city)
         return await _run_search(seller=seller)
 
 
@@ -426,15 +474,16 @@ async def get_search_status() -> dict[str, object]:
         total = new_total = imported_total = found_hour = found_today = urgent = bathrooms_unconfirmed = 0
         pledged_hidden = 0
         engine_counts: dict[str, int] = {}
-        locations = {
-            listing_id: listing_river_bank(city, latitude, longitude)
-            for listing_id, city, latitude, longitude in (await session.execute(
+        location_rows = (await session.execute(
                 select(Listing.id, Listing.city, Listing.latitude, Listing.longitude)
-                .where(Listing.latitude.is_not(None), Listing.longitude.is_not(None))
             )).all()
-        }
+        locations = {listing_id: listing_river_bank(city, latitude, longitude)
+                     for listing_id, city, latitude, longitude in location_rows}
+        linked_cities = {listing_id: city for listing_id, city, _, _ in location_rows}
         matching_rows = await session.stream_scalars(select(SearchResult))
         async for row in matching_rows:
+            if not city_matches(settings.search_city, getattr(row, "city", None), linked_cities.get(getattr(row, "imported_listing_id", None))):
+                continue
             if availability_key(row.url) in unavailable:
                 continue
             if _row_hidden_by_pledge(row):
@@ -455,10 +504,11 @@ async def get_search_status() -> dict[str, object]:
                                               getattr(row, "is_pledged", None),
                                               locations.get(getattr(row, "imported_listing_id", None), "unknown")) == "urgent")
             engine_counts[row.search_engine] = engine_counts.get(row.search_engine, 0) + 1
-        last_run = await session.scalar(select(func.max(SearchHistory.searched_at)))
+        history_filter = ((SearchHistory.city == "astana") | SearchHistory.city.is_(None)) if settings.search_city == "astana" else SearchHistory.city == settings.search_city
+        last_run = await session.scalar(select(func.max(SearchHistory.searched_at)).where(history_filter))
         latest_history = (
             await session.scalars(
-                select(SearchHistory).order_by(SearchHistory.searched_at.desc()).limit(100)
+                select(SearchHistory).where(history_filter).order_by(SearchHistory.searched_at.desc()).limit(100)
             )
         ).all()
 
@@ -484,6 +534,7 @@ async def get_search_status() -> dict[str, object]:
         }
 
     return {
+        "city": settings.search_city,
         "rooms": settings.target_rooms,
         "min_price_kzt": settings.min_price_kzt,
         "max_price_kzt": settings.max_price_kzt,
@@ -515,6 +566,8 @@ async def get_search_status() -> dict[str, object]:
 async def load_search_preference() -> None:
     async with SessionLocal() as session:
         preference = await session.get(SearchPreference, 1)
+        if preference and city_slug(preference.city):
+            settings.search_city = city_slug(preference.city)
         if preference and preference.rooms in (2, 3, 4):
             settings.target_rooms = preference.rooms
         if preference and preference.max_price_kzt is not None:
@@ -535,7 +588,10 @@ async def save_search_preference(rooms: int | None, max_price_kzt: int | None = 
                                  min_area_m2: float | None = None, max_area_m2: float | None = None,
                                  min_bathrooms: int | None = None, exclude_pledged: bool | None = None,
                                  *, max_area_m2_is_set: bool = False,
-                                 min_price_kzt: int | None = None, min_price_kzt_is_set: bool = False) -> None:
+                                 min_price_kzt: int | None = None, min_price_kzt_is_set: bool = False,
+                                 city: SearchCity | None = None) -> None:
+    if city is not None and city not in CITY_NAMES:
+        raise ValueError("Неизвестный город поиска")
     update_min_price = min_price_kzt_is_set or min_price_kzt is not None
     update_price = update_min_price or max_price_kzt is not None
     min_price = min_price_kzt if update_min_price else settings.min_price_kzt
@@ -566,7 +622,11 @@ async def save_search_preference(rooms: int | None, max_price_kzt: int | None = 
             preference.min_bathrooms = min_bathrooms
         if exclude_pledged is not None:
             preference.exclude_pledged = exclude_pledged
+        if city is not None:
+            preference.city = city
         await session.commit()
+    if city is not None:
+        settings.search_city = city
     if rooms is not None:
         settings.target_rooms = rooms
     if update_price:

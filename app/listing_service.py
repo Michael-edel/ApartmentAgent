@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai_service import analyze_listing
 from app.author import OWNER_FROM_DESCRIPTION, owner_type_from_description
 from app.availability import listing_availability, set_source_availability
+from app.cities import CITY_NAMES, city_slug, is_city_coordinate_pair
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import Listing, PriceSnapshot, SearchResult
@@ -198,6 +199,29 @@ async def _discovered_seller(session: AsyncSession, source_url: str) -> str | No
     return next(iter(roles)) if len(roles) == 1 else None
 
 
+async def _resolve_import_location(session: AsyncSession, payload: ListingCreate, existing: Listing | None) -> ListingCreate:
+    if payload.source not in {"browser", "krisha-import"}:
+        return payload
+    city = payload.city
+    legacy_astana_fallback = (
+        payload.city_observed is None and city_slug(city) == "astana"
+        and not city_slug(payload.property_details.get("Город"))
+        and not any(city_slug(part) == "astana" for part in payload.title.split(","))
+    )
+    if payload.city_observed is False or legacy_astana_fallback:
+        if existing is not None and existing.city:
+            city = existing.city
+        else:
+            known = {city_slug(result.city) for result in await _matching_search_results(session, str(payload.source_url))}
+            known.discard(None)
+            if len(known) == 1:
+                city = CITY_NAMES[next(iter(known))]
+    changes = {"city": city}
+    if not is_city_coordinate_pair(city, payload.latitude, payload.longitude):
+        changes.update(latitude=None, longitude=None)
+    return payload.model_copy(update=changes)
+
+
 async def fill_seller_from_krisha_search(session: AsyncSession, url: str, role: str) -> None:
     """Fill a missing seller role from the matching public Krisha search card."""
     await session.execute(
@@ -257,6 +281,7 @@ async def _enrich_twogis(
     source_url = str(payload.source_url)
     async with SessionLocal() as session:
         existing = await _find_listing(session, source_url)
+        payload = await _resolve_import_location(session, payload, existing)
 
     if existing is None:
         complex_changed = False
@@ -266,9 +291,9 @@ async def _enrich_twogis(
                 update={"residential_complex": existing.residential_complex}
             )
         complex_changed = bool(
-            payload.residential_complex
-            and payload.residential_complex.strip().casefold()
-            != (existing.residential_complex or "").strip().casefold()
+            city_slug(payload.city) != city_slug(existing.city)
+            or (payload.residential_complex and payload.residential_complex.strip().casefold()
+                != (existing.residential_complex or "").strip().casefold())
         )
         if not complex_changed:
             payload = payload.model_copy(
@@ -455,6 +480,8 @@ async def persist_listing(
                 row.twogis_checked_at = now
             if payload.photo_urls and not protect_full_details:
                 row.photo_urls = payload.photo_urls
+            if payload.source in {"browser", "krisha-import"} and not is_city_coordinate_pair(row.city, row.latitude, row.longitude):
+                row.latitude = row.longitude = None
             row.last_imported_at = now
             if old_price != payload.price_kzt:
                 price_change = (old_price, payload.price_kzt)

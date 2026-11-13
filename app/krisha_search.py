@@ -11,6 +11,7 @@ from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 import httpx
 
 from app.config import get_settings
+from app.cities import city_slug
 from app.seller import IDENTITY_CONFIRMED_REALTOR
 
 settings = get_settings()
@@ -174,7 +175,10 @@ class _CardParser(HTMLParser):
 
 
 def build_krisha_search_url(page: int = 1, rooms: int = 2, *, owner_only: bool = False) -> str:
-    base_url = "https://krisha.kz/prodazha/kvartiry/astana/"
+    city = city_slug(settings.search_city)
+    if city is None:
+        raise ValueError("Unsupported search city")
+    base_url = f"https://krisha.kz/prodazha/kvartiry/{city}/"
     if rooms not in {2, 3, 4}:
         raise ValueError("rooms must be 2, 3 or 4")
     params: list[tuple[str, str]] = [

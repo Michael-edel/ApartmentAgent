@@ -66,6 +66,19 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
     assert.equal(item.description, description, 'seller description reaches the server verbatim');
     assert.equal(item.mortgage_supported, null, 'seller prose is classified by the server, with provenance');
   }
+  for (const [city, latitude, longitude] of [['Астана',51.128,71.43], ['Алматы',43.2389,76.8897], ['Шымкент',42.315,69.59], ['Караганда',49.806,73.086], ['Павлодар',52.287,76.967]]) {
+    const result = extract(file, common, {address:{addressLocality:city}, geo:{latitude,longitude}});
+    assert.equal(result.city, city, file);
+    assert.equal(result.city_observed, true, file);
+    assert.equal(result.latitude, latitude, file);
+    assert.equal(result.longitude, longitude, file);
+  }
+  const mismatched = extract(file, common, {city:'Алматы', geo:{latitude:51.128,longitude:71.43}});
+  assert.equal(mismatched.latitude, null, file);
+  const unknownCity = extract(file, common, {city:'Косшы', geo:{latitude:51.128,longitude:71.43}});
+  assert.equal(unknownCity.city, 'Косшы', file);
+  assert.equal(unknownCity.latitude, null, file);
+  assert.equal(extract(file, common).city_observed, false, file);
   const archiveText = 'В архиве. Объявление может быть неактуальным.';
   const archiveCase = node => extract(file, common, null, null, null, null, undefined, null, null,
     {nodes:{'div, p, section, aside, span':[node]}});

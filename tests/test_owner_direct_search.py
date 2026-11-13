@@ -89,7 +89,7 @@ async def test_direct_seller_label_enriches_saved_and_new_cards_by_url(monkeypat
         SearchItem(title, agent_url, seller_type=IDENTITY_CONFIRMED_REALTOR),
     ])
     await search_agent._save_items("krisha_direct", "test", [SearchItem(title, agent_url)])
-    await search_agent._save_items("brave", "test", [SearchItem(title, other_url, seller_type="Хозяин недвижимости")])
+    await search_agent._save_items("brave", "test", [SearchItem(title + " · Астана", other_url, seller_type="Хозяин недвижимости")])
     async with sessions() as session:
         owner = await session.get(Listing, 1)
         result = await session.get(SearchResult, 3)

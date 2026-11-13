@@ -3,6 +3,7 @@ from typing import Annotated
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from app.cities import SearchCity
 
 
 class Settings(BaseSettings):
@@ -21,6 +22,7 @@ class Settings(BaseSettings):
     check_interval_minutes: int = 120
 
     search_enabled: bool = True
+    search_city: SearchCity = 'astana'
     target_rooms: int = 2
     search_interval_minutes: int = 15
     search_queries_per_run: int = 8

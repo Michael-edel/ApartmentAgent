@@ -161,7 +161,7 @@ def _remote_prompt(listing: ListingCreate, assessment: ListingAssessment) -> str
         "reasons": assessment.reasons,
     }
     return (
-        "Проанализируй квартиру для покупателя в Астане. Не выдумывай отсутствующие факты. "
+        "Проанализируй квартиру для покупателя с учётом указанного города. Не выдумывай отсутствующие факты. "
         "Верни только JSON с ключами summary, strengths, risks, next_steps, recommendation, confidence.\n"
         f"Данные: {json.dumps(payload, ensure_ascii=False)}"
     )

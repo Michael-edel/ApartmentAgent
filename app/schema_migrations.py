@@ -4,7 +4,7 @@ from sqlalchemy.engine import Connection
 # create_all intentionally remains the first step; these definitions only cover
 # columns introduced after the initial MVP schema was deployed.
 _COLUMNS: dict[str, dict[str, str]] = {
-    "search_preferences": {"min_price_kzt": "BIGINT", "max_price_kzt": "BIGINT", "min_area_m2": "DOUBLE PRECISION", "max_area_m2": "DOUBLE PRECISION", "min_bathrooms": "INTEGER", "exclude_pledged": "BOOLEAN"},
+    "search_preferences": {"city": "VARCHAR(30)", "min_price_kzt": "BIGINT", "max_price_kzt": "BIGINT", "min_area_m2": "DOUBLE PRECISION", "max_area_m2": "DOUBLE PRECISION", "min_bathrooms": "INTEGER", "exclude_pledged": "BOOLEAN"},
     "listings": {
         "complex_description": "TEXT",
         "complex_description_source_url": "TEXT",
@@ -46,7 +46,9 @@ _COLUMNS: dict[str, dict[str, str]] = {
         "source_availability_observed_at": "TIMESTAMP WITH TIME ZONE",
     },
     "price_snapshots": {"price_per_m2": "BIGINT"},
+    "search_history": {"city": "VARCHAR(30)"},
     "search_results": {
+        "city": "VARCHAR(30)",
         "seller_type": "VARCHAR(100)",
         "mortgage_supported": "BOOLEAN",
         "is_pledged": "BOOLEAN",
@@ -85,14 +87,3 @@ def ensure_legacy_columns(connection: Connection) -> None:
         "(SELECT mortgage_supported FROM listings WHERE listings.id = search_results.imported_listing_id) "
         "WHERE mortgage_supported IS NULL AND imported_listing_id IS NOT NULL"
     ))
-    # Older browser imports could mistake a map default like (0, 0) for the
-    # listing location. Clear only implausible coordinates; the app searches Astana.
-    connection.execute(
-        text(
-            "UPDATE listings SET latitude = NULL, longitude = NULL "
-            "WHERE latitude IS NULL AND longitude IS NOT NULL "
-            "   OR latitude IS NOT NULL AND longitude IS NULL "
-            "   OR latitude < 50 OR latitude > 52 "
-            "   OR longitude < 69 OR longitude > 73"
-        )
-    )

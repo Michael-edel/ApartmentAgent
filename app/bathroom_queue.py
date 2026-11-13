@@ -17,6 +17,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.availability import set_source_availability, unavailable_urls
+from app.cities import city_matches
 from app.config import get_settings
 from app.database import SessionLocal
 from app.krisha_search import normalize_krisha_import_url, normalize_krisha_listing_url
@@ -63,7 +64,8 @@ def _criteria(mode: str = "bathrooms") -> dict:
     result = {"target_rooms": settings.target_rooms, "min_price_kzt": settings.min_price_kzt,
             "max_price_kzt": settings.max_price_kzt,
             "min_area_m2": settings.min_area_m2, "max_area_m2": settings.max_area_m2,
-            "min_bathrooms": settings.min_bathrooms, "exclude_pledged": settings.exclude_pledged, "mode": mode}
+            "min_bathrooms": settings.min_bathrooms, "exclude_pledged": settings.exclude_pledged, "mode": mode,
+            "city": settings.search_city}
     if mode == "details":
         result["priority_details_revision"] = PRIORITY_DETAILS_REVISION
     return result
@@ -116,7 +118,7 @@ async def _candidates(session: AsyncSession, criteria: dict) -> list[tuple[str, 
             known[url] = count
     listing_values = (await session.execute(select(Listing.source_url, Listing.bathrooms_count,
         Listing.details_imported_at, Listing.rooms, Listing.area_m2, Listing.price_kzt,
-        Listing.is_pledged, *_priority_columns))).all()
+        Listing.is_pledged, Listing.city, *_priority_columns))).all()
     saved = {}
     for value in listing_values:
         url = normalize_krisha_listing_url(value.source_url)
@@ -165,6 +167,8 @@ async def _candidates(session: AsyncSession, criteria: dict) -> list[tuple[str, 
 
     for row in rows:
         url = normalize_krisha_listing_url(row.url)
+        if not city_matches(criteria.get("city", "astana"), getattr(row, "city", None), saved[url].city if url in saved else None):
+            continue
         if not eligible(url) or url in seen:
             continue
         title, snippet = (saved_title(saved[url]), None) if details_mode and url in saved else (row.title, row.snippet)
@@ -174,7 +178,7 @@ async def _candidates(session: AsyncSession, criteria: dict) -> list[tuple[str, 
         result.append((url, row.id))
     if details_mode:
         for url, value in saved.items():
-            if eligible(url) and url not in seen and matches(saved_title(value), None):
+            if city_matches(criteria.get("city", "astana"), None, value.city) and eligible(url) and url not in seen and matches(saved_title(value), None):
                 seen.add(url)
                 result.append((url, None))
     return result

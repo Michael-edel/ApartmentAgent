@@ -31,6 +31,7 @@ class SearchPreference(Base):
     __tablename__ = "search_preferences"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    city: Mapped[str | None] = mapped_column(String(30), nullable=True)
     rooms: Mapped[int] = mapped_column(Integer, default=2)
     min_price_kzt: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     max_price_kzt: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -145,6 +146,7 @@ class SearchResult(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     url: Mapped[str] = mapped_column(Text, unique=True, index=True)
+    city: Mapped[str | None] = mapped_column(String(30), nullable=True)
     search_engine: Mapped[str] = mapped_column(String(30), index=True)
     query: Mapped[str] = mapped_column(Text)
     title: Mapped[str] = mapped_column(String(500))
@@ -172,6 +174,7 @@ class SearchHistory(Base):
     __tablename__ = "search_history"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    city: Mapped[str | None] = mapped_column(String(30), nullable=True)
     search_engine: Mapped[str] = mapped_column(String(30), index=True)
     query: Mapped[str] = mapped_column(Text)
     searched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

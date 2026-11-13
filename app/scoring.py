@@ -2,12 +2,13 @@ from typing import Literal
 
 from app.config import Settings
 from app.astana_bank import astana_bank
+from app.cities import CITY_NAMES, city_slug
 from app.schemas import ListingAssessment, ListingCreate
 from app.search_analysis import is_area_in_range
 
 
 def listing_river_bank(city: str | None, latitude: float | None, longitude: float | None) -> Literal['left', 'right', 'unknown']:
-    if (city or '').strip().casefold() not in {'астана', 'astana'}:
+    if city_slug(city) != 'astana':
         return 'unknown'
     return astana_bank(latitude, longitude)
 
@@ -24,9 +25,9 @@ def assess_listing(listing: ListingCreate, settings: Settings) -> ListingAssessm
             score -= 35
             reasons.append(f"Санузлов меньше установленного минимума: {settings.min_bathrooms}")
 
-    if listing.city.strip().lower() not in {"астана", "astana"}:
+    if city_slug(listing.city) != settings.search_city:
         score -= 40
-        reasons.append("Объект находится не в Астане")
+        reasons.append(f"Объект находится вне выбранного города ({CITY_NAMES[settings.search_city]})")
 
     if listing.rooms < settings.target_rooms or (listing.rooms == 2 and settings.target_rooms == 2 and not listing.is_full_two_room):
         score -= 35

@@ -21,9 +21,10 @@ from app.availability import listing_availability, set_listing_sold, set_source_
 from app.bathroom_queue import router as bathroom_check_router
 from app.ai_service import analyze_listing, current_analysis
 from app.checker import ListingNotFound, check_all_listings, check_listing, periodic_checker
+from app.cities import CITY_NAMES, SearchCity, city_matches, city_slug, is_city_coordinate_pair, result_city_slug
 from app.config import get_settings
 from app.database import SessionLocal, engine, initialize_database
-from app.importer import ListingArchived, ListingImportError, ListingUnavailable, _address_from_text, _is_astana_coordinate_pair, _is_krisha_host, import_krisha_listing
+from app.importer import ListingArchived, ListingImportError, ListingUnavailable, _address_from_text, _is_krisha_host, import_krisha_listing
 from app.listing_service import ListingAlreadyExists, persist_listing
 from app.market_comparison import LOOKBACK_DAYS, compare_saved_listings
 from app.krisha_search import normalize_krisha_listing_url
@@ -398,6 +399,7 @@ async def latest_checks() -> list[dict[str, object]]:
 
 class SearchRunRequest(BaseModel):
     rooms: Literal[2, 3, 4]
+    city: SearchCity | None = None
     min_price_kzt: int | None = Field(default=None, strict=True, ge=1, le=10_000_000_000)
     max_price_kzt: int | None = Field(default=None, strict=True, ge=1, le=10_000_000_000)
     min_area_m2: float | None = Field(default=None, strict=True, ge=0.1, le=10000, allow_inf_nan=False)
@@ -428,6 +430,7 @@ async def run_search_now(request: SearchRunRequest | None = None) -> dict[str, o
                 seller=request.seller,
                 min_price_kzt=request.min_price_kzt,
                 min_price_kzt_is_set="min_price_kzt" in request.model_fields_set,
+                **({"city": request.city} if request.city is not None else {}),
             )
     except (InvalidSearchArea, InvalidSearchPrice) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
@@ -442,6 +445,7 @@ async def run_search_now(request: SearchRunRequest | None = None) -> dict[str, o
         "import_blocked": summary.import_blocked,
         "providers": summary.providers,
         "exclude_pledged": settings.exclude_pledged,
+        "city": settings.search_city,
     }
 
 
@@ -511,7 +515,8 @@ async def comparison_liked() -> list[dict[str, object]]:
                     'price_lower_bound_kzt': analysis['price_lower_bound_kzt'],
                     'price_is_lower_bound': analysis['price_is_lower_bound'],
                     'price_per_m2': analysis['price_per_m2'], 'area_m2': analysis['area_m2'],
-                    'rooms': analysis['rooms'], 'address': None, 'district': None, 'city': None,
+                    'rooms': analysis['rooms'], 'address': None, 'district': None,
+                    'city': CITY_NAMES.get(city_slug(getattr(row, 'city', None))),
                     'river_bank': 'unknown', 'floor': analysis['floor'],
                     'floors_total': analysis['floors_total'], 'bathrooms_count': count,
                     'bathrooms_count_is_lower_bound': bool(
@@ -533,6 +538,7 @@ async def search_map(
     bank: Literal['all', 'left'] = 'all',
 ) -> dict[str, object]:
     """Map current matches with actual saved pins; count other matches separately."""
+    selected_city = settings.search_city
     async with SessionLocal() as session:
         unavailable = await unavailable_urls(session)
         saved_rows = (await session.execute(select(
@@ -559,7 +565,7 @@ async def search_map(
         listing = saved.get(key)
         result = found.get(key)
         if listing is not None:
-            if (listing.city or '').strip().casefold() not in {'астана', 'astana'}:
+            if city_slug(listing.city) != selected_city:
                 continue
             if not listing.area_m2 or not listing.price_kzt or not listing.rooms:
                 continue
@@ -581,7 +587,7 @@ async def search_map(
             category = seller_category(role)
             if seller != 'all' and category != seller:
                 continue
-            if not _is_astana_coordinate_pair(listing.latitude, listing.longitude):
+            if not is_city_coordinate_pair(listing.city, listing.latitude, listing.longitude):
                 without_coordinates += 1
                 continue
             river_bank = listing_river_bank(listing.city, listing.latitude, listing.longitude)
@@ -595,12 +601,12 @@ async def search_map(
                 'river_bank': river_bank, 'seller_category': category,
             })
         elif result is not None:
-            if not _row_matches_target(result):
+            if not city_matches(selected_city, result.city) or not _row_matches_target(result):
                 continue
             if seller != 'all' and seller_category(result.seller_type) != seller:
                 continue
             without_coordinates += 1
-    return {'items': items, 'without_coordinates': without_coordinates}
+    return {'city': selected_city, 'items': items, 'without_coordinates': without_coordinates}
 
 
 @app.get("/api/v1/search/results")
@@ -614,13 +620,29 @@ async def search_results(
     bank: Literal["all", "left"] = "all",
 ) -> list[dict[str, object]]:
     safe_limit = min(max(limit, 1), 200)
+    selected_city = settings.search_city
     async with SessionLocal() as session:
         unavailable = await unavailable_urls(session)
         query = select(SearchResult).order_by(SearchResult.first_seen.desc(), SearchResult.id.desc())
         if only_new:
             query = query.where(SearchResult.status.like("new:%"))
 
+        listing_facts: dict[int, Any] = {}
+
+        async def load_linked_cards(batch: list[SearchResult]) -> None:
+            listing_ids = list({row.imported_listing_id for row in batch
+                                if row.imported_listing_id is not None and row.imported_listing_id not in listing_facts})
+            for start in range(0, len(listing_ids), 500):
+                values = await session.execute(
+                    select(Listing.id, Listing.seller_type, Listing.city, Listing.latitude, Listing.longitude)
+                    .where(Listing.id.in_(listing_ids[start:start + 500]))
+                )
+                listing_facts.update((item.id, item) for item in values.all())
+
         def matches_filter(row: SearchResult) -> bool:
+            linked = listing_facts.get(row.imported_listing_id)
+            if result_city_slug(getattr(row, "city", None), linked.city if linked else None) != selected_city:
+                return False
             if _favorite_key(row.url) in unavailable:
                 return False
             if include_unconfirmed:
@@ -633,6 +655,7 @@ async def search_results(
             batch_size = 200
             while len(rows) < safe_limit:
                 batch = (await session.scalars(query.offset(offset).limit(batch_size))).all()
+                await load_linked_cards(batch)
                 for row in batch:
                     if matches_filter(row):
                         rows.append(row)
@@ -644,21 +667,15 @@ async def search_results(
         else:
             # A single ordered query avoids offset shifts when new rows arrive.
             stream = await session.stream_scalars(query.execution_options(yield_per=200))
-            rows = [row async for row in stream if matches_filter(row)]
+            batch = [row async for row in stream]
+            await load_linked_cards(batch)
+            rows = [row for row in batch if matches_filter(row)]
 
-        listing_ids = list({row.imported_listing_id for row in rows if row.imported_listing_id is not None})
-        sellers: dict[int, str | None] = {}
-        banks: dict[int, Literal['left', 'right', 'unknown']] = {}
-        for start in range(0, len(listing_ids), 500):
-            values = await session.execute(
-                select(Listing.id, Listing.seller_type, Listing.city, Listing.latitude, Listing.longitude)
-                .where(Listing.id.in_(listing_ids[start:start + 500]))
-            )
-            for listing_id, seller_type, city, latitude, longitude in values.all():
-                sellers[listing_id] = seller_type
-                banks[listing_id] = listing_river_bank(city, latitude, longitude)
+        banks = {item.id: listing_river_bank(item.city, item.latitude, item.longitude)
+                 for item in listing_facts.values()}
         def effective_seller_type(row: SearchResult) -> str | None:
-            linked = sellers.get(row.imported_listing_id)
+            card = listing_facts.get(row.imported_listing_id)
+            linked = card.seller_type if card else None
             if linked and linked.strip() and linked.strip() != OWNER_FROM_DESCRIPTION:
                 return linked
             discovery = getattr(row, "seller_type", None)
@@ -695,6 +712,7 @@ async def search_results(
                 "search_engine": row.search_engine,
                 "query": row.query,
                 "title": row.title,
+                "city": CITY_NAMES[selected_city],
                 "snippet": row.snippet,
                 "status": row.status.split(":", 1)[0],
                 "priority": "urgent" if analysis["score"] >= 85 else "good" if analysis["score"] >= 65 else "normal",

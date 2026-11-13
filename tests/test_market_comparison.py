@@ -43,8 +43,11 @@ def test_not_enough_values_are_not_displayed_and_unknown_district_is_explicit():
 
 def test_other_city_target_is_not_compared_to_astana():
     result = compare_saved_listings(listing(1, city="Алматы"), [listing(i) for i in range(2, 7)], now=NOW)
-    assert result["city"]["status"] == "city_unknown"
-    assert result["district"]["status"] == "city_unknown"
+    assert result["city_label"] == "Алматы"
+    assert result["city"]["count"] == result["district"]["count"] == 0
+    assert result["city"]["status"] == "insufficient_data"
+    rows = [listing(i, city="Алматы") for i in range(8, 13)]
+    assert compare_saved_listings(listing(1, city="Алматы"), rows, now=NOW)["city"]["count"] == 5
 
 
 def test_five_districts_city_only_and_latest_duplicate_wins():
