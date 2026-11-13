@@ -5,6 +5,7 @@ from app.astana_bank import astana_bank
 from app.cities import CITY_NAMES, city_slug
 from app.schemas import ListingAssessment, ListingCreate
 from app.search_analysis import is_area_in_range
+from app.search_conditions import evaluate_conditions, kitchen_area
 
 
 def listing_river_bank(city: str | None, latitude: float | None, longitude: float | None) -> Literal['left', 'right', 'unknown']:
@@ -16,6 +17,13 @@ def listing_river_bank(city: str | None, latitude: float | None, longitude: floa
 def assess_listing(listing: ListingCreate, settings: Settings) -> ListingAssessment:
     score = 100
     reasons: list[str] = []
+    condition_result = evaluate_conditions(settings.search_conditions, floor=listing.floor,
+        floors_total=listing.floors_total, building_year=listing.building_year,
+        kitchen_m2=kitchen_area(listing.property_details))
+    score += condition_result['score_adjustment']
+    reasons.extend(condition_result['reasons'])
+    if condition_result['unknown']:
+        reasons.append('Не подтверждены условия: ' + ', '.join(condition_result['unknown']))
 
     if settings.min_bathrooms:
         if listing.bathrooms_count is None:

@@ -23,6 +23,7 @@ from app.database import SessionLocal
 from app.krisha_search import normalize_krisha_import_url, normalize_krisha_listing_url
 from app.models import BathroomCheckControl, BathroomCheckJob, BathroomCheckTask, Listing, SearchResult
 from app.search_analysis import is_target_search_result, parse_bathrooms_count
+from app.search_agent import conditions_for_listing, conditions_for_result
 from app.seller import seller_category
 
 async def _allow_control_origin(request: Request) -> None:
@@ -65,7 +66,7 @@ def _criteria(mode: str = "bathrooms") -> dict:
             "max_price_kzt": settings.max_price_kzt,
             "min_area_m2": settings.min_area_m2, "max_area_m2": settings.max_area_m2,
             "min_bathrooms": settings.min_bathrooms, "exclude_pledged": settings.exclude_pledged, "mode": mode,
-            "city": settings.search_city}
+            "city": settings.search_city, "conditions": settings.search_conditions}
     if mode == "details":
         result["priority_details_revision"] = PRIORITY_DETAILS_REVISION
     return result
@@ -118,7 +119,8 @@ async def _candidates(session: AsyncSession, criteria: dict) -> list[tuple[str, 
             known[url] = count
     listing_values = (await session.execute(select(Listing.source_url, Listing.bathrooms_count,
         Listing.details_imported_at, Listing.rooms, Listing.area_m2, Listing.price_kzt,
-        Listing.is_pledged, Listing.city, *_priority_columns))).all()
+        Listing.is_pledged, Listing.city, Listing.floor, Listing.floors_total, Listing.building_year,
+        Listing.property_details, *_priority_columns))).all()
     saved = {}
     for value in listing_values:
         url = normalize_krisha_listing_url(value.source_url)
@@ -169,6 +171,8 @@ async def _candidates(session: AsyncSession, criteria: dict) -> list[tuple[str, 
         url = normalize_krisha_listing_url(row.url)
         if not city_matches(criteria.get("city", "astana"), getattr(row, "city", None), saved[url].city if url in saved else None):
             continue
+        if conditions_for_result(row, saved.get(url), criteria.get('conditions', {}))['failed_hard']:
+            continue
         if not eligible(url) or url in seen:
             continue
         title, snippet = (saved_title(saved[url]), None) if details_mode and url in saved else (row.title, row.snippet)
@@ -178,7 +182,9 @@ async def _candidates(session: AsyncSession, criteria: dict) -> list[tuple[str, 
         result.append((url, row.id))
     if details_mode:
         for url, value in saved.items():
-            if city_matches(criteria.get("city", "astana"), None, value.city) and eligible(url) and url not in seen and matches(saved_title(value), None):
+            if (city_matches(criteria.get("city", "astana"), None, value.city)
+                    and not conditions_for_listing(value, criteria.get('conditions', {}))['failed_hard']
+                    and eligible(url) and url not in seen and matches(saved_title(value), None)):
                 seen.add(url)
                 result.append((url, None))
     return result

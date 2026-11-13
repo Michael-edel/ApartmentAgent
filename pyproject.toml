@@ -1,7 +1,7 @@
 [project]
 name = "apartment-agent"
-version = "0.21.0"
-description = "Apartment monitoring and analytics agent for Astana"
+version = "0.22.0"
+description = "Apartment monitoring and comparison in Kazakhstan"
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.116,<1.0",

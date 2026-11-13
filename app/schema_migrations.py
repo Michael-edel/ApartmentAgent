@@ -4,7 +4,7 @@ from sqlalchemy.engine import Connection
 # create_all intentionally remains the first step; these definitions only cover
 # columns introduced after the initial MVP schema was deployed.
 _COLUMNS: dict[str, dict[str, str]] = {
-    "search_preferences": {"city": "VARCHAR(30)", "min_price_kzt": "BIGINT", "max_price_kzt": "BIGINT", "min_area_m2": "DOUBLE PRECISION", "max_area_m2": "DOUBLE PRECISION", "min_bathrooms": "INTEGER", "exclude_pledged": "BOOLEAN"},
+    "search_preferences": {"city": "VARCHAR(30)", "min_price_kzt": "BIGINT", "max_price_kzt": "BIGINT", "min_area_m2": "DOUBLE PRECISION", "max_area_m2": "DOUBLE PRECISION", "min_bathrooms": "INTEGER", "exclude_pledged": "BOOLEAN", "active_profile_id": "INTEGER", "conditions": "JSON"},
     "listings": {
         "complex_description": "TEXT",
         "complex_description_source_url": "TEXT",

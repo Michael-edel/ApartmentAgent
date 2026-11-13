@@ -31,7 +31,7 @@ def test_lower_bound_price_is_not_treated_as_confirmed_price():
 @pytest.mark.asyncio
 async def test_search_results_filters_old_rows_before_limit(monkeypatch):
     from app import main
-    from app.models import ListingLike
+    from app.models import ListingLike, ListingWorkflow
 
     now = datetime.now(timezone.utc)
     def row(index, title):
@@ -54,7 +54,8 @@ async def test_search_results_filters_old_rows_before_limit(monkeypatch):
         async def __aenter__(self): return self
         async def __aexit__(self, *args): pass
         async def scalars(self, query):
-            if not hasattr(query, "column_descriptions") or query.column_descriptions[0]["entity"] is ListingLike:
+            if (not hasattr(query, "column_descriptions")
+                    or query.column_descriptions[0]["entity"] in {ListingLike, ListingWorkflow}):
                 return Scalars([])
             offset, limit = query._offset_clause.value, query._limit_clause.value
             batches.append((offset, limit))

@@ -136,3 +136,54 @@ async def telegram_status() -> dict[str, object]:
         "configured": bool(settings.telegram_bot_token and settings.telegram_chat_id),
         "sent_notifications": sent or 0,
     }
+
+async def notify_target_price(*, listing_id: int, offer_id: int, price_kzt: int,
+                              target_kzt: int, target_updated_at: datetime,
+                              source_url: str, relationship: str) -> bool:
+    """Send one target match; unique event claim prevents concurrent duplicate sends."""
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy import update
+
+    settings = get_settings()
+    if not settings.telegram_enabled or not settings.telegram_bot_token or not settings.telegram_chat_id:
+        return False
+    version = target_updated_at.isoformat()
+    key = f'target_price:{listing_id}:{offer_id}:{price_kzt}:{version}'
+    relation = {'self': 'избранное объявление', 'confirmed': 'подтверждённая та же квартира',
+                'probable': 'возможно та же квартира'}.get(relationship, 'объявление')
+    message = (f'🎯 Цена достигла цели: <b>{price_kzt:,} ₸</b> '
+               f'(цель {target_kzt:,} ₸)\n{relation}; последняя сохранённая цена\n'
+               f'<a href="{escape(source_url, quote=True)}">Открыть объявление</a>').replace(',', ' ')
+    async with SessionLocal() as session:
+        session.add(TelegramNotification(event_key=key, event_type='target_price', listing_id=listing_id,
+                                         message=message, status='pending', attempts=1))
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            claimed = await session.execute(update(TelegramNotification).where(
+                TelegramNotification.event_key == key, TelegramNotification.status == 'error'
+            ).values(status='pending', attempts=TelegramNotification.attempts + 1, error=None))
+            await session.commit()
+            if not claimed.rowcount:
+                return False
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(f'https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage',
+                                         json={'chat_id': settings.telegram_chat_id, 'text': message,
+                                               'parse_mode': 'HTML', 'disable_web_page_preview': False})
+            response.raise_for_status()
+            payload = response.json()
+            if not payload.get('ok'):
+                raise RuntimeError(str(payload.get('description') or 'Telegram отклонил сообщение'))
+    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+        async with SessionLocal() as session:
+            await session.execute(update(TelegramNotification).where(TelegramNotification.event_key == key)
+                                  .values(status='error', error=str(exc)[:1000]))
+            await session.commit()
+        return False
+    async with SessionLocal() as session:
+        await session.execute(update(TelegramNotification).where(TelegramNotification.event_key == key)
+                              .values(status='sent', error=None, sent_at=datetime.now(UTC)))
+        await session.commit()
+    return True

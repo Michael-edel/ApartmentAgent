@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 from typing import Any, Literal
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import selectinload
@@ -28,15 +28,28 @@ from app.importer import ListingArchived, ListingImportError, ListingUnavailable
 from app.listing_service import ListingAlreadyExists, persist_listing
 from app.market_comparison import LOOKBACK_DAYS, compare_saved_listings
 from app.krisha_search import normalize_krisha_listing_url
-from app.models import Listing, ListingCheck, ListingLike, PriceSnapshot, SearchHistory, SearchResult
+from app.models import DuplicateDecision, Listing, ListingCheck, ListingLike, ListingTargetPrice, ListingWorkflow, PriceSnapshot, SearchHistory, SearchResult
+from app.listing_tracking import tracking_summary
+from app.property_duplicates import canonical_url, confirmed_component, decision_key, duplicate_hidden_ids, group_listings, load_duplicate_decisions, offer, unique_offers
 from app.schemas import ListingCreate, ListingImportRequest, ListingResponse, PriceSnapshotResponse
 from app.seller import seller_category
 from app.scoring import assess_listing, listing_river_bank
-from app.search_agent import InvalidSearchArea, InvalidSearchPrice, get_search_status, load_search_preference, periodic_search, run_search, bathrooms_for_row, _row_matches_basic, _row_matches_target
+from app.search_agent import InvalidSearchArea, InvalidSearchPrice, get_search_status, load_search_preference, periodic_search, run_search, bathrooms_for_row, _row_matches_basic, _row_matches_target, conditions_for_listing, conditions_for_result
 from app.search_analysis import analyze_search_result, is_area_in_range
+from app.search_conditions import SearchConditions
+from app.search_profiles import router as search_profiles_router
 from app.telegram import telegram_status
+from app.workflow import hidden_urls, router as workflow_router
 
 settings = get_settings()
+_duplicate_lock = asyncio.Lock()
+_DUPLICATE_COLUMNS = (
+    Listing.id, Listing.source_url, Listing.title, Listing.city, Listing.address, Listing.rooms,
+    Listing.area_m2, Listing.floor, Listing.floors_total, Listing.bathrooms_count,
+    Listing.bathrooms_count_is_lower_bound, Listing.photo_urls, Listing.price_kzt, Listing.seller_type,
+    Listing.sold_at, Listing.source_archived_at, Listing.source_unavailable_at,
+    Listing.last_imported_at, Listing.created_at, Listing.updated_at,
+)
 
 
 @asynccontextmanager
@@ -55,6 +68,8 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
 app.include_router(bathroom_check_router)
+app.include_router(search_profiles_router)
+app.include_router(workflow_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https://([a-z0-9-]+\.)*krisha\.kz$",
@@ -225,12 +240,17 @@ async def _set_liked(session, url: str, liked: bool) -> None:
     await session.commit()
 
 
-def _to_response(row: Listing, *, liked: bool = False) -> ListingResponse:
+def _to_response(row: Listing, *, liked: bool = False, workflow: ListingWorkflow | None = None,
+                 hidden_duplicate: bool = False) -> ListingResponse:
     payload = _payload_from_row(row)
     assessment = assess_listing(payload, settings)
     return ListingResponse(
         id=row.id,
         liked=liked,
+        hidden=workflow.hidden if workflow else False,
+        workflow_stage=workflow.stage if workflow else 'new',
+        hidden_duplicate=hidden_duplicate,
+        matches_search_conditions=conditions_for_listing(row)['matches_hard'],
         availability=listing_availability(row.sold_at, row.source_archived_at, row.source_unavailable_at),
         sold_at=row.sold_at,
         source_archived_at=row.source_archived_at,
@@ -256,10 +276,12 @@ async def _load_listing_response(listing_id: int) -> ListingResponse:
             .options(selectinload(Listing.prices))
             .where(Listing.id == listing_id)
         )
-        liked = row is not None and await session.get(ListingLike, _favorite_key(row.source_url)) is not None
+        key = _favorite_key(row.source_url) if row is not None else None
+        liked = key is not None and await session.get(ListingLike, key) is not None
+        workflow = await session.get(ListingWorkflow, key) if key is not None else None
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found")
-    return _to_response(row, liked=liked)
+    return _to_response(row, liked=liked, workflow=workflow)
 
 
 async def _save_listing(payload: ListingCreate, *, allow_existing: bool) -> ListingResponse:
@@ -400,6 +422,7 @@ async def latest_checks() -> list[dict[str, object]]:
 class SearchRunRequest(BaseModel):
     rooms: Literal[2, 3, 4]
     city: SearchCity | None = None
+    conditions: SearchConditions | None = None
     min_price_kzt: int | None = Field(default=None, strict=True, ge=1, le=10_000_000_000)
     max_price_kzt: int | None = Field(default=None, strict=True, ge=1, le=10_000_000_000)
     min_area_m2: float | None = Field(default=None, strict=True, ge=0.1, le=10000, allow_inf_nan=False)
@@ -431,6 +454,7 @@ async def run_search_now(request: SearchRunRequest | None = None) -> dict[str, o
                 min_price_kzt=request.min_price_kzt,
                 min_price_kzt_is_set="min_price_kzt" in request.model_fields_set,
                 **({"city": request.city} if request.city is not None else {}),
+                **({"conditions": request.conditions} if request.conditions is not None else {}),
             )
     except (InvalidSearchArea, InvalidSearchPrice) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
@@ -541,10 +565,12 @@ async def search_map(
     selected_city = settings.search_city
     async with SessionLocal() as session:
         unavailable = await unavailable_urls(session)
+        hidden = await hidden_urls(session)
         saved_rows = (await session.execute(select(
             Listing.id, Listing.source_url, Listing.title, Listing.city, Listing.address,
             Listing.district, Listing.latitude, Listing.longitude, Listing.rooms, Listing.area_m2,
             Listing.price_kzt, Listing.bathrooms_count, Listing.is_pledged, Listing.seller_type,
+            Listing.floor, Listing.floors_total, Listing.building_year, Listing.property_details,
         ).order_by(Listing.created_at.desc(), Listing.id.desc()))).all()
         saved: dict[str, Any] = {}
         for row in saved_rows:
@@ -560,7 +586,7 @@ async def search_map(
     items: list[dict[str, object]] = []
     without_coordinates = 0
     for key in dict.fromkeys([*saved, *found]):
-        if key in unavailable:
+        if key in unavailable or key in hidden:
             continue
         listing = saved.get(key)
         result = found.get(key)
@@ -578,6 +604,8 @@ async def search_map(
             if settings.min_bathrooms and (listing.bathrooms_count is None or listing.bathrooms_count < settings.min_bathrooms):
                 continue
             if settings.exclude_pledged and listing.is_pledged is True:
+                continue
+            if not conditions_for_listing(listing)['matches_hard']:
                 continue
             role = listing.seller_type
             if (not role or not role.strip() or role.strip() == OWNER_FROM_DESCRIPTION) and result is not None:
@@ -614,8 +642,10 @@ async def search_results(
     limit: int = 50,
     only_new: bool = False,
     include_unconfirmed: bool = False,
+    include_hidden: bool = False,
     sort: Literal["newest", "score_desc", "score_asc", "price_asc", "price_desc",
-                  "price_m2_asc", "price_m2_desc", "area_asc", "area_desc", "seller", "liked"] = "newest",
+                  "price_m2_asc", "price_m2_desc", "area_asc", "area_desc", "seller", "liked",
+                  "building_year_asc", "building_year_desc"] = "newest",
     seller: Literal["all", "owner", "verified_agent", "realtor", "unknown"] = "all",
     bank: Literal["all", "left"] = "all",
 ) -> list[dict[str, object]]:
@@ -623,6 +653,11 @@ async def search_results(
     selected_city = settings.search_city
     async with SessionLocal() as session:
         unavailable = await unavailable_urls(session)
+        hidden = await hidden_urls(session)
+        hidden_duplicates = set()
+        if hidden:
+            all_listings = (await session.execute(select(*_DUPLICATE_COLUMNS))).all()
+            hidden_duplicates = duplicate_hidden_ids(all_listings, hidden, await load_duplicate_decisions(session))
         query = select(SearchResult).order_by(SearchResult.first_seen.desc(), SearchResult.id.desc())
         if only_new:
             query = query.where(SearchResult.status.like("new:%"))
@@ -634,7 +669,8 @@ async def search_results(
                                 if row.imported_listing_id is not None and row.imported_listing_id not in listing_facts})
             for start in range(0, len(listing_ids), 500):
                 values = await session.execute(
-                    select(Listing.id, Listing.seller_type, Listing.city, Listing.latitude, Listing.longitude)
+                    select(Listing.id, Listing.seller_type, Listing.city, Listing.latitude, Listing.longitude,
+                           Listing.floor, Listing.floors_total, Listing.building_year, Listing.property_details)
                     .where(Listing.id.in_(listing_ids[start:start + 500]))
                 )
                 listing_facts.update((item.id, item) for item in values.all())
@@ -643,7 +679,10 @@ async def search_results(
             linked = listing_facts.get(row.imported_listing_id)
             if result_city_slug(getattr(row, "city", None), linked.city if linked else None) != selected_city:
                 return False
-            if _favorite_key(row.url) in unavailable:
+            key = _favorite_key(row.url)
+            if key in unavailable or (key in hidden and not include_hidden):
+                return False
+            if not conditions_for_result(row, linked)['matches_hard']:
                 return False
             if include_unconfirmed:
                 return _row_matches_basic(row) and settings.min_bathrooms > 0 and bathrooms_for_row(row) is None
@@ -702,12 +741,22 @@ async def search_results(
             river_bank=river_bank,
         )
         analysis["bathrooms_count"] = bathrooms_for_row(row)
+        linked = listing_facts.get(row.imported_listing_id)
+        if linked and linked.building_year is not None:
+            analysis['building_year'] = linked.building_year
+        condition = conditions_for_result(row, linked)
+        analysis['score'] = max(0, min(100, analysis['score'] + condition['score_adjustment']))
+        analysis['reasons'].extend(condition['reasons'])
+        analysis['verdict'] = ('СРОЧНО ПОСМОТРЕТЬ' if analysis['score'] >= 85 else
+                               'ПРОВЕРИТЬ' if analysis['score'] >= 65 else 'НИЗКИЙ ПРИОРИТЕТ')
         analysis["bathrooms_count_is_lower_bound"] = row.bathrooms_count_is_lower_bound or analysis["bathrooms_count_is_lower_bound"]
         result.append(
             {
                 "id": row.id,
                 "url": row.url,
                 "liked": _favorite_key(row.url) in liked_urls,
+                "hidden": _favorite_key(row.url) in hidden,
+                "hidden_duplicate": row.imported_listing_id in hidden_duplicates,
                 "river_bank": river_bank,
                 "search_engine": row.search_engine,
                 "query": row.query,
@@ -733,7 +782,8 @@ async def search_results(
         ranks = {"owner": 0, "verified_agent": 1, "realtor": 2, "unknown": 3}
         result.sort(key=lambda item: ranks.get(str(item["seller_category"]), 3))
     elif sort != "newest":
-        fields = {"score": "score", "price": "price_kzt", "price_m2": "price_per_m2", "area": "area_m2"}
+        fields = {"score": "score", "price": "price_kzt", "price_m2": "price_per_m2", "area": "area_m2",
+                  "building_year": "building_year"}
         field_name, direction = sort.rsplit("_", 1)
         analysis_key = fields[field_name]
 
@@ -845,7 +895,12 @@ async def list_listings(
             )
         ).all()
         liked_urls = set(await session.scalars(select(ListingLike.url)))
-    items = [_to_response(row, liked=_favorite_key(row.source_url) in liked_urls) for row in rows]
+        workflows = {row.url: row for row in await session.scalars(select(ListingWorkflow))}
+        hidden = {row.url for row in workflows.values() if row.hidden}
+        hidden_duplicates = duplicate_hidden_ids(rows, hidden, await load_duplicate_decisions(session)) if hidden else set()
+    items = [_to_response(row, liked=_favorite_key(row.source_url) in liked_urls,
+                          workflow=workflows.get(_favorite_key(row.source_url)), hidden_duplicate=row.id in hidden_duplicates)
+             for row in rows]
     if seller != "all":
         items = [item for item in items if item.seller_category == seller]
     if min_score is not None:
@@ -880,27 +935,69 @@ async def listing_comparison(listing_id: int, include_comparables: bool = False)
                                    listing_is_available())
         )).all()
         comparable_rows = (await session.execute(select(*columns))).all() if include_comparables else None
+        decisions = await load_duplicate_decisions(session) if include_comparables else None
     return compare_saved_listings(target, rows, now=now, include_comparables=include_comparables,
-                                  comparable_rows=comparable_rows)
+                                  comparable_rows=comparable_rows, decisions=decisions)
 
 
 @app.get("/api/v1/listings/{listing_id}/duplicates")
 async def listing_duplicates(listing_id: int) -> dict[str, object]:
-    from app.property_duplicates import group_listings, unique_offers
-
-    columns = (Listing.id, Listing.source_url, Listing.title, Listing.city, Listing.address,
-               Listing.rooms, Listing.area_m2, Listing.floor, Listing.floors_total,
-               Listing.bathrooms_count, Listing.bathrooms_count_is_lower_bound, Listing.photo_urls, Listing.price_kzt, Listing.seller_type,
-               Listing.sold_at, Listing.source_archived_at, Listing.source_unavailable_at,
-               Listing.last_imported_at, Listing.created_at, Listing.updated_at)
     async with SessionLocal() as session:
-        rows = (await session.execute(select(*columns))).all()
+        rows = (await session.execute(select(*_DUPLICATE_COLUMNS))).all()
+        decisions = await load_duplicate_decisions(session)
     target = next((row for row in rows if row.id == listing_id), None)
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found")
-    group = next(group for group in group_listings(rows, target=target) if any(row.id == listing_id for row in group))
-    items = unique_offers(group, target=target)
-    return {'listing_id': listing_id, 'status': 'probable' if len(items) > 1 else 'none', 'items': items}
+    group = next(group for group in group_listings(rows, target=target, decisions=decisions)
+                 if any(row.id == listing_id for row in group))
+    items = unique_offers(group, target=target, decisions=decisions)
+    rejected = [offer(row) for row in rows if decisions.get(decision_key(listing_id, row.id)) == 'different']
+    explicit = {row_id: decisions[decision_key(listing_id, row_id)] for row_id in (row.id for row in group)
+                if decision_key(listing_id, row_id) in decisions}
+    for item in items:
+        item['decision'] = explicit.get(item['listing_id'])
+    return {'listing_id': listing_id, 'status': 'probable' if len(items) > 1 else 'none',
+            'items': items, 'rejected': rejected}
+
+
+class DuplicateDecisionRequest(BaseModel):
+    decision: Literal['same', 'different'] | None
+
+
+@app.put('/api/v1/listings/{listing_id}/duplicates/{other_id}')
+async def save_duplicate_decision(listing_id: int, other_id: int, payload: DuplicateDecisionRequest) -> dict:
+    if listing_id == other_id:
+        raise HTTPException(422, 'Выберите другое объявление')
+    async with _duplicate_lock, SessionLocal() as session, session.begin():
+        if session.get_bind().dialect.name == 'postgresql':
+            await session.execute(text('SELECT pg_advisory_xact_lock(84431)'))
+        candidates = (await session.execute(select(Listing.id, Listing.source_url, Listing.city).where(
+            Listing.id.in_([listing_id, other_id]),
+        ))).all()
+        if len(candidates) != 2:
+            raise HTTPException(404, 'Объявление не найдено')
+        left, right = candidates
+        if canonical_url(left.source_url) == canonical_url(right.source_url):
+            raise HTTPException(422, 'Обе карточки относятся к одной ссылке')
+        if payload.decision == 'same' and city_slug(left.city) != city_slug(right.city):
+            raise HTTPException(422, 'Объявления находятся в разных городах')
+        key = decision_key(listing_id, other_id)
+        decisions = await load_duplicate_decisions(session)
+        decisions.pop(key, None)
+        if payload.decision is not None:
+            decisions[key] = payload.decision
+            component = confirmed_component(listing_id, decisions)
+            if any(value == 'different' and a in component and b in component for (a, b), value in decisions.items()):
+                raise HTTPException(409, 'Решение противоречит другой подтверждённой связи')
+        stored = await session.get(DuplicateDecision, key)
+        if payload.decision is None:
+            if stored is not None:
+                await session.delete(stored)
+        elif stored is None:
+            session.add(DuplicateDecision(first_id=key[0], second_id=key[1], decision=payload.decision))
+        else:
+            stored.decision = payload.decision
+    return {'decision': payload.decision}
 
 
 @app.get("/api/v1/listings/{listing_id}", response_model=ListingResponse)
@@ -945,6 +1042,43 @@ async def listing_price_history(listing_id: int) -> list[PriceSnapshotResponse]:
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found")
     return _price_history(row)
+
+
+@app.get('/api/v1/listings/{listing_id}/tracking')
+async def listing_tracking(listing_id: int) -> dict:
+    async with SessionLocal() as session:
+        data = await tracking_summary(session, listing_id)
+    if data is None:
+        raise HTTPException(404, 'Объявление не найдено')
+    return data
+
+
+class TargetPriceRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    target_price_kzt: int | None = Field(strict=True, gt=0, le=10_000_000_000)
+    include_similar: bool = Field(default=False, strict=True)
+
+
+@app.put('/api/v1/listings/{listing_id}/target-price')
+async def update_target_price(listing_id: int, payload: TargetPriceRequest) -> dict:
+    async with SessionLocal() as session, session.begin():
+        listing = await session.get(Listing, listing_id)
+        if listing is None:
+            raise HTTPException(404, 'Объявление не найдено')
+        if payload.target_price_kzt is None:
+            await session.execute(delete(ListingTargetPrice).where(ListingTargetPrice.listing_id == listing_id))
+        else:
+            if await session.get(ListingLike, _favorite_key(listing.source_url)) is None:
+                raise HTTPException(422, 'Сначала отметьте квартиру как понравившуюся')
+            insert = pg_insert if session.get_bind().dialect.name == 'postgresql' else sqlite_insert
+            changes = {'target_price_kzt': payload.target_price_kzt, 'include_similar': payload.include_similar,
+                       'updated_at': datetime.now(UTC)}
+            await session.execute(insert(ListingTargetPrice).values(listing_id=listing_id, **changes).on_conflict_do_update(
+                index_elements=['listing_id'], set_=changes,
+                where=(ListingTargetPrice.target_price_kzt != payload.target_price_kzt)
+                      | (ListingTargetPrice.include_similar != payload.include_similar),
+            ))
+    return await listing_tracking(listing_id)
 
 
 @app.post("/api/v1/listings/{listing_id}/ai-analysis", response_model=ListingResponse)

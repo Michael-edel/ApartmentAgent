@@ -12,7 +12,7 @@ from app.availability import listing_availability, set_source_availability
 from app.cities import CITY_NAMES, city_slug, is_city_coordinate_pair
 from app.config import get_settings
 from app.database import SessionLocal
-from app.models import Listing, PriceSnapshot, SearchResult
+from app.models import Listing, ListingObservation, PriceSnapshot, SearchResult
 from app.krisha_search import normalize_krisha_listing_url
 from app.pledge import parse_pledge_claim, pledge_field
 from app.schemas import ListingCreate
@@ -21,6 +21,7 @@ from app.mortgage import mortgage_value, parse_mortgage_claim
 from app.importer import clean_listing_address
 from app.scoring import assess_listing
 from app.seller import seller_category
+from app.listing_tracking import changed_fields, evaluate_target_alerts, snapshot
 from app.telegram import notify_listing
 from app.twogis import lookup_twogis
 
@@ -402,6 +403,7 @@ async def persist_listing(
             if not allow_existing:
                 raise ListingAlreadyExists("Listing with this URL already exists")
             old_price = row.price_kzt
+            before_observation = snapshot(row)
             protect_full_details = (row.details_imported_at is not None or row.repair_source_kind == "description"
                                     or row.mortgage_source_kind in _TEXT_MORTGAGE_SOURCES
                                     or row.seller_type == OWNER_FROM_DESCRIPTION) and not payload.details_extracted and payload.source != "manual"
@@ -486,6 +488,9 @@ async def persist_listing(
             if old_price != payload.price_kzt:
                 price_change = (old_price, payload.price_kzt)
                 session.add(_snapshot(row.id, payload.price_kzt, payload.area_m2))
+            changes = changed_fields(before_observation, row)
+            if changes:
+                session.add(ListingObservation(listing_id=row.id, observed_at=now, changes=changes))
         await _sync_search_results(session, row, now, clear_unknown_mortgage=mortgage_cleared)
         if payload.source in {"krisha-import", "browser"} and payload.availability_status is not None:
             await set_source_availability(session, row.source_url, state=payload.availability_status, observed_at=now)
@@ -519,4 +524,6 @@ async def persist_listing(
             created=created,
             price_change=price_change,
         )
+    if notify:
+        await evaluate_target_alerts()
     return PersistedListing(row=row, created=created, price_change=price_change)

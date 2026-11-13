@@ -11,7 +11,7 @@ _PRICE_PATTERNS = (
 _AREA_PATTERN = re.compile(r"(?<![\d.,])(?P<value>\d{1,5}(?:[.,]\d+)?)\s*(?:м²|м2|кв\.?\s*м)", re.IGNORECASE)
 _ROOMS_PATTERN = re.compile(r"(?P<value>\d)\s*[-–]?\s*комнат", re.IGNORECASE)
 _FLOOR_PATTERN = re.compile(r"(?P<floor>\d{1,2})\s*(?:из|/|этаж\s+из)\s*(?P<total>\d{1,2})", re.IGNORECASE)
-_YEAR_PATTERN = re.compile(r"(?:год\s+постройки|построен\w*)\D{0,8}(?P<value>19\d{2}|20\d{2})", re.IGNORECASE)
+_YEAR_PATTERN = re.compile(r"(?:(?:год\s+постройки|построен\w*)\D{0,8}(?P<value>19\d{2}|20\d{2})|(?P<year_suffix>19\d{2}|20\d{2})\s*г\.?\s*п\.?)", re.IGNORECASE)
 _BATHROOM_PATTERN = re.compile(r"(?<![\d.,])(?P<before>\d{1,2})\s*(?:с\s*/\s*у|сануз(?:ел|л(?:а|ов)?))|(?:сануз(?:ел|л(?:а|ов)?)|с\s*/\s*у)\s*[:—-]\s*(?P<after>\d{1,2})(?![\d.,])", re.IGNORECASE)
 
 
@@ -69,7 +69,7 @@ def analyze_search_result(title: str, snippet: str | None, *, max_price: int, mi
 
     floor = int(floor_match.group("floor")) if floor_match else None
     floors_total = int(floor_match.group("total")) if floor_match else None
-    year = int(year_match.group("value")) if year_match else None
+    year = int(year_match.group("value") or year_match.group("year_suffix")) if year_match else None
 
     score = 40
     reasons: list[str] = []

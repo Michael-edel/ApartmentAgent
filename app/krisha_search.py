@@ -10,11 +10,11 @@ from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 
-from app.config import get_settings
+from app.config import SearchSettingsProxy
 from app.cities import city_slug
 from app.seller import IDENTITY_CONFIRMED_REALTOR
 
-settings = get_settings()
+settings = SearchSettingsProxy()
 
 _LISTING_LINK_RE = re.compile(
     r'href=["\'](?P<url>(?:https?://(?:www\.)?krisha\.kz)?/a/show/[^"\'#?\s]+)',

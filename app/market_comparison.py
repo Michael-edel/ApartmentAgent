@@ -7,7 +7,7 @@ from typing import Any, Iterable
 
 from app.cities import CITY_NAMES, city_slug, is_city_coordinate_pair
 from app.krisha_search import normalize_krisha_listing_url
-from app.property_duplicates import availability, group_listings, unique_offers, _timestamp
+from app.property_duplicates import Decisions, availability, group_listings, unique_offers, _timestamp
 from app.seller import seller_category
 
 LOOKBACK_DAYS = 90
@@ -104,7 +104,7 @@ def _distance_m(first: tuple[float, float], second: tuple[float, float]) -> floa
     return 2 * 6_371_000 * math.asin(math.sqrt(min(1.0, a)))
 
 
-def nearest_comparables(target: Any, rows: Iterable[Any], *, now: datetime) -> dict[str, Any]:
+def nearest_comparables(target: Any, rows: Iterable[Any], *, now: datetime, decisions: Decisions | None = None) -> dict[str, Any]:
     """Recent comparable saved cards, not a market-wide sample."""
     target_city = city_slug(target.city)
     city_known = target_city is not None
@@ -112,7 +112,7 @@ def nearest_comparables(target: Any, rows: Iterable[Any], *, now: datetime) -> d
     target_coords = _coordinates(target)
     same_complex: list[dict[str, Any]] = []
     nearby: list[dict[str, Any]] = []
-    groups = group_listings(rows, target=target)
+    groups = group_listings(rows, target=target, decisions=decisions)
     for group in groups:
         # A user-marked sold apartment must not be resurrected through another ad.
         if (not city_known or any(member.id == target.id for member in group)
@@ -146,14 +146,14 @@ def nearest_comparables(target: Any, rows: Iterable[Any], *, now: datetime) -> d
                                  if _coordinates(candidate) is not None), row)
         coords = _coordinates(location_row)
         distance = _distance_m(target_coords, coords) if target_coords and coords else None
+        offers = unique_offers(group, target=row, decisions=decisions)
         item = {'source_url': url, 'title': getattr(row, 'title', None),
                 'address': getattr(row, 'address', None), 'price_kzt': row.price_kzt,
                 'price_per_m2': round(row.price_kzt / row.area_m2), 'area_m2': row.area_m2,
                 'distance_m': round(distance) if distance is not None else None,
                 'location_source_listing_id': location_row.id if coords is not None else None,
                 'complex_source_listing_id': complex_row.id if _complex_name(getattr(complex_row, 'residential_complex', None)) else None,
-                'listing_id': row.id, 'offer_count': len(unique_offers(group, target=row)),
-                'offers': unique_offers(group, target=row)}
+                'listing_id': row.id, 'offer_count': len(offers), 'offers': offers}
         is_same_complex = bool(complex_name and _complex_name(getattr(complex_row, 'residential_complex', None)) == complex_name
                                and (distance is None or distance <= COMPARABLE_RADIUS_M))
         if is_same_complex:
@@ -181,7 +181,8 @@ def nearest_comparables(target: Any, rows: Iterable[Any], *, now: datetime) -> d
 
 def compare_saved_listings(target: Any, rows: Iterable[Any], *, now: datetime | None = None,
                            include_comparables: bool = False,
-                           comparable_rows: Iterable[Any] | None = None) -> dict[str, Any]:
+                           comparable_rows: Iterable[Any] | None = None,
+                           decisions: Decisions | None = None) -> dict[str, Any]:
     now = _utc(now or datetime.now(UTC))
     rows = list(rows)
     target_price = target.price_kzt / target.area_m2
@@ -231,5 +232,6 @@ def compare_saved_listings(target: Any, rows: Iterable[Any], *, now: datetime | 
         ),
     }
     if include_comparables:
-        result['comparables'] = nearest_comparables(target, comparable_rows if comparable_rows is not None else rows, now=now)
+        result['comparables'] = nearest_comparables(target, comparable_rows if comparable_rows is not None else rows,
+                                                    now=now, decisions=decisions)
     return result

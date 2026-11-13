@@ -8,20 +8,21 @@ from typing import Literal
 from sqlalchemy import func, select
 
 from app.availability import availability_key, set_source_availability, unavailable_urls
-from app.config import get_settings
+from app.config import get_settings, SearchSettingsProxy, search_settings_override
 from app.cities import CITY_NAMES, SearchCity, city_matches, city_slug
 from app.database import SessionLocal
 from app.importer import ListingArchived, ListingImportError, ListingUnavailable, import_krisha_listing
 from app.krisha_search import KrishaSearchBlocked, normalize_krisha_listing_url
 from app.listing_service import fill_seller_from_krisha_search, persist_listing, sync_search_result_facts
-from app.models import Listing, SearchHistory, SearchPreference, SearchResult
+from app.models import Listing, SearchHistory, SearchPreference, SearchProfile, SearchResult
 from app.mortgage import parse_mortgage_text
 from app.scoring import listing_river_bank
 from app.search_analysis import analyze_search_result, is_target_search_result, parse_bathrooms_count, bathrooms_is_lower_bound
 from app.search_providers import PROVIDERS, SearchItem
+from app.search_conditions import SearchConditions, evaluate_conditions, kitchen_area
 from app.seller import seller_category
 
-settings = get_settings()
+settings = SearchSettingsProxy()
 logger = logging.getLogger(__name__)
 _search_lock = asyncio.Lock()
 
@@ -94,6 +95,27 @@ def _matches_target(item: SearchItem) -> bool:
 def bathrooms_for_row(row: SearchResult) -> int | None:
     count = getattr(row, 'bathrooms_count', None)
     return count if count is not None else parse_bathrooms_count(f"{row.title or ''} {row.snippet or ''}")
+
+
+def conditions_for_listing(listing, conditions=None):
+    return evaluate_conditions(settings.search_conditions if conditions is None else conditions, floor=getattr(listing, 'floor', None),
+        floors_total=getattr(listing, 'floors_total', None), building_year=getattr(listing, 'building_year', None),
+        kitchen_m2=kitchen_area(getattr(listing, 'property_details', None)))
+
+
+def conditions_for_result(row, listing=None, conditions=None):
+    from app.search_analysis import _FLOOR_PATTERN, _YEAR_PATTERN
+    text = f"{row.title or ''} {row.snippet or ''}"
+    floor_match, year_match = _FLOOR_PATTERN.search(text), _YEAR_PATTERN.search(text)
+    floor = getattr(listing, 'floor', None) if listing else None
+    total = getattr(listing, 'floors_total', None) if listing else None
+    year = getattr(listing, 'building_year', None) if listing else None
+    kitchen = kitchen_area(getattr(listing, 'property_details', None)) if listing else None
+    return evaluate_conditions(settings.search_conditions if conditions is None else conditions,
+        floor=floor if floor is not None else int(floor_match.group('floor')) if floor_match else None,
+        floors_total=total if total is not None else int(floor_match.group('total')) if floor_match else None,
+        building_year=year if year is not None else int(year_match.group('value') or year_match.group('year_suffix')) if year_match else None,
+        kitchen_m2=kitchen if kitchen is not None else kitchen_area(text=text))
 
 
 def _row_matches_target(row: SearchResult) -> bool:
@@ -376,12 +398,12 @@ async def run_search(rooms: int | None = None, max_price_kzt: int | None = None,
                      min_bathrooms: int | None = None, exclude_pledged: bool | None = None,
                      *, max_area_m2_is_set: bool = False, seller: str | None = None,
                      min_price_kzt: int | None = None, min_price_kzt_is_set: bool = False,
-                     city: SearchCity | None = None) -> SearchSummary:
+                     city: SearchCity | None = None, conditions: dict | None = None) -> SearchSummary:
     async with _search_lock:
-        if max_area_m2_is_set or min_price_kzt_is_set or any(value is not None for value in (rooms, min_price_kzt, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms, exclude_pledged, city)):
+        if max_area_m2_is_set or min_price_kzt_is_set or any(value is not None for value in (rooms, min_price_kzt, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms, exclude_pledged, city, conditions)):
             await save_search_preference(rooms, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms, exclude_pledged,
                                          max_area_m2_is_set=max_area_m2_is_set, min_price_kzt=min_price_kzt,
-                                         min_price_kzt_is_set=min_price_kzt_is_set, city=city)
+                                         min_price_kzt_is_set=min_price_kzt_is_set, city=city, conditions=conditions)
         return await _run_search(seller=seller)
 
 
@@ -455,13 +477,50 @@ async def periodic_search(stop_event: asyncio.Event) -> None:
     interval_seconds = max(settings.search_interval_minutes, 15) * 60
     while not stop_event.is_set():
         try:
-            await run_search()
+            async with SessionLocal() as session:
+                preference = await session.get(SearchPreference, 1)
+                active_id = preference.active_profile_id if preference else None
+                active = await session.get(SearchProfile, active_id) if active_id else None
+                run_active = active is None or active.enabled
+            if run_active:
+                await run_search()
+            await run_monitored_profiles()
         except Exception:
             logger.exception("Periodic search failed")
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
         except TimeoutError:
             continue
+
+
+async def run_monitored_profiles() -> None:
+    from app.search_profiles import ProfileCriteria
+    async with SessionLocal() as session:
+        rows = (await session.scalars(select(SearchProfile).where(SearchProfile.enabled.is_(True)))).all()
+        preference = await session.get(SearchPreference, 1)
+        active_id = preference.active_profile_id if preference else None
+        profiles = [(row.id, row.criteria) for row in rows if row.id != active_id]
+    for profile_id, raw in profiles:
+        try:
+            criteria = ProfileCriteria.model_validate(raw)
+            override = get_settings().model_copy(deep=True, update={
+                'search_city': criteria.city, 'target_rooms': criteria.rooms,
+                'min_price_kzt': criteria.min_price_kzt, 'max_price_kzt': criteria.max_price_kzt,
+                'min_area_m2': criteria.min_area_m2, 'max_area_m2': criteria.max_area_m2,
+                'min_bathrooms': criteria.min_bathrooms, 'exclude_pledged': criteria.exclude_pledged,
+                'search_conditions': criteria.conditions.model_dump(),
+                # Import/notifications use active UI criteria; defer import until
+                # the profile is active rather than mixing two configurations.
+                'auto_import_enabled': False,
+            })
+            async with _search_lock:
+                token = search_settings_override.set(override)
+                try:
+                    await _run_search()
+                finally:
+                    search_settings_override.reset(token)
+        except Exception:
+            logger.exception('Monitored search profile %s failed', profile_id)
 
 
 async def get_search_status() -> dict[str, object]:
@@ -475,14 +534,17 @@ async def get_search_status() -> dict[str, object]:
         pledged_hidden = 0
         engine_counts: dict[str, int] = {}
         location_rows = (await session.execute(
-                select(Listing.id, Listing.city, Listing.latitude, Listing.longitude)
+                select(Listing.id, Listing.city, Listing.latitude, Listing.longitude, Listing.floor,
+                       Listing.floors_total, Listing.building_year, Listing.property_details)
             )).all()
-        locations = {listing_id: listing_river_bank(city, latitude, longitude)
-                     for listing_id, city, latitude, longitude in location_rows}
-        linked_cities = {listing_id: city for listing_id, city, _, _ in location_rows}
+        locations = {value.id: listing_river_bank(value.city, value.latitude, value.longitude) for value in location_rows}
+        linked = {value.id: value for value in location_rows}
         matching_rows = await session.stream_scalars(select(SearchResult))
         async for row in matching_rows:
-            if not city_matches(settings.search_city, getattr(row, "city", None), linked_cities.get(getattr(row, "imported_listing_id", None))):
+            card = linked.get(getattr(row, "imported_listing_id", None))
+            if not city_matches(settings.search_city, getattr(row, "city", None), card.city if card else None):
+                continue
+            if not conditions_for_result(row, card)['matches_hard']:
                 continue
             if availability_key(row.url) in unavailable:
                 continue
@@ -535,6 +597,7 @@ async def get_search_status() -> dict[str, object]:
 
     return {
         "city": settings.search_city,
+        "conditions": settings.search_conditions,
         "rooms": settings.target_rooms,
         "min_price_kzt": settings.min_price_kzt,
         "max_price_kzt": settings.max_price_kzt,
@@ -566,6 +629,8 @@ async def get_search_status() -> dict[str, object]:
 async def load_search_preference() -> None:
     async with SessionLocal() as session:
         preference = await session.get(SearchPreference, 1)
+        if preference and preference.conditions is not None:
+            settings.search_conditions = SearchConditions.model_validate(preference.conditions).model_dump()
         if preference and city_slug(preference.city):
             settings.search_city = city_slug(preference.city)
         if preference and preference.rooms in (2, 3, 4):
@@ -589,7 +654,9 @@ async def save_search_preference(rooms: int | None, max_price_kzt: int | None = 
                                  min_bathrooms: int | None = None, exclude_pledged: bool | None = None,
                                  *, max_area_m2_is_set: bool = False,
                                  min_price_kzt: int | None = None, min_price_kzt_is_set: bool = False,
-                                 city: SearchCity | None = None) -> None:
+                                 city: SearchCity | None = None, conditions: dict | None = None,
+                                 active_profile_id: int | None = None) -> None:
+    validated_conditions = SearchConditions.model_validate(conditions).model_dump() if conditions is not None else None
     if city is not None and city not in CITY_NAMES:
         raise ValueError("Неизвестный город поиска")
     update_min_price = min_price_kzt_is_set or min_price_kzt is not None
@@ -624,9 +691,14 @@ async def save_search_preference(rooms: int | None, max_price_kzt: int | None = 
             preference.exclude_pledged = exclude_pledged
         if city is not None:
             preference.city = city
+        if validated_conditions is not None:
+            preference.conditions = validated_conditions
+        preference.active_profile_id = active_profile_id
         await session.commit()
     if city is not None:
         settings.search_city = city
+    if validated_conditions is not None:
+        settings.search_conditions = validated_conditions
     if rooms is not None:
         settings.target_rooms = rooms
     if update_price:

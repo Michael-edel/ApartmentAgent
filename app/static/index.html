@@ -11,8 +11,9 @@
   <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
   <link rel="apple-touch-icon" href="/static/icon.svg">
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="/static/styles.css?v=152">
+  <link rel="stylesheet" href="/static/styles.css?v=153">
   <link rel="stylesheet" href="/static/listing-map.css?v=1">
+  <link rel="stylesheet" href="/static/listing-workflow.css?v=1">
   <style>.bookmarklet-code{width:100%;min-height:96px;resize:vertical;border:1px solid #d8e2ec;border-radius:12px;background:#f8fafc;color:#142033;padding:12px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}</style>
   <title>ApartmentAgent</title>
 </head>
@@ -95,6 +96,22 @@
       </label>
       <label class="checkbox search-price-control"><input id="searchBathrooms" type="checkbox"> От 2 санузлов</label>
       <label class="checkbox search-price-control"><input id="searchExcludePledged" type="checkbox" checked> Исключать квартиры в залоге</label>
+      <details class="search-preferences" id="searchPreferences"><summary>Дополнительные условия и предпочтения</summary>
+        <p class="microcopy">Обязательные условия исключают неподходящие варианты и объявления без подтверждённых данных. Предпочтения влияют на оценку.</p>
+        <label>Первый этаж<select id="conditionFirstFloor"><option value="off">Не учитывать</option><option value="hard">Исключать обязательно</option><option value="preference">Предпочитать другие этажи</option></select></label>
+        <label>Последний этаж<select id="conditionLastFloor"><option value="off">Не учитывать</option><option value="hard">Исключать обязательно</option><option value="preference">Предпочитать другие этажи</option></select></label>
+        <div class="form-grid"><label>Год постройки от<input id="conditionMinYear" type="number" min="1900" max="2100" step="1"></label><label>Режим<select id="conditionMinYearMode"><option value="off">Не учитывать</option><option value="hard">Обязательно</option><option value="preference">Предпочтение</option></select></label></div>
+        <div class="form-grid"><label>Год постройки до<input id="conditionMaxYear" type="number" min="1900" max="2100" step="1"></label><label>Режим<select id="conditionMaxYearMode"><option value="off">Не учитывать</option><option value="hard">Обязательно</option><option value="preference">Предпочтение</option></select></label></div>
+        <div class="form-grid"><label>Площадь кухни от, м²<input id="conditionKitchen" type="number" min="0.1" max="500" step="0.1"></label><label>Режим<select id="conditionKitchenMode"><option value="off">Не учитывать</option><option value="hard">Обязательно</option><option value="preference">Предпочтение</option></select></label></div>
+      </details>
+      <details class="search-preferences" id="searchProfiles"><summary>Профили поиска</summary>
+        <p class="microcopy">Сохраните критерии под именем и включите фоновый поиск. Активируйте профиль, чтобы применить его к основному поиску.</p>
+        <label>Профиль<select id="profileSelect"><option value="">Выберите профиль</option></select></label>
+        <label>Название<input id="profileName" maxlength="100" placeholder="Например, для семьи"></label>
+        <label class="checkbox"><input id="profileEnabled" type="checkbox"> Искать в фоне</label>
+        <div class="profile-actions"><button type="button" id="profileCreate">Сохранить новый</button><button type="button" id="profileUpdate">Сохранить имя и фон</button><button type="button" id="profileUpdateCriteria">Записать текущие критерии</button><button type="button" id="profileActivate">Применить</button><button type="button" id="profileDelete">Удалить</button></div>
+        <p id="profileMessage" class="form-message" role="status"></p>
+      </details>
       <label class="checkbox search-price-control"><input id="searchLeftBankOnly" type="checkbox"> Только левый берег в результатах</label>
       <p class="microcopy"><span id="bankCriteriaHint">Берег определяется по координатам объявления.</span> <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap</a></p>
       <p class="microcopy">Выберите город и другие критерии, затем нажмите «Искать сейчас». Они сохраняются для автоматических поисков. При отборе «От 2 санузлов» показываются только объявления с подтверждённым количеством.</p>
@@ -139,10 +156,13 @@
           <option value="area_asc">Сначала меньшая площадь</option>
           <option value="area_desc">Сначала большая площадь</option>
           <option value="seller">По типу продавца</option>
+          <option value="building_year_asc">Год постройки: сначала старые</option>
+          <option value="building_year_desc">Год постройки: сначала новые</option>
         </select>
         <button id="refreshSearchButton" class="icon-button" aria-label="Обновить результаты">↻</button>
       </div>
     </section>
+    <label class="checkbox"><input id="searchShowHidden" type="checkbox"> Показывать скрытые объявления</label>
     <section id="searchResults" class="listing-grid"></section>
 
     <section class="form-card card">
@@ -187,6 +207,8 @@
           <option value="price">Цена</option>
           <option value="pledge">Сначала без залога</option>
           <option value="seller">По типу продавца</option>
+          <option value="building_year_asc">Год постройки: сначала старые</option>
+          <option value="building_year_desc">Год постройки: сначала новые</option>
         </select>
         <select id="listingSellerFilter" aria-label="Тип продавца в сохранённых квартирах">
           <option value="all">Все продавцы</option>
@@ -205,6 +227,7 @@
     <label class="checkbox"><input id="listingShowPledged" type="checkbox"> Показать сохранённые квартиры в залоге</label>
     <label class="checkbox"><input id="listingLeftBankOnly" type="checkbox"> Только левый берег в сохранённых</label>
     <label class="checkbox"><input id="listingShowInactive" type="checkbox"> Показывать проданные и снятые</label>
+    <label class="checkbox"><input id="listingShowHidden" type="checkbox"> Показывать скрытые квартиры</label>
     <p id="listingPledgeSummary" class="microcopy" hidden></p>
     <p id="listingAvailabilitySummary" class="microcopy" hidden></p>
     <p id="listingAvailabilityMessage" class="microcopy availability-message" role="status"></p>
@@ -274,6 +297,9 @@
 
   <script src="/static/vendor/leaflet/leaflet.js" defer></script>
   <script src="/static/listing-map.js?v=3" defer></script>
-  <script src="/static/app.js?v=170" defer></script>
+  <script src="/static/listing-workflow.js?v=1" defer></script>
+  <script src="/static/listing-tracking.js?v=1" defer></script>
+  <script src="/static/search-profiles.js?v=1" defer></script>
+  <script src="/static/app.js?v=171" defer></script>
 </body>
 </html>

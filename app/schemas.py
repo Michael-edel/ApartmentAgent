@@ -148,6 +148,10 @@ class PriceSnapshotResponse(BaseModel):
 
 class ListingResponse(ListingCreate):
     id: int
+    hidden: bool = False
+    hidden_duplicate: bool = False
+    workflow_stage: Literal['new', 'call', 'viewing', 'viewed', 'rejected'] = 'new'
+    matches_search_conditions: bool = True
     river_bank: Literal['left', 'right', 'unknown'] = 'unknown'
     liked: bool = False
     availability: Literal['active', 'sold', 'archived', 'unavailable'] = 'active'

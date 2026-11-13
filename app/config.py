@@ -1,7 +1,8 @@
 from functools import lru_cache
+from contextvars import ContextVar
 from typing import Annotated
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from app.cities import SearchCity
 
@@ -23,6 +24,7 @@ class Settings(BaseSettings):
 
     search_enabled: bool = True
     search_city: SearchCity = 'astana'
+    search_conditions: dict = Field(default_factory=dict)
     target_rooms: int = 2
     search_interval_minutes: int = 15
     search_queries_per_run: int = 8
@@ -83,3 +85,15 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+search_settings_override: ContextVar[Settings | None] = ContextVar('search_settings_override', default=None)
+
+
+class SearchSettingsProxy:
+    """Task-local search settings without changing the active UI settings."""
+    def __getattr__(self, name):
+        return getattr(search_settings_override.get() or get_settings(), name)
+
+    def __setattr__(self, name, value):
+        setattr(search_settings_override.get() or get_settings(), name, value)

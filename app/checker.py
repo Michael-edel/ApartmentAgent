@@ -9,6 +9,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.importer import ListingArchived, ListingImportError, ListingUnavailable, import_krisha_listing
 from app.listing_service import persist_listing
+from app.listing_tracking import evaluate_target_alerts
 from app.models import Listing, ListingCheck
 
 logger = logging.getLogger(__name__)
@@ -137,6 +138,10 @@ async def check_all_listings() -> CheckSummary:
 
         await asyncio.sleep(2)
 
+    try:
+        await evaluate_target_alerts()
+    except Exception:
+        logger.exception("Target price evaluation failed")
     return summary
 
 

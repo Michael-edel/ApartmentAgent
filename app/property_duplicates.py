@@ -7,10 +7,14 @@ from datetime import UTC, datetime
 from typing import Any, Iterable
 from urllib.parse import urlsplit, urlunsplit
 
+from sqlalchemy import select
+
 from app.krisha_search import normalize_krisha_listing_url
+from app.models import DuplicateDecision
 from app.seller import seller_category
 
 AREA_DIFFERENCE_M2 = 0.5
+Decisions = dict[tuple[int, int], str]
 _KRISHA_PHOTO = re.compile(
     r'^/webp/(?P<shard>[0-9a-f]{2})/(?P<uuid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/'
     r'(?P<index>\d+)-\d{1,5}x\d{1,5}\.webp$', re.IGNORECASE,
@@ -59,9 +63,39 @@ def _photos(row: Any) -> set[str]:
     return result
 
 
-def duplicate_evidence(first: Any, second: Any) -> dict[str, Any] | None:
+def decision_key(first_id: int, second_id: int) -> tuple[int, int]:
+    return min(first_id, second_id), max(first_id, second_id)
+
+
+async def load_duplicate_decisions(session) -> Decisions:
+    rows = await session.execute(select(DuplicateDecision.first_id, DuplicateDecision.second_id, DuplicateDecision.decision))
+    return {(a, b): decision for a, b, decision in rows}
+
+
+def confirmed_component(listing_id: int, decisions: Decisions) -> set[int]:
+    neighbours: dict[int, set[int]] = {}
+    for (left, right), decision in decisions.items():
+        if decision == 'same':
+            neighbours.setdefault(left, set()).add(right)
+            neighbours.setdefault(right, set()).add(left)
+    found = {listing_id}
+    pending = [listing_id]
+    while pending:
+        new = neighbours.get(pending.pop(), set()) - found
+        found.update(new)
+        pending.extend(new)
+    return found
+
+
+def duplicate_evidence(first: Any, second: Any, *, decisions: Decisions | None = None) -> dict[str, Any] | None:
     if canonical_url(first.source_url) == canonical_url(second.source_url):
         return {'kind': 'same_url', 'shared_photos': 0}
+    if decisions:
+        decision = decisions.get(decision_key(first.id, second.id))
+        if decision == 'same':
+            return {'kind': 'confirmed', 'shared_photos': 0}
+        if decision == 'different':
+            return None
     first_city, second_city = (getattr(first, 'city', None) or '').strip().casefold(), (getattr(second, 'city', None) or '').strip().casefold()
     if first_city and second_city and first_city != second_city:
         return None
@@ -103,8 +137,8 @@ def _timestamp(row: Any) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
-def group_listings(rows: Iterable[Any], *, target: Any | None = None) -> list[list[Any]]:
-    """Build cliques: every member must directly match all others, never bridge."""
+def group_listings(rows: Iterable[Any], *, target: Any | None = None, decisions: Decisions | None = None) -> list[list[Any]]:
+    """Group confirmed links first. Automatic matches must agree with every member."""
     values = list(rows)
     if target is not None:
         values = [row for row in values if row.id != target.id]
@@ -112,14 +146,31 @@ def group_listings(rows: Iterable[Any], *, target: Any | None = None) -> list[li
     if target is not None:
         values.insert(0, target)
     groups: list[list[Any]] = []
+    included: set[int] = set()
     for row in values:
+        if row.id in included:
+            continue
+        linked = confirmed_component(row.id, decisions) if decisions else {row.id}
+        cluster = [member for member in values if member.id in linked] if len(linked) > 1 else [row]
+        included.update(member.id for member in cluster)
         for group in groups:
-            if all(duplicate_evidence(row, member) is not None for member in group):
-                group.append(row)
+            if all(duplicate_evidence(candidate, member, decisions=decisions) is not None
+                   for candidate in cluster for member in group):
+                group.extend(cluster)
                 break
         else:
-            groups.append([row])
+            groups.append(cluster)
     return groups
+
+
+def duplicate_hidden_ids(rows: Iterable[Any], hidden_urls: set[str], decisions: Decisions) -> set[int]:
+    if not hidden_urls:
+        return set()
+    listings = list(rows)
+    hidden = [row for row in listings if canonical_url(row.source_url) in hidden_urls]
+    confirmed = {listing_id for row in hidden for listing_id in confirmed_component(row.id, decisions)}
+    return {row.id for row in listings if canonical_url(row.source_url) not in hidden_urls
+            and (row.id in confirmed or any(duplicate_evidence(row, other, decisions=decisions) for other in hidden))}
 
 
 def availability(row: Any) -> str:
@@ -129,17 +180,24 @@ def availability(row: Any) -> str:
                                 getattr(row, 'source_unavailable_at', None))
 
 
-def offer(row: Any, *, target: Any | None = None) -> dict[str, Any]:
-    evidence = duplicate_evidence(target, row) if target is not None and row.id != target.id else None
+def offer(row: Any, *, target: Any | None = None, decisions: Decisions | None = None) -> dict[str, Any]:
+    evidence = None
+    if target is not None and row.id != target.id:
+        if decisions and row.id in confirmed_component(target.id, decisions):
+            evidence = {'kind': 'confirmed', 'shared_photos': 0}
+        else:
+            evidence = duplicate_evidence(target, row, decisions=decisions)
+    photos = getattr(row, 'photo_urls', None) or []
     return {'listing_id': row.id, 'source_url': canonical_url(row.source_url),
             'title': getattr(row, 'title', None), 'price_kzt': row.price_kzt,
+            'photo_url': next(iter(photos), None), 'area_m2': getattr(row, 'area_m2', None),
             'seller_type': getattr(row, 'seller_type', None),
             'seller_category': seller_category(getattr(row, 'seller_type', None)),
             'availability': availability(row), 'is_current': bool(target is not None and row.id == target.id),
             'evidence': evidence}
 
 
-def unique_offers(group: Iterable[Any], *, target: Any | None = None) -> list[dict[str, Any]]:
+def unique_offers(group: Iterable[Any], *, target: Any | None = None, decisions: Decisions | None = None) -> list[dict[str, Any]]:
     """Collapse only URL spelling variants; preserve distinct ads and prices."""
     seen: set[str] = set()
     result: list[dict[str, Any]] = []
@@ -150,5 +208,5 @@ def unique_offers(group: Iterable[Any], *, target: Any | None = None) -> list[di
         key = canonical_url(row.source_url)
         if key not in seen:
             seen.add(key)
-            result.append(offer(row, target=target))
+            result.append(offer(row, target=target, decisions=decisions))
     return result

@@ -5,6 +5,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -27,6 +28,42 @@ class ListingLike(Base):
     url: Mapped[str] = mapped_column(Text, primary_key=True)
 
 
+class ListingWorkflow(Base):
+    __tablename__ = "listing_workflows"
+
+    url: Mapped[str] = mapped_column(Text, primary_key=True)
+    stage: Mapped[str] = mapped_column(String(20), default="new")
+    note: Mapped[str] = mapped_column(Text, default="")
+    viewing_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    hidden: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class DuplicateDecision(Base):
+    __tablename__ = "duplicate_decisions"
+    __table_args__ = (CheckConstraint("first_id < second_id"), CheckConstraint("decision IN ('same', 'different')"))
+
+    first_id: Mapped[int] = mapped_column(ForeignKey("listings.id", ondelete="CASCADE"), primary_key=True)
+    second_id: Mapped[int] = mapped_column(ForeignKey("listings.id", ondelete="CASCADE"), primary_key=True)
+    decision: Mapped[str] = mapped_column(String(10))
+
+
+class Destination(Base):
+    __tablename__ = "destinations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    address: Mapped[str] = mapped_column(String(500))
+
+
+class SearchProfile(Base):
+    __tablename__ = "search_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    criteria: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
 class SearchPreference(Base):
     __tablename__ = "search_preferences"
 
@@ -39,6 +76,8 @@ class SearchPreference(Base):
     max_area_m2: Mapped[float | None] = mapped_column(Float, nullable=True)
     min_bathrooms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     exclude_pledged: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    active_profile_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    conditions: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
 
 class Listing(Base):
@@ -125,6 +164,24 @@ class PriceSnapshot(Base):
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     listing: Mapped[Listing] = relationship(back_populates="prices")
+
+
+class ListingObservation(Base):
+    __tablename__ = 'listing_observations'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    listing_id: Mapped[int] = mapped_column(ForeignKey('listings.id', ondelete='CASCADE'), index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    changes: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class ListingTargetPrice(Base):
+    __tablename__ = 'listing_target_prices'
+
+    listing_id: Mapped[int] = mapped_column(ForeignKey('listings.id', ondelete='CASCADE'), primary_key=True)
+    target_price_kzt: Mapped[int] = mapped_column(BigInteger)
+    include_similar: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ListingCheck(Base):

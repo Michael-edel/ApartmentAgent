@@ -10,6 +10,8 @@ const listingLeftBankOnly = document.querySelector('#listingLeftBankOnly');
 let listingsRevision = 0;
 const listingShowPledged = document.querySelector('#listingShowPledged');
 const listingShowInactive = document.querySelector('#listingShowInactive');
+const listingShowHidden = document.querySelector('#listingShowHidden');
+const searchShowHidden = document.querySelector('#searchShowHidden');
 const listingAvailabilitySummary = document.querySelector('#listingAvailabilitySummary');
 const listingAvailabilityMessage = document.querySelector('#listingAvailabilityMessage');
 const listingPledgeSummary = document.querySelector('#listingPledgeSummary');
@@ -136,6 +138,7 @@ let bathroomCheckSignature = null;
 let bathroomCheckRevision = 0;
 let bathroomCheckFeedback = '';
 let savedUrls = new Set();
+let allSavedListings = [];
 let savedListingIds = new Map();
 
 function escapeHtml(value='') {
@@ -598,9 +601,43 @@ function sortListings(listings) {
     if (sort === 'score') return right.assessment.score - left.assessment.score || right.id - left.id;
     if (sort === 'price_m2') return left.assessment.price_per_m2 - right.assessment.price_per_m2 || left.id - right.id;
     if (sort === 'price') return left.price_kzt - right.price_kzt || left.id - right.id;
+    if (sort === 'building_year_asc' || sort === 'building_year_desc') {
+      const a = Number.isFinite(left.building_year), b = Number.isFinite(right.building_year);
+      if (a !== b) return a ? -1 : 1;
+      if (a && left.building_year !== right.building_year) return (sort === 'building_year_asc' ? 1 : -1) * (left.building_year - right.building_year);
+      return newestFirst(left, right);
+    }
     return newestFirst(left, right);
   };
   return items.sort(compare);
+}
+
+function hiddenControls(item, kind) {
+  const id = Number(item.id);
+  if (!Number.isSafeInteger(id) || id < 1) return '';
+  const hidden = item.hidden === true;
+  const warning = item.hidden_duplicate ? '<p class="meta" role="note">Похоже на скрытую квартиру. Проверьте совпадение.</p>' : '';
+  return `${warning}<button type="button" class="secondary-action" data-hide-kind="${kind}" data-hide-id="${id}" data-hidden="${hidden}">${hidden ? 'Вернуть в список' : 'Скрыть'}</button>`;
+}
+
+async function changeHidden(button) {
+  const id = Number(button.dataset.hideId), kind = button.dataset.hideKind;
+  if (!Number.isSafeInteger(id) || id < 1 || !['listing', 'search'].includes(kind)) return;
+  const hidden = button.dataset.hidden !== 'true';
+  const url = kind === 'listing' ? `/api/v1/listings/${id}/workflow` : `/api/v1/search/results/${id}/hidden`;
+  const oldText = button.textContent;
+  button.disabled = true; button.textContent = 'Сохраняю…';
+  try {
+    const response = await fetch(url, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({hidden})});
+    if (!response.ok) throw new Error('Не удалось изменить видимость');
+    await loadListings();
+    await Promise.all([loadSearchStatus(), loadSearchResults()]);
+  } catch {
+    button.disabled = false; button.textContent = oldText;
+    const alert = document.createElement('span'); alert.className = 'form-message'; alert.setAttribute('role', 'alert');
+    alert.textContent = 'Не удалось изменить видимость. Повторите попытку.';
+    button.insertAdjacentElement('afterend', alert);
+  }
 }
 
 function comparisonSummary(label, values, minSamples) {
@@ -650,18 +687,26 @@ function renderComparison(data) {
     <small>Срез: ${escapeHtml(dateLabel)}. Цена предложения; объявления могут быть подобраны по вашим фильтрам.</small>`;
 }
 
-function renderDuplicateOffers(offers, currentId) {
+function renderDuplicateOffers(offers, currentId, rejected = false) {
   return `<ul class="duplicate-offers">${offers.map(offer => {
     const url = safeExternalUrl(offer.source_url);
     const title = escapeHtml(offer.address || offer.title || 'Объявление');
     const price = Number.isFinite(offer.price_kzt) ? money.format(offer.price_kzt) : 'Цена не указана';
     const evidence = offer.evidence?.kind === 'shared_photos'
       ? `Общих фото: ${number.format(offer.evidence.shared_photos)}`
-      : offer.evidence?.kind === 'same_house_floor_area' ? 'Тот же дом и этаж, близкая площадь' : '';
+      : offer.evidence?.kind === 'same_house_floor_area' ? 'Тот же дом и этаж, близкая площадь' : offer.evidence?.kind === 'confirmed' ? 'Совпадение подтверждено вами' : '';
+    const otherId = Number(offer.listing_id);
+    const canDecide = Number.isSafeInteger(currentId) && Number.isSafeInteger(otherId) && otherId > 0 && otherId !== currentId;
+    const photo = safeExternalUrl(offer.photo_url);
+    const transitive = offer.evidence?.kind === 'confirmed' && offer.decision !== 'same';
+    const actions = canDecide && !transitive ? `<div class="duplicate-decisions">${rejected || offer.decision === 'same'
+      ? `<button type="button" data-duplicate-other="${otherId}" data-decision="clear">Отменить решение</button>`
+      : `<button type="button" data-duplicate-other="${otherId}" data-decision="same">Одна квартира</button><button type="button" data-duplicate-other="${otherId}" data-decision="different">Разные квартиры</button>`}</div>` : '';
     return `<li>${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${title} ↗</a>` : title}
+      ${photo ? `<img src="${escapeHtml(photo)}" alt="Фото объявления" loading="lazy" referrerpolicy="no-referrer" class="duplicate-photo">` : ''}
       <div class="duplicate-facts"><b>${escapeHtml(price)}</b>${sellerBadge(offer)}${availabilityBadge(offer)}
       ${offer.listing_id === currentId ? '<span class="meta">Это объявление</span>' : ''}</div>
-      ${evidence ? `<small class="meta">${escapeHtml(evidence)}</small>` : ''}</li>`;
+      ${evidence ? `<small class="meta">${escapeHtml(evidence)}${transitive ? ' через другие объявления' : ''}</small>` : ''}${actions}</li>`;
   }).join('')}</ul>`;
 }
 
@@ -725,9 +770,16 @@ async function loadDuplicateOffers(details) {
     if (!response.ok) throw new Error('Не удалось загрузить дубли');
     const data = await readJson(response);
     if (!details.isConnected) return;
-    content.innerHTML = data.items.length > 1
-      ? `<p class="comparable-criteria">Вероятное совпадение · ${number.format(data.items.length)} в группе</p>${renderDuplicateOffers(data.items, data.listing_id)}`
-      : '<p class="comparable-criteria">В сохранённых карточках вероятных дублей пока нет.</p>';
+    const currentId = Number(data.listing_id);
+    const items = Array.isArray(data.items) ? data.items : [];
+    const rejected = Array.isArray(data.rejected) ? data.rejected : [];
+    const choices = allSavedListings.filter(item => Number(item.id) !== currentId).map(item => `<option value="${Number(item.id)}">${escapeHtml(item.title || 'Квартира')} · ${escapeHtml(money.format(item.price_kzt))}</option>`).join('');
+    content.innerHTML = `${items.length > 1
+      ? `<p class="comparable-criteria">Проверьте объявления в группе: совпадение может быть ошибочным.</p>${renderDuplicateOffers(items, currentId)}`
+      : '<p class="comparable-criteria">В сохранённых карточках вероятных дублей пока нет.</p>'}
+      ${rejected.length ? `<details><summary>Отмечены как разные (${rejected.length})</summary>${renderDuplicateOffers(rejected, currentId, true)}</details>` : ''}
+      ${choices ? `<label>Сравнить с другой сохранённой квартирой<select data-duplicate-manual><option value="">Выберите квартиру</option>${choices}</select></label><div class="duplicate-decisions"><button type="button" data-duplicate-manual-decision="same">Одна квартира</button><button type="button" data-duplicate-manual-decision="different">Разные квартиры</button></div>` : ''}
+      <p class="form-message" data-duplicate-message role="status"></p>`;
     content.dataset.state = 'loaded';
   } catch {
     if (!details.isConnected) return;
@@ -748,7 +800,34 @@ grid?.addEventListener('click', event => {
   if (retryDuplicates) void loadDuplicateOffers(retryDuplicates.closest('details[data-duplicates-id]'));
   const sale = event.target.closest('[data-sale-id]');
   if (sale) void changeSaleStatus(sale);
+  const hide = event.target.closest('[data-hide-id]');
+  if (hide) void changeHidden(hide);
+  const decision = event.target.closest('[data-duplicate-other], [data-duplicate-manual-decision]');
+  if (decision) void decideDuplicate(decision);
 });
+
+async function decideDuplicate(button) {
+  const details = button.closest('details[data-duplicates-id]');
+  const content = details?.querySelector('[data-duplicates-content]');
+  if (!details || !content) return;
+  const id = Number(details.dataset.duplicatesId);
+  const other = Number(button.dataset.duplicateOther || content.querySelector('[data-duplicate-manual]')?.value);
+  const choice = button.dataset.decision || button.dataset.duplicateManualDecision;
+  const message = content.querySelector('[data-duplicate-message]');
+  if (!Number.isSafeInteger(other) || other < 1 || other === id) { if (message) message.textContent = 'Выберите другую квартиру.'; return; }
+  if (!['same', 'different', 'clear'].includes(choice)) return;
+  button.disabled = true;
+  try {
+    const response = await fetch(`/api/v1/listings/${id}/duplicates/${other}`, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({decision:choice === 'clear' ? null : choice})});
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(typeof body.detail === 'string' ? body.detail : 'Не удалось сохранить решение.');
+    }
+    delete content.dataset.state;
+    await loadDuplicateOffers(details);
+  } catch (error) { if (message) message.textContent = error.message || 'Не удалось сохранить решение. Повторите попытку.'; }
+  finally { button.disabled = false; }
+}
 
 async function loadComparisons(previous = null) {
   const nodes = [...(grid?.querySelectorAll('.price-comparison[data-listing-id]') || [])];
@@ -773,6 +852,7 @@ async function loadComparisons(previous = null) {
 }
 
 function render(listings) {
+  allSavedListings = Array.isArray(listings) ? listings : [];
   const openDetails = new Set();
   grid?.querySelectorAll('article[id^="listing-"] details[data-details-key][open]').forEach(detail => {
     openDetails.add(`${detail.closest('article').id}:${detail.dataset.detailsKey}`);
@@ -787,6 +867,7 @@ function render(listings) {
     && (seller === 'all' || (item.seller_category || 'unknown') === seller)
     && (!listingLeftBankOnly?.checked || item.river_bank === 'left')
     && (listingShowInactive?.checked || !inactive(item) || String(item.id) === pinnedId)
+    && (listingShowHidden?.checked || item.hidden !== true || String(item.id) === pinnedId)
     && (listingShowPledged?.checked || item.is_pledged !== true || String(item.id) === pinnedId));
   const hiddenInactive = listingShowInactive?.checked ? 0 : listings.filter(item => inactive(item) && String(item.id) !== pinnedId).length;
   if (listingAvailabilitySummary) {
@@ -811,6 +892,8 @@ function render(listings) {
       ? '<section class="empty card"><strong>Нет квартир с выбранным типом продавца</strong><p>Выберите «Все продавцы», чтобы увидеть остальные карточки.</p></section>'
       : hiddenPledged && hiddenPledged === listings.length
       ? '<section class="empty card"><strong>Все сохранённые квартиры в залоге</strong><p>Включите «Показать сохранённые квартиры в залоге», чтобы посмотреть их.</p></section>'
+      : listings.length && listings.every(item => item.hidden === true) && !listingShowHidden?.checked
+      ? '<section class="empty card"><strong>Сохранённые квартиры скрыты</strong><p>Включите «Показывать скрытые квартиры», чтобы вернуть их.</p></section>'
       : listings.length
       ? '<section class="empty card"><strong>Нет квартир с выбранным рейтингом</strong><p>Выберите «Все», чтобы увидеть остальные квартиры.</p></section>'
       : '<section class="empty card"><strong>Сохранённых квартир пока нет</strong><p>Добавьте квартиру вручную или импортируйте объявление.</p></section>';
@@ -851,6 +934,10 @@ function render(listings) {
       <div class="meta">${item.rooms} комн. · ${number.format(item.area_m2)} м² · ${money.format(item.assessment.price_per_m2)}/м² · этаж ${item.floor || '—'}/${item.floors_total || '—'}</div>
       <div class="listing-bank">${riverBankBadge(item)}${availabilityBadge(item)}</div>
       ${likeControl(item, 'listings')}
+      ${hiddenControls(item, 'listing')}
+      ${window.ApartmentAgentWorkflow?.render(item) || ''}
+      ${window.ApartmentAgentTracking?.render(item) || ''}
+      ${item.matches_search_conditions === false ? '<p class="meta" role="note">Не проходит обязательные условия</p>' : ''}
       <section class="price-comparison" data-listing-id="${Number(item.id)}" aria-label="Сравнение цены за квадратный метр">Загружаю сравнение цены…</section>
       <details class="listing-comparables" data-details-key="closest-comparables" data-comparables-id="${Number(item.id)}"><summary>Ближайшие аналоги</summary><div data-comparables-content></div></details>
       <details class="listing-comparables" data-details-key="duplicate-offers" data-duplicates-id="${Number(item.id)}"><summary>Вероятные дубли</summary><div data-duplicates-content></div></details>
@@ -876,6 +963,7 @@ function render(listings) {
       ${latestChange ? `<div class="price-change ${latestChange < 0 ? 'down' : 'up'}">${latestChange < 0 ? '↓' : '↑'} ${money.format(Math.abs(latestChange))} между последними записями</div>` : ''}
       <details class="price-history" data-details-key="price-history"><summary>История цены (${history.length})</summary>${history.length ? `<ol>${history.map(snapshot => `<li>${escapeHtml(dateTime.format(new Date(snapshot.observed_at)))} — ${escapeHtml(money.format(snapshot.price_kzt))}${snapshot.change_kzt ? ` (${snapshot.change_kzt > 0 ? '+' : '−'}${escapeHtml(money.format(Math.abs(snapshot.change_kzt)))})` : ''}</li>`).join('')}</ol>` : '<p>Пока нет записей о цене.</p>'}</details>
       <span class="verdict">${escapeHtml(item.assessment.verdict)}</span>
+      <details class="listing-comparables" data-details-key="score-reasons"><summary>Почему такая оценка</summary>${Array.isArray(item.assessment.reasons) && item.assessment.reasons.length ? `<ul>${item.assessment.reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join('')}</ul>` : '<p class="meta">Нет дополнительных замечаний к критериям.</p>'}</details>
       ${ai.summary ? `<div class="ai-summary"><b>AI-анализ</b><p>${escapeHtml(ai.summary)}</p></div>` : ''}
       <div class="listing-actions"><button class="check-listing secondary-action" data-listing-id="${item.id}" type="button">↻ Проверить квартиру</button>
         <button class="panel-action sale-action" data-sale-id="${Number(item.id)}" data-mark-sold="${item.availability !== 'sold'}" type="button">${item.availability === 'sold' ? 'Снять отметку «Продана»' : 'Отметить проданной'}</button></div>
@@ -1019,6 +1107,7 @@ async function loadSearchResults() {
   const revision = ++searchResultsRevision;
   const seller = searchSellerFilter?.value || 'all';
   const params = new URLSearchParams({limit:'200', only_new:'false', sort:searchResultsSort?.value || 'newest', seller});
+  if (searchShowHidden?.checked) params.set('include_hidden', 'true');
   const leftBankOnly = searchLeftBankOnly?.checked;
   if (leftBankOnly) params.set('bank', 'left');
   try {
@@ -1073,6 +1162,7 @@ async function loadSearchResults() {
         </div>
         <div class="search-facts">${facts.map(value => `<span>${escapeHtml(value)}</span>`).join('')}${typeof a.is_pledged === 'boolean' ? (a.is_pledged ? pledgeBadge(a) : '<span>Нет залога</span>') : ''}${bathroomBadge(a, true)}${sellerBadge(item)}${riverBankBadge(item)}</div>
         ${likeControl(item, 'search/results')}
+        ${hiddenControls(item, 'search')}
         ${reasons ? `<ul class="reason-list">${reasons}</ul>` : `<p class="meta">${escapeHtml(item.snippet || 'Откройте объявление для проверки параметров.')}</p>`}
         <div class="meta source-meta">Источник: ${escapeHtml(item.search_engine)} · обнаружено ${dateTime.format(new Date(item.first_seen))}</div>
         <div class="card-actions">
@@ -1094,6 +1184,11 @@ searchResultsSort?.addEventListener('change', () => { void loadSearchResults(); 
 searchSellerFilter?.addEventListener('change', () => { void loadSearchResults(); });
 searchLeftBankOnly?.addEventListener('change', () => { void loadSearchResults(); });
 searchResults?.addEventListener('change', changeLike);
+searchShowHidden?.addEventListener('change', () => { void loadSearchResults(); });
+searchResults?.addEventListener('click', event => {
+  const hide = event.target.closest('[data-hide-id]');
+  if (hide) void changeHidden(hide);
+});
 grid?.addEventListener('change', changeLike);
 
 function monitorBeforeOpen(link) {
@@ -1117,6 +1212,7 @@ async function loadSearchStatus() {
     const response = await fetch('/api/v1/search/status');
     if (!response.ok) throw new Error('Не удалось получить статус поиска');
     const status = await readJson(response);
+    window.ApartmentAgentProfiles?.apply(status.conditions);
     if (cityNames.has(status.city)) {
       activeSearchCity = status.city;
       if (searchCity && !searchCityInitialized) searchCity.value = status.city;
@@ -1202,13 +1298,16 @@ runSearchButton?.addEventListener('click', async () => {
     if (searchMessage) searchMessage.textContent = 'Минимальная площадь не может быть больше максимальной.';
     return;
   }
+  let conditions;
+  try { conditions = window.ApartmentAgentProfiles?.read(); }
+  catch (error) { if (searchMessage) searchMessage.textContent = error.message; return; }
   runSearchButton.disabled = true;
   const ownerOnly = searchSellerFilter?.value === 'owner';
   if (searchMessage) searchMessage.textContent = 'Проверяю поисковую выдачу…';
   try {
     const response = await fetch('/api/v1/search/run', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({city:searchCity?.value || 'astana', rooms:Number(searchRooms?.value || 2), min_price_kzt:minimumPrice, max_price_kzt:maximumPrice, min_area_m2:Number(searchMinArea.value), max_area_m2:maximumArea, min_bathrooms:searchBathrooms?.checked ? 2 : 0, exclude_pledged:searchExcludePledged?.checked ?? true, ...(ownerOnly ? {seller:'owner'} : {})})
+      body:JSON.stringify({city:searchCity?.value || 'astana', rooms:Number(searchRooms?.value || 2), min_price_kzt:minimumPrice, max_price_kzt:maximumPrice, min_area_m2:Number(searchMinArea.value), max_area_m2:maximumArea, min_bathrooms:searchBathrooms?.checked ? 2 : 0, exclude_pledged:searchExcludePledged?.checked ?? true, ...(conditions ? {conditions} : {}), ...(ownerOnly ? {seller:'owner'} : {})})
     });
     const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось выполнить поиск');
@@ -1335,6 +1434,7 @@ listingSellerFilter?.addEventListener('change', () => { void loadListings({reuse
 listingLeftBankOnly?.addEventListener('change', () => { void loadListings({reuseComparisons:true}); });
 listingShowPledged?.addEventListener('change', loadListings);
 listingShowInactive?.addEventListener('change', () => { void loadListings({reuseComparisons:true}); });
+listingShowHidden?.addEventListener('change', () => { void loadListings({reuseComparisons:true}); });
 setupLikedComparison();
 document.querySelector('#openListingsMap')?.addEventListener('click', () => {
   if (!window.ApartmentAgentMap) {

@@ -8,11 +8,11 @@ from xml.etree import ElementTree
 
 import httpx
 
-from app.config import get_settings
+from app.config import SearchSettingsProxy
 from app.cities import CITY_NAMES
 from app.krisha_search import search_krisha_direct as fetch_krisha_direct
 
-settings = get_settings()
+settings = SearchSettingsProxy()
 
 
 @dataclass(slots=True)
