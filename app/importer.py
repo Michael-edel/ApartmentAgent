@@ -244,6 +244,21 @@ def _seller_fields(parser: _BathroomFieldHTMLParser, data: list[Any]) -> tuple[s
             node = node.parent
         return within_card
 
+    def seller_text(node: _FieldNode) -> str:
+        # A seller panel can contain nested recommendations or descriptions.
+        # Do not let their text supply the current seller's identity or role.
+        chunks, pending = [], list(reversed(node.children))
+        while pending:
+            child = pending.pop()
+            if isinstance(child, str):
+                chunks.append(child)
+            elif (not child.hidden() and not _in_foreign_context(child)
+                  and child.attrs.get("data-testid") not in {"description", "advert-description"}
+                  and child.attrs.get("itemprop") != "description"
+                  and "offer__description" not in (child.attrs.get("class") or "").split()):
+                pending.extend(reversed(child.children))
+        return re.sub(r"\s+", " ", " ".join(chunks)).strip()
+
     name = None
     names = []
     roles = {}
@@ -251,10 +266,21 @@ def _seller_fields(parser: _BathroomFieldHTMLParser, data: list[Any]) -> tuple[s
     identity_confirmed = False
     for node in nodes:
         testid = node.attrs.get("data-testid")
+        parent = node
+        in_description = False
+        while parent is not None:
+            if (parent.attrs.get("data-testid") in {"description", "advert-description"}
+                    or parent.attrs.get("itemprop") == "description"
+                    or "offer__description" in (parent.attrs.get("class") or "").split()):
+                in_description = True
+                break
+            parent = parent.parent
+        if in_description:
+            continue
         if testid not in {"seller-name", "seller-type"} and not in_seller_card(node):
             continue
         classes = set((node.attrs.get("class") or "").split())
-        value = node.text()
+        value = seller_text(node)
         is_name = (testid == "seller-name" or node.attrs.get("itemprop") == "name"
                    or classes & {"owner__name", "owners__name"})
         evidence = [value, *(node.attrs.get(attr) or "" for attr in ("title", "aria-label", "alt"))]

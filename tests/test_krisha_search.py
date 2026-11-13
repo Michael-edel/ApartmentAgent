@@ -7,6 +7,7 @@ from app.search_providers import is_allowed_listing_url
 from urllib.parse import parse_qs, urlparse
 import pytest
 from app.krisha_search import settings
+from app.seller import IDENTITY_CONFIRMED_REALTOR, seller_category
 
 
 @pytest.mark.parametrize(('minimum', 'expected'), [
@@ -84,3 +85,45 @@ def test_search_cards_pair_title_with_their_own_price() -> None:
 
 def test_search_provider_rejects_lookalike_host() -> None:
     assert is_allowed_listing_url("https://notkrisha.kz/a/show/123") is False
+
+
+def test_seller_labels_belong_to_their_exact_search_cards():
+    html = '''
+    <div class="a-card" data-id="1013785707"><div class="a-card__main-info">
+      <a class="a-card__title" href="/a/show/1013785707">4-комнатная квартира 99.7 м²</a>
+    </div><div class="a-card__footer user-owner"><span><div class="label label-user-owner">
+      Хозяин недвижимости</div></span></div></div>
+    <div class="a-card" data-id="1016787987"><div class="a-card__main-info">
+      <a class="a-card__title" href="/a/show/1016787987">4-комнатная квартира 100 м²</a>
+    </div><div class="a-card__footer user-specialist"><div class="a-card__owner user-label-identified-specialist">
+      <span class="a-card__owner-label"><div class="label label--transparent label-user-identified-specialist">
+      <i></i> Специалист</div></span></div></div></div>
+    <div class="a-card" data-id="333"><div class="a-card__main-info">
+      <a class="a-card__title" href="/a/show/333">3-комнатная квартира 85 м²</a>
+    </div><div class="a-card__footer user-complex"><div class="label-user-identified-specialist">Специалист</div></div></div>
+    <div class="a-card" data-id="444"><div class="a-card__main-info">
+      <a class="a-card__title" href="/a/show/445">3-комнатная квартира 85 м²</a>
+    </div><div class="a-card__footer user-specialist"><div class="label-user-identified-specialist">Специалист</div></div></div>
+    <div class="a-card" data-id="555"><div class="a-card__main-info">
+      <a class="a-card__title" href="/a/show/555">3-комнатная квартира 85 м²</a>
+    </div><div class="a-card__footer user-specialist"><div class="label-user-identified-specialist">Другой текст</div></div></div>
+    <div class="a-card" data-id="666"><div class="a-card__main-info">
+      <a class="a-card__title" href="/a/show/666">3-комнатная квартира 85 м²</a>
+    </div><div class="label-user-owner">Хозяин недвижимости</div>
+      <div class="a-card__footer user-specialist"><div class="label-user-identified-specialist">Специалист</div></div></div>
+    '''
+    roles = {item.url.rsplit('/', 1)[-1]: item.seller_type for item in parse_krisha_search_page(html)}
+    assert roles['1013785707'] == 'Хозяин недвижимости'
+    assert roles['1016787987'] == IDENTITY_CONFIRMED_REALTOR
+    assert seller_category(roles['1016787987']) == 'realtor'
+    assert all(roles[key] is None for key in ('333', '445', '555', '666'))
+
+
+def test_conflicting_duplicate_search_cards_do_not_confirm_owner():
+    html = '''
+    <div class="a-card" data-id="111"><a class="a-card__title" href="/a/show/111">Квартира</a>
+      <div class="label-user-owner">Хозяин недвижимости</div></div>
+    <div class="a-card" data-id="111"><a class="a-card__title" href="/a/show/111">Квартира</a>
+      <div class="a-card__footer user-specialist"><div class="label-user-identified-specialist">Специалист</div></div></div>
+    '''
+    assert parse_krisha_search_page(html)[0].seller_type is None

@@ -11,12 +11,13 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.importer import ListingArchived, ListingImportError, ListingUnavailable, import_krisha_listing
 from app.krisha_search import KrishaSearchBlocked, normalize_krisha_listing_url
-from app.listing_service import persist_listing, sync_search_result_facts
+from app.listing_service import fill_seller_from_krisha_search, persist_listing, sync_search_result_facts
 from app.models import Listing, SearchHistory, SearchPreference, SearchResult
 from app.mortgage import parse_mortgage_text
 from app.scoring import listing_river_bank
 from app.search_analysis import analyze_search_result, is_target_search_result, parse_bathrooms_count, bathrooms_is_lower_bound
 from app.search_providers import PROVIDERS, SearchItem
+from app.seller import seller_category
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -151,13 +152,16 @@ async def _save_items(
         } if accepted_items else {}
         for item in accepted_items:
             existing = await session.scalar(select(SearchResult).where(SearchResult.url == item.url))
-            seller_type = item.seller_type if provider_name == "krisha_direct" and item.seller_type == "Хозяин недвижимости" else None
+            krisha_url = normalize_krisha_listing_url(item.url) if provider_name == "krisha_direct" else None
+            seller_type = item.seller_type if krisha_url and seller_category(item.seller_type) != "unknown" else None
+            if krisha_url and seller_type:
+                await fill_seller_from_krisha_search(session, krisha_url, seller_type)
             is_pledged = known_pledges.get(normalize_krisha_listing_url(item.url) or item.url)
             bathrooms_count = parse_bathrooms_count(f"{item.title or ''} {item.snippet or ''}")
             mortgage_supported = parse_mortgage_text(f"{item.title or ''}\n{item.snippet or ''}")
             if existing:
                 existing.last_seen = now
-                if provider_name == "krisha_direct":
+                if seller_type:
                     existing.seller_type = seller_type
                 listing = (await session.get(Listing, existing.imported_listing_id)
                            if existing.imported_listing_id is not None else None)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai_service import analyze_listing
@@ -19,6 +19,7 @@ from app.repair import parse_repair_description
 from app.mortgage import mortgage_value, parse_mortgage_claim
 from app.importer import clean_listing_address
 from app.scoring import assess_listing
+from app.seller import seller_category
 from app.telegram import notify_listing
 from app.twogis import lookup_twogis
 
@@ -189,6 +190,24 @@ async def _sync_search_results(session: AsyncSession, listing: Listing, now: dat
         sync_search_result_facts(result, listing, clear_unknown_mortgage=clear_unknown_mortgage)
 
 
+async def _discovered_seller(session: AsyncSession, source_url: str) -> str | None:
+    # Search results may have first been found by another provider. Only the
+    # direct Krisha search populates their structured seller field.
+    roles = {result.seller_type for result in await _matching_search_results(session, source_url)
+             if seller_category(result.seller_type) != "unknown"}
+    return next(iter(roles)) if len(roles) == 1 else None
+
+
+async def fill_seller_from_krisha_search(session: AsyncSession, url: str, role: str) -> None:
+    """Fill a missing seller role from the matching public Krisha search card."""
+    await session.execute(
+        update(Listing).where(
+            Listing.source_url == url,
+            or_(Listing.seller_type.is_(None), Listing.seller_type.in_(("", OWNER_FROM_DESCRIPTION))),
+        ).values(seller_type=role, updated_at=Listing.updated_at)
+    )
+
+
 async def backfill_pledge_status() -> int:
     """Apply saved pledge facts without changing other import data."""
     changed = 0
@@ -342,6 +361,12 @@ async def persist_listing(
 
     async with SessionLocal() as session:
         row = await _find_listing(session, str(values["source_url"]))
+        if (not explicit_seller_type and payload.source in {"krisha-import", "browser"}
+                and (row is None or row.seller_type in {None, "", OWNER_FROM_DESCRIPTION})):
+            observed = await _discovered_seller(session, str(values["source_url"]))
+            if observed is not None:
+                explicit_seller_type = observed
+                values["seller_type"] = observed
         created = row is None
         if row is None:
             row = Listing(**values, last_imported_at=now)

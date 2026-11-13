@@ -33,6 +33,19 @@ def test_seller_role_comes_from_current_author_card(card, expected, category):
     assert seller_category(OWNER_FROM_DESCRIPTION) == "unknown"
 
 
+def test_seller_fields_ignore_description_and_nested_recommendations():
+    parser, _ = _public_details('''
+        <div class="offer__description"><span data-testid="seller-type">Крыша Агент</span>
+          <span data-testid="seller-name">Постороннее имя</span></div>
+        <section class="owners"><h3 class="owners__name">Текущий автор</h3>
+          <p>Специалист</p><div class="recommended">
+            <span>Специалист подтвердил личность документами</span>
+          </div>
+        </section>
+    ''')
+    assert _seller_fields(parser, []) == ("Текущий автор", "Специалист")
+
+
 @pytest.mark.asyncio
 async def test_seller_and_mortgage_survive_partial_reimport(monkeypatch):
     pytest.importorskip('aiosqlite')

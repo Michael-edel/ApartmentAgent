@@ -231,6 +231,18 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
   assert.equal(roleCase('Автор объявления Специалист','Специалист',null,[{getAttribute(name) { return name === 'aria-label' ? 'Крыша Агент' : null; }}]).seller_type,'Крыша Агент',file);
   assert.equal(extract(file, common, {sellerType:'Крыша Агент'}).seller_type,'Крыша Агент',file);
   assert.equal(extract(file, `${common} Крыша Агент`, {sellerType:'Хозяин'}).seller_type,'Хозяин',`${file}: listing text must not supply seller role`);
+  // Krisha's public author panel may render a seller name and role as siblings,
+  // without a dedicated seller-type attribute on the role element.
+  const nestedAuthor = (panelText, roleText) => {
+    const panel = {className:'owners__card', textContent:panelText, parentElement:{tagName:'ASIDE'}};
+    const role = {tagName:'SPAN',textContent:roleText,parentElement:panel};
+    panel.querySelectorAll = selector => selector.startsWith('span') ? [role] : [];
+    return extract(file,common,null,null,null,null,undefined,null,null,{nodes:{'[data-testid="seller"]':[panel]}});
+  };
+  assert.equal(nestedAuthor('Автор объявления Капарова Дана Специалист Специалист подтвердил личность документами','Специалист').seller_type,
+    'Специалист — личность подтверждена', `${file}: role in visible author descendants`);
+  assert.equal(nestedAuthor('Автор объявления Хозяин недвижимости Ответил риелтор? Сообщите нам','Хозяин недвижимости').seller_type,
+    'Хозяин недвижимости', `${file}: owner must not become realtor from complaint text`);
   const employerNode = {className:'seller-address',textContent:'Работает в компании Royal Invest'};
   const exactHeadline = '4-комнатная квартира · 106.4 м² · 3/9 этаж, Кудайбердыулы 36/3 — Район Встречи';
   const employerBeforeHeadline = extract(file, common,null,null,null,null,undefined,null,null,{

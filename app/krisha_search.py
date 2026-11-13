@@ -11,6 +11,7 @@ from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 import httpx
 
 from app.config import get_settings
+from app.seller import IDENTITY_CONFIRMED_REALTOR
 
 settings = get_settings()
 
@@ -55,18 +56,20 @@ class KrishaSearchItem:
     seller_type: str | None = None
 
 
-class _OwnerCardParser(HTMLParser):
-    """Associate an explicit owner label with its own search card only."""
+class _SellerCardParser(HTMLParser):
+    """Associate an explicit seller label with its own search card only."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.owner_urls: set[str] = set()
+        self.roles: dict[str, set[str]] = {}
         self.depth = 0
         self.label_depth: int | None = None
         self.label_text: list[str] = []
+        self.label_kind: str | None = None
+        self.specialist_footer_depth: int | None = None
         self.card_id: str | None = None
         self.title_url: str | None = None
-        self.owner = False
+        self.card_roles: set[str] = set()
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "a" and self.depth:
@@ -82,12 +85,16 @@ class _OwnerCardParser(HTMLParser):
             card_id = attributes.get("data-id") or ""
             if not re.fullmatch(r"[1-9]\d{0,14}", card_id):
                 return
-            self.card_id, self.depth, self.owner, self.title_url = card_id, 1, False, None
+            self.card_id, self.depth, self.card_roles, self.title_url = card_id, 1, set(), None
             return
         if self.depth:
             self.depth += 1
+            if "a-card__footer" in classes and "user-specialist" in classes:
+                self.specialist_footer_depth = self.depth
             if "label-user-owner" in classes:
-                self.label_depth, self.label_text = self.depth, []
+                self.label_depth, self.label_text, self.label_kind = self.depth, [], 'owner'
+            elif "label-user-identified-specialist" in classes and self.specialist_footer_depth is not None:
+                self.label_depth, self.label_text, self.label_kind = self.depth, [], 'specialist'
 
     def handle_data(self, data: str) -> None:
         if self.label_depth is not None:
@@ -97,12 +104,19 @@ class _OwnerCardParser(HTMLParser):
         if tag != "div" or not self.depth:
             return
         if self.depth == self.label_depth:
-            self.owner = " ".join(" ".join(self.label_text).split()).casefold() == "хозяин недвижимости"
+            label = " ".join(" ".join(self.label_text).split()).casefold()
+            if self.label_kind == 'owner' and label == 'хозяин недвижимости':
+                self.card_roles.add('Хозяин недвижимости')
+            elif self.label_kind == 'specialist' and label == 'специалист':
+                self.card_roles.add(IDENTITY_CONFIRMED_REALTOR)
             self.label_depth = None
+            self.label_kind = None
+        if self.depth == self.specialist_footer_depth:
+            self.specialist_footer_depth = None
         self.depth -= 1
         if not self.depth:
-            if self.owner and self.card_id and self.title_url == f"https://krisha.kz/a/show/{self.card_id}":
-                self.owner_urls.add(self.title_url)
+            if self.card_roles and self.card_id and self.title_url == f"https://krisha.kz/a/show/{self.card_id}":
+                self.roles.setdefault(self.title_url, set()).update(self.card_roles)
             self.card_id = None
 
 
@@ -299,11 +313,11 @@ def parse_krisha_search_page(html: str) -> list[KrishaSearchItem]:
         else:
             by_url[item.url] = item
 
-    owners = _OwnerCardParser()
-    owners.feed(html)
-    for url in owners.owner_urls:
-        if url in by_url:
-            by_url[url].seller_type = "Хозяин недвижимости"
+    sellers = _SellerCardParser()
+    sellers.feed(html)
+    for url, roles in sellers.roles.items():
+        if url in by_url and len(roles) == 1:
+            by_url[url].seller_type = next(iter(roles))
 
     return list(by_url.values())
 

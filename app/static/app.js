@@ -376,7 +376,7 @@ function availabilityBadge(item) {
 }
 
 const sellerRoles = new Map([
-  ['owner', {label:'Собственник', order:0}],
+  ['owner', {label:'Хозяин недвижимости', order:0}],
   ['verified_agent', {label:'Крыша Агент', order:1}],
   ['realtor', {label:'Риелтор', order:2}],
   ['unknown', {label:'Тип продавца не указан', order:3}],
