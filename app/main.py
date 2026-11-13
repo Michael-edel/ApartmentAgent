@@ -29,6 +29,7 @@ from app.listing_service import ListingAlreadyExists, _find_listing, _matching_s
 from app.market_comparison import LOOKBACK_DAYS, compare_saved_listings
 from app.market_type import MarketFilter, matches_market_type
 from app.olx import normalize_olx_listing_url, olx_advert_id
+from app import olx
 from app.krisha_search import normalize_krisha_listing_url
 from app.models import BathroomCheckControl, BathroomCheckJob, BathroomCheckTask, DuplicateDecision, Listing, ListingCheck, ListingLike, ListingTargetPrice, ListingWorkflow, PriceSnapshot, SearchHistory, SearchResult
 from app.listing_tracking import tracking_summary
@@ -45,13 +46,12 @@ from app.workflow import hidden_urls, router as workflow_router
 
 settings = get_settings()
 _duplicate_lock = asyncio.Lock()
-_olx_import_lock = asyncio.Lock()
 _DUPLICATE_COLUMNS = (
     Listing.id, Listing.source_url, Listing.title, Listing.city, Listing.address, Listing.rooms,
     Listing.area_m2, Listing.floor, Listing.floors_total, Listing.bathrooms_count,
     Listing.bathrooms_count_is_lower_bound, Listing.photo_urls, Listing.price_kzt, Listing.seller_type,
     Listing.sold_at, Listing.source_archived_at, Listing.source_unavailable_at,
-    Listing.last_imported_at, Listing.created_at, Listing.updated_at,
+    Listing.last_imported_at, Listing.created_at, Listing.updated_at, Listing.description,
 )
 
 
@@ -198,7 +198,8 @@ async def _finish_search_result_monitor(result_id: int, source_url: str) -> None
             expected_city = result_city_slug(result.city) if result is not None else None
         if expected_city not in SEARCH_CITIES:
             raise ListingImportError("Город объявления не входит в выбранные города поиска.")
-        payload = await import_krisha_listing(source_url)
+        payload = (await olx.import_olx_listing(source_url, expected_city=expected_city)
+                   if olx_advert_id(source_url) else await import_krisha_listing(source_url))
         observed = city_slug(payload.city)
         if (payload.city_observed or observed != "astana") and observed != expected_city:
             raise ListingImportError("Город объявления отличается от города в выдаче.")
@@ -331,8 +332,7 @@ async def import_olx_listing(payload: ListingCreate) -> ListingResponse:
     values = {"source": "manual", "source_url": HttpUrl(url), "city": CITY_NAMES[city],
               "krisha_district_price_per_m2": None, "krisha_city_price_per_m2": None,
               "krisha_comparison_district": None}
-    async with _olx_import_lock:
-        return await _save_listing(payload.model_copy(update=values), allow_existing=True)
+    return await _save_listing(payload.model_copy(update=values), allow_existing=True)
 
 
 @app.post(
@@ -341,8 +341,10 @@ async def import_olx_listing(payload: ListingCreate) -> ListingResponse:
     status_code=status.HTTP_201_CREATED,
 )
 async def import_listing(payload: ListingImportRequest) -> ListingResponse:
+    source_url = str(payload.source_url)
     try:
-        listing_data = await import_krisha_listing(str(payload.source_url))
+        listing_data = (await olx.import_olx_listing(source_url) if olx_advert_id(source_url)
+                        else await import_krisha_listing(source_url))
     except (ListingArchived, ListingUnavailable) as exc:
         source_state = "archived" if isinstance(exc, ListingArchived) else "unavailable"
         async with SessionLocal() as session:
@@ -662,11 +664,10 @@ async def search_map(
         unavailable = await unavailable_urls(session)
         hidden = await hidden_urls(session)
         saved_rows = (await session.execute(select(
-            Listing.id, Listing.source_url, Listing.title, Listing.city, Listing.address,
-            Listing.district, Listing.latitude, Listing.longitude, Listing.rooms, Listing.area_m2,
-            Listing.price_kzt, Listing.bathrooms_count, Listing.is_pledged, Listing.seller_type,
-            Listing.floor, Listing.floors_total, Listing.building_year, Listing.property_details, Listing.market_type,
+            *_DUPLICATE_COLUMNS, Listing.district, Listing.latitude, Listing.longitude, Listing.is_pledged,
+            Listing.building_year, Listing.property_details, Listing.market_type,
         ).order_by(Listing.created_at.desc(), Listing.id.desc()))).all()
+        cross_platform_ids = cross_platform_listing_ids(saved_rows, await load_duplicate_decisions(session))
         saved: dict[str, Any] = {}
         for row in saved_rows:
             saved.setdefault(_favorite_key(row.source_url), row)
@@ -717,6 +718,7 @@ async def search_map(
             river_bank = listing_river_bank(listing.city, listing.latitude, listing.longitude)
             if bank == 'left' and river_bank != 'left':
                 continue
+            platform = 'olx' if olx_advert_id(key) else 'krisha' if normalize_krisha_listing_url(key) else None
             items.append({
                 'source_url': key, 'title': listing.title, 'latitude': listing.latitude,
                 'longitude': listing.longitude, 'price_kzt': listing.price_kzt,
@@ -724,6 +726,7 @@ async def search_map(
                 'market_type': actual_market,
                 'listing_id': listing.id, 'search_result_id': result.id if result else None,
                 'river_bank': river_bank, 'seller_category': category,
+                'platform': platform, 'cross_platform': listing.id in cross_platform_ids,
             })
         elif result is not None:
             if not city_matches(selected_city, result.city) or not _row_matches_target(result):
@@ -1041,7 +1044,7 @@ async def listing_comparison(listing_id: int, include_comparables: bool = False)
                     Listing.latitude, Listing.longitude, Listing.floor, Listing.floors_total,
                     Listing.bathrooms_count, Listing.bathrooms_count_is_lower_bound, Listing.photo_urls, Listing.seller_type,
                     Listing.sold_at, Listing.source_archived_at, Listing.source_unavailable_at,
-                    Listing.updated_at, Listing.created_at)
+                    Listing.updated_at, Listing.created_at, Listing.description)
     async with SessionLocal() as session:
         target = (await session.execute(select(*columns).where(Listing.id == listing_id))).first()
         if target is None:

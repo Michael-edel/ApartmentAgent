@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import re
+from difflib import SequenceMatcher
 from datetime import UTC, datetime
 from typing import Any, Iterable
 from urllib.parse import urlsplit, urlunsplit
@@ -63,6 +64,29 @@ def _photos(row: Any) -> set[str]:
         # Query parameters may identify an image, so preserve them.
         result.add(urlunsplit((parsed.scheme.casefold(), parsed.netloc.casefold(), parsed.path, parsed.query, '')))
     return result
+
+
+def first_floor_present(first: Any, second: Any) -> bool:
+    a, b = getattr(first, 'floor', None), getattr(second, 'floor', None)
+    return isinstance(a, int) and not isinstance(a, bool) and a > 0 and a == b
+
+
+def _shared_description(first: Any, second: Any) -> bool:
+    """Require long, nearly identical seller text across the two official sites."""
+    def tokens(value: Any) -> list[str]:
+        if not isinstance(value, str):
+            return []
+        # Limit work on untrusted text while retaining the offer's description.
+        return re.findall(r"[^\W_]+", value[:12000].casefold().replace('ё', 'е'), re.UNICODE)[:1200]
+
+    left, right = tokens(getattr(first, 'description', None)), tokens(getattr(second, 'description', None))
+    if min(len(left), len(right)) < 60:
+        return False
+    # Matching contiguous wording and high overlap resist ordinary boilerplate.
+    matches = SequenceMatcher(None, left, right, autojunk=False).get_matching_blocks()
+    overlap = sum(match.size for match in matches)
+    longest = max(match.size for match in matches)
+    return longest >= 35 and overlap >= 60 and overlap / min(len(left), len(right)) >= 0.8
 
 
 def decision_key(first_id: int, second_id: int) -> tuple[int, int]:
@@ -137,6 +161,12 @@ def duplicate_evidence(first: Any, second: Any, *, decisions: Decisions | None =
             house2 = name2
     if house1 and house2 and house1 != house2:
         return None
+    first_krisha = bool(normalize_krisha_listing_url(first.source_url))
+    second_krisha = bool(normalize_krisha_listing_url(second.source_url))
+    cross_platform = (first_krisha and bool(second_olx)) or (second_krisha and bool(first_olx))
+    if (cross_platform and first_city and second_city and first_floor_present(first, second)
+            and _shared_description(first, second)):
+        return {'kind': 'shared_description', 'shared_photos': 0}
     shared = len(_photos(first) & _photos(second))
     if shared >= 2:
         return {'kind': 'shared_photos', 'shared_photos': shared}

@@ -12,7 +12,7 @@ from app.importer import ListingArchived, ListingImportError, ListingUnavailable
 from app.listing_service import persist_listing
 from app.listing_tracking import evaluate_target_alerts
 from app.models import Listing, ListingCheck
-from app.olx import olx_advert_id
+from app.olx import import_olx_listing, olx_advert_id
 
 logger = logging.getLogger(__name__)
 
@@ -52,13 +52,14 @@ async def check_listing(listing_id: int) -> ListingCheckResult:
         old_price = row.price_kzt
         saved_city = city_slug(row.city)
 
-    if olx_advert_id(source_url):
-        return ListingCheckResult(listing_id, "manual", "Обновите цену вручную в карточке OLX.", old_price, None)
-
     try:
         if saved_city not in SEARCH_CITIES:
             raise ListingImportError("Поддерживаются Астана и Экибастуз.")
-        fresh = await import_krisha_listing(source_url)
+        if olx_advert_id(source_url):
+            fresh = await import_olx_listing(source_url, expected_city=saved_city)
+            fresh = fresh.model_copy(update={"availability_status": "active"})
+        else:
+            fresh = await import_krisha_listing(source_url)
         observed = city_slug(fresh.city)
         if (fresh.city_observed or observed != "astana") and observed != saved_city:
             raise ListingImportError("Город объявления отличается от сохранённого города.")
@@ -134,7 +135,7 @@ async def check_all_listings(*, city: SearchCity = "astana") -> CheckSummary:
         rows = await session.execute(
             select(Listing.id, Listing.city, Listing.source_url).where(Listing.sold_at.is_(None)).order_by(Listing.id)
         )
-        listing_ids = [row.id for row in rows if city_slug(row.city) == city and not olx_advert_id(row.source_url)]
+        listing_ids = [row.id for row in rows if city_slug(row.city) == city]
 
     for listing_id in listing_ids:
         summary.checked += 1

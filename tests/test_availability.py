@@ -8,6 +8,7 @@ from app import checker, listing_service, main, search_agent
 from app.availability import restore_verified_check_history
 from app.importer import ListingArchived, ListingImportError, ListingUnavailable
 from app.models import BathroomCheckControl, BathroomCheckJob, BathroomCheckTask, Base, Listing, ListingCheck, ListingLike, SearchResult
+from app.schemas import ListingCreate
 
 
 def advert(number: int) -> str:
@@ -82,6 +83,7 @@ async def test_saved_city_scope_and_browser_import(sessions):
 @pytest.mark.asyncio
 async def test_manual_olx_update_and_cross_site_duplicate(sessions, monkeypatch):
     olx_url = "https://www.olx.kz/d/obyavlenie/2h-komnatnaya-kvvrtira-67-kv-m-IDr7f0E.html"
+    variant = "https://olx.kz/kk/d/obyavlenie/novoe-nazvanie-IDr7f0E.html"
     krisha_url = "https://krisha.kz/a/show/1015478864"
     monkeypatch.setattr(main.settings, "search_city", "astana")
     monkeypatch.setattr(main.settings, "market_type", "all")
@@ -95,11 +97,23 @@ async def test_manual_olx_update_and_cross_site_duplicate(sessions, monkeypatch)
         session.add(SearchResult(url=krisha_url, city="astana", imported_listing_id=krisha_id,
                                  search_engine="fixture", query="",
                                  title="2-комнатная квартира, 67,1 м², 35 500 000 тг"))
+        session.add(SearchResult(url=variant, city="astana", search_engine="olx_direct", query="",
+                                 title="2-комнатная квартира, 67 м², 36 000 000 тг"))
 
     async def unexpected_fetch(*args, **kwargs):
-        pytest.fail("OLX manual import and checks must not fetch an OLX page")
+        pytest.fail("OLX must not call the Krisha importer")
+
+    fetched = []
+
+    async def fetch_olx(url, *, expected_city):
+        fetched.append((url, expected_city))
+        return ListingCreate(source="olx-import", source_url=variant, city="Астана", city_observed=True,
+                             title="2-комнатная квартира на Ауэзова 22", address="ул. Ауэзова 22",
+                             rooms=2, area_m2=67, floor=5, floors_total=9, price_kzt=35_700_000,
+                             availability_status="active")
 
     monkeypatch.setattr(checker, "import_krisha_listing", unexpected_fetch)
+    monkeypatch.setattr(checker, "import_olx_listing", fetch_olx)
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         path = "/api/v1/listings/olx-import"
@@ -117,21 +131,24 @@ async def test_manual_olx_update_and_cross_site_duplicate(sessions, monkeypatch)
         card_path = f'/api/v1/listings/{card["id"]}'
         assert card["cross_platform"] is True
         assert (await client.get(card_path)).json()["cross_platform"] is True
-        assert (await client.get("/api/v1/search/results")).json()[0]["cross_platform"] is True
+        found = (await client.get("/api/v1/search/results")).json()
+        assert {result["imported_listing_id"] for result in found} == {card["id"], krisha_id}
+        assert all(result["cross_platform"] for result in found)
         duplicates = (await client.get(card_path + "/duplicates")).json()
         assert {offer["source_url"]: offer["price_kzt"] for offer in duplicates["items"]} == {
             olx_url: 36_000_000, krisha_url: 35_500_000,
         }
         assert duplicates["items"][1]["evidence"]["kind"] == "same_house_floor_area"
-        assert (await client.post(card_path + "/check")).json()["status"] == "manual"
-
         # Simulate a user entering a new price from the same ad using an updated slug.
-        variant = "https://olx.kz/kk/d/obyavlenie/novoe-nazvanie-IDr7f0E.html"
         saved = (await client.post(path, json={**data, "source_url": variant, "price_kzt": 35_900_000})).json()
         assert saved["id"] == card["id"] and saved["price_kzt"] == 35_900_000
+        assert fetched == []
+        checked = (await client.post(card_path + "/check")).json()
+        assert checked["status"] == "price_changed" and checked["new_price_kzt"] == 35_700_000
+        assert fetched == [(olx_url, "astana")]
         assert len((await client.get("/api/v1/listings?city=astana")).json()) == 2
         prices = (await client.get(card_path + "/price-history")).json()
-        assert [item["price_kzt"] for item in prices] == [35_900_000, 36_000_000]
+        assert [item["price_kzt"] for item in prices] == [35_700_000, 35_900_000, 36_000_000]
         decision_path = card_path + f"/duplicates/{krisha_id}"
         assert (await client.put(decision_path, json={"decision": "different"})).status_code == 200
         assert not any(item["cross_platform"] for item in (await client.get("/api/v1/listings")).json())
@@ -175,7 +192,7 @@ async def test_sold_and_source_status_hide_inactive_offers_without_losing_saved_
     async with sessions.begin() as session:
         session.add_all([listing(11), listing(12), listing(13)])
         for number in (11, 12, 13, 14):
-            session.add(SearchResult(url=f"http://www.krisha.kz/a/show/{number}/?q=legacy",
+            session.add(SearchResult(url=f"http://www.krisha.kz/a/show/{number}/?q=legacy", city="astana",
                                      search_engine="fixture", query="", title="2-комнатная квартира, 60 м², 25 млн тг"))
 
     async def source_error(url):

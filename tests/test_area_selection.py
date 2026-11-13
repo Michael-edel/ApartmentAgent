@@ -72,7 +72,7 @@ async def test_maximum_area_can_be_cleared_and_persists_across_reload(monkeypatc
     async with sessions() as session:
         session.add(SearchPreference(id=1, rooms=2))
         for advert, area in ((123, 160), (124, 50)):
-            session.add(SearchResult(url=f"https://krisha.kz/a/show/{advert}", search_engine="fixture",
+            session.add(SearchResult(url=f"https://krisha.kz/a/show/{advert}", city="astana", search_engine="fixture",
                                      query="fixture", title=f"2-комнатная квартира, {area} м², 29 млн тг"))
         await session.commit()
     await search_agent.load_search_preference()

@@ -29,12 +29,12 @@ async def test_seller_filters_before_limit_in_both_lists(monkeypatch):
                           price_kzt=30_000_000, seller_type='Хозяин недвижимости')
         session.add(listing)
         await session.flush()
-        session.add(SearchResult(url=listing.source_url, search_engine='test', query='test',
+        session.add(SearchResult(city='astana', url=listing.source_url, search_engine='test', query='test',
                                  title='2-комнатная квартира 70 м² 30000000 ₸', status='new:normal',
                                  imported_listing_id=listing.id, first_seen=stamp))
         # Older matching owner must remain discoverable behind more than 200 unknowns.
         for index in range(205):
-            session.add(SearchResult(url=f'https://krisha.kz/a/show/{1000 + index}', search_engine='test',
+            session.add(SearchResult(city='astana', url=f'https://krisha.kz/a/show/{1000 + index}', search_engine='test',
                                      query='test', title='2-комнатная квартира 70 м² 30000000 ₸ от хозяина',
                                      status='new:normal', first_seen=stamp + timedelta(seconds=index + 1)))
         await session.commit()
@@ -74,10 +74,10 @@ async def test_verified_discovery_role_is_used_only_without_explicit_linked_role
                               price_kzt=30_000_000, seller_type=linked_role)
             session.add(listing)
             await session.flush()
-            session.add(SearchResult(url=listing.source_url, search_engine='krisha_direct', query='test',
+            session.add(SearchResult(city='astana', url=listing.source_url, search_engine='krisha_direct', query='test',
                                      title='2-комнатная квартира 70 м² 30000000 ₸', status='new:normal',
                                      seller_type='Хозяин недвижимости', imported_listing_id=listing.id))
-        session.add(SearchResult(url='https://krisha.kz/a/show/500', search_engine='krisha_direct', query='test',
+        session.add(SearchResult(city='astana', url='https://krisha.kz/a/show/500', search_engine='krisha_direct', query='test',
                                  title='2-комнатная квартира 70 м² 30000000 ₸', status='new:normal',
                                  seller_type='Хозяин недвижимости'))
         await session.commit()

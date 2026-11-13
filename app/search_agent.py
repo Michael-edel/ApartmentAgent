@@ -16,6 +16,9 @@ from app.krisha_search import KrishaSearchBlocked, normalize_krisha_listing_url
 from app.listing_service import fill_seller_from_krisha_search, persist_listing, sync_search_result_facts
 from app.models import Listing, SearchHistory, SearchPreference, SearchProfile, SearchResult
 from app.mortgage import parse_mortgage_text
+from app import olx
+from app.property_duplicates import canonical_url
+from app.schemas import ListingCreate
 from app.scoring import listing_river_bank
 from app.search_analysis import analyze_search_result, is_target_search_result, parse_bathrooms_count, bathrooms_is_lower_bound
 from app.search_providers import PROVIDERS, SearchItem
@@ -28,7 +31,7 @@ logger = logging.getLogger(__name__)
 _search_lock = asyncio.Lock()
 
 DISTRICTS = ["Есильский район", "Нура район", "Алматы район", "Сарыарка район", "Байконур район"]
-QUERYLESS_PROVIDERS = {"krisha_direct"}
+QUERYLESS_PROVIDERS = {"krisha_direct", "olx_direct"}
 
 
 class InvalidSearchArea(ValueError):
@@ -57,6 +60,7 @@ class SearchImportCandidate:
     result_id: int
     url: str
     city: SearchCity = "astana"
+    payload: ListingCreate | None = None
 
 
 def _priority(title: str, snippet: str | None, mortgage_supported: bool | None = None,
@@ -165,6 +169,7 @@ _CITY_WORDS = {
     'shymkent': r'шымкент|shymkent',
     'karaganda': r'караганда|қарағанды|karaganda|karagandy',
     'pavlodar': r'павлодар|pavlodar',
+    'taraz': r'тараз|taraz',
     'ekibastuz': r'экибастуз\w*|екібастұз\w*|ekibastuz',
 }
 
@@ -186,7 +191,7 @@ async def _save_items(
 ) -> tuple[int, int, list[SearchImportCandidate]]:
     accepted_by_url: dict[str, SearchItem] = {}
     for item in items:
-        if settings.market_type == 'new' and provider_name != 'krisha_direct':
+        if settings.market_type == 'new' and provider_name not in QUERYLESS_PROVIDERS:
             continue  # Web snippets cannot establish a primary-market listing.
         if _matches_target(item) and (provider_name not in {'brave', 'bing_rss'} or _secondary_city_confirmed(item)):
             accepted_by_url[item.url] = item
@@ -204,7 +209,7 @@ async def _save_items(
             for url, city, pledged, saved_market in (await session.execute(
                 select(Listing.source_url, Listing.city, Listing.is_pledged, Listing.market_type)
             )).all():
-                key = normalize_krisha_listing_url(url) or url
+                key = olx.olx_advert_id(url) or canonical_url(url)
                 listing_urls.setdefault(key, []).append(url)
                 if saved_market in {'new', 'secondary'}:
                     known_markets.setdefault(key, set()).add(saved_market)
@@ -214,8 +219,13 @@ async def _save_items(
                     known_pledges[key] = pledged
         for item in accepted_items:
             existing = await session.scalar(select(SearchResult).where(SearchResult.url == item.url))
+            olx_id = olx.olx_advert_id(item.url)
+            if existing is None and olx_id:
+                variants = await session.scalars(select(SearchResult).where(
+                    SearchResult.url.contains(f"{olx_id}.html", autoescape=True)).order_by(SearchResult.id))
+                existing = next((row for row in variants if olx.olx_advert_id(row.url) == olx_id), None)
             krisha_url = normalize_krisha_listing_url(item.url) if provider_name == "krisha_direct" else None
-            canonical = normalize_krisha_listing_url(item.url) or item.url
+            canonical = olx_id or canonical_url(item.url)
             known = known_cities.get(canonical)
             if known and known != {settings.search_city}:
                 accepted_count -= 1
@@ -224,8 +234,9 @@ async def _save_items(
                     and provider_name != 'krisha_direct'):
                 accepted_count -= 1
                 continue
-            seller_type = item.seller_type if krisha_url and seller_category(item.seller_type) != "unknown" else None
-            market_type = item.market_type if krisha_url and item.market_type in {'new', 'secondary'} else None
+            direct_source = bool(krisha_url or olx_id)
+            seller_type = item.seller_type if direct_source and seller_category(item.seller_type) != "unknown" else None
+            market_type = item.market_type if direct_source and item.market_type in {'new', 'secondary'} else None
             if krisha_url and seller_type:
                 await fill_seller_from_krisha_search(session, krisha_url, seller_type)
             if market_type and canonical in listing_urls:
@@ -233,16 +244,26 @@ async def _save_items(
                     Listing.source_url.in_(listing_urls[canonical]), Listing.market_type.is_(None)
                 ).values(market_type=market_type, updated_at=Listing.updated_at))
             known_types = known_markets.get(canonical, set())
-            discovery_market = market_type if krisha_url else getattr(existing, 'market_type', None)
-            effective_market = (next(iter(known_types)) if len(known_types) == 1 else None) if known_types else discovery_market
+            discovery_market = market_type or getattr(existing, 'market_type', None)
+            effective_market = ((next(iter(known_types)) if len(known_types) == 1 else None)
+                                if known_types else discovery_market)
             included_market = matches_market_type(settings.market_type, effective_market)
-            is_pledged = known_pledges.get(normalize_krisha_listing_url(item.url) or item.url)
+            is_pledged = known_pledges.get(canonical)
             bathrooms_count = parse_bathrooms_count(f"{item.title or ''} {item.snippet or ''}")
             mortgage_supported = parse_mortgage_text(f"{item.title or ''}\n{item.snippet or ''}")
+            lower_bound = bathrooms_is_lower_bound(f"{item.title or ''} {item.snippet or ''}")
+            if item.payload is not None:
+                if item.payload.bathrooms_count is not None:
+                    bathrooms_count = item.payload.bathrooms_count
+                    lower_bound = item.payload.bathrooms_count_is_lower_bound
+                if item.payload.mortgage_supported is not None:
+                    mortgage_supported = item.payload.mortgage_supported
+                if item.payload.is_pledged is not None:
+                    is_pledged = item.payload.is_pledged
             if existing:
                 existing.city = settings.search_city
                 existing.last_seen = now
-                if krisha_url:
+                if direct_source:
                     existing.market_type = market_type
                 if seller_type:
                     existing.seller_type = seller_type
@@ -259,7 +280,7 @@ async def _save_items(
                         existing.mortgage_supported = mortgage_supported
                     if bathrooms_count is not None:
                         existing.bathrooms_count = bathrooms_count
-                        existing.bathrooms_count_is_lower_bound = bathrooms_is_lower_bound(f"{item.title or ''} {item.snippet or ''}")
+                        existing.bathrooms_count_is_lower_bound = lower_bound
                 if _row_hidden_by_pledge(existing):
                     accepted_count -= 1
                     continue
@@ -267,7 +288,7 @@ async def _save_items(
                     accepted_count -= 1
                     continue
                 if existing.import_status != "imported" or existing.imported_listing_id is None:
-                    candidates.append(SearchImportCandidate(result_id=existing.id, url=existing.url, city=settings.search_city))
+                    candidates.append(SearchImportCandidate(existing.id, item.url, settings.search_city, item.payload))
                 continue
             row = SearchResult(
                 url=item.url,
@@ -281,7 +302,7 @@ async def _save_items(
                 bathrooms_count=bathrooms_count,
                 mortgage_supported=mortgage_supported,
                 is_pledged=is_pledged,
-                bathrooms_count_is_lower_bound=bathrooms_is_lower_bound(f"{item.title or ''} {item.snippet or ''}"),
+                bathrooms_count_is_lower_bound=lower_bound,
                 status=f"new:{_priority(item.title, item.snippet, mortgage_supported, is_pledged)}",
             )
             session.add(row)
@@ -292,7 +313,7 @@ async def _save_items(
             if not included_market:
                 accepted_count -= 1
                 continue
-            candidates.append(SearchImportCandidate(result_id=row.id, url=row.url, city=settings.search_city))
+            candidates.append(SearchImportCandidate(row.id, row.url, settings.search_city, item.payload))
             new_found += 1
         session.add(
             SearchHistory(
@@ -343,24 +364,38 @@ async def _auto_import(candidates: list[SearchImportCandidate]) -> tuple[int, in
         return 0, 0, 0
 
     imported = errors = blocked = 0
-    blocked_message: str | None = None
+    blocked_sources: dict[str, str] = {}
     unique_candidates = list({candidate.url: candidate for candidate in candidates}.values())
     for candidate in unique_candidates:
-        if blocked_message:
+        is_olx = olx.olx_advert_id(candidate.url) is not None
+        source = "olx" if is_olx else "krisha"
+        if source in blocked_sources:
             await _mark_import_result(
                 candidate,
                 import_status="blocked",
-                error=blocked_message,
+                error=blocked_sources[source],
             )
             blocked += 1
             continue
         try:
-            payload = (await import_krisha_listing(candidate.url) if candidate.city == "astana" else
-                       await import_krisha_listing(candidate.url, expected_city=candidate.city))
+            if is_olx:
+                payload = candidate.payload
+                if payload is None or not payload.details_extracted:
+                    payload = await olx.import_olx_listing(candidate.url, expected_city=candidate.city)
+            else:
+                payload = (await import_krisha_listing(candidate.url) if candidate.city == "astana" else
+                           await import_krisha_listing(candidate.url, expected_city=candidate.city))
             if city_slug(payload.city) != candidate.city:
                 raise ValueError("Город объявления не совпадает с выбранным городом поиска")
+            if is_olx and settings.exclude_pledged and payload.is_pledged is True:
+                async with SessionLocal() as session:
+                    row = await session.get(SearchResult, candidate.result_id)
+                    if row is not None:
+                        row.is_pledged = True
+                        await session.commit()
+                continue
             actual_market = getattr(payload, 'market_type', None)
-            if actual_market in ('new', 'secondary') and not matches_market_type(settings.market_type, actual_market):
+            if (is_olx or actual_market in ('new', 'secondary')) and not matches_market_type(settings.market_type, actual_market):
                 async with SessionLocal() as session:
                     row = await session.get(SearchResult, candidate.result_id)
                     if row is not None:
@@ -384,7 +419,7 @@ async def _auto_import(candidates: list[SearchImportCandidate]) -> tuple[int, in
             message = str(exc)
             is_blocked = any(word in message.lower() for word in ("огранич", "провер", "captcha", "403", "429"))
             if is_blocked:
-                blocked_message = message
+                blocked_sources[source] = message
                 blocked += 1
                 await _mark_import_result(candidate, import_status="blocked", error=message)
             else:
@@ -393,7 +428,7 @@ async def _auto_import(candidates: list[SearchImportCandidate]) -> tuple[int, in
         except Exception as exc:  # noqa: BLE001
             errors += 1
             await _mark_import_result(candidate, import_status="error", error=str(exc))
-        if settings.auto_import_delay_seconds > 0:
+        if settings.auto_import_delay_seconds > 0 and not (is_olx and candidate.payload and candidate.payload.details_extracted):
             await asyncio.sleep(settings.auto_import_delay_seconds)
     return imported, errors, blocked
 
@@ -424,7 +459,7 @@ async def _fetch_one(
     query: str,
 ) -> tuple[str, str, list[SearchItem] | None, Exception | None]:
     try:
-        timeout = 75.0 if provider_name == "krisha_direct" else 25.0
+        timeout = 75.0 if provider_name in QUERYLESS_PROVIDERS else 25.0
         items = await asyncio.wait_for(PROVIDERS[provider_name](query), timeout=timeout)
         return provider_name, query, items, None
     except Exception as exc:  # noqa: BLE001
@@ -452,13 +487,16 @@ async def _run_search(*, seller: str | None = None) -> SearchSummary:
         return summary
 
     queries = _rotated_queries()
-    owner_search = seller == 'owner' or settings.market_type == 'secondary'
-    enabled_providers = (["krisha_direct"] if owner_search else
+    owner_search = seller == 'owner'
+    krisha_owner_search = owner_search or settings.market_type == 'secondary'
+    direct_providers = ["krisha_direct"] + (["olx_direct"] if "olx_direct" in settings.search_providers else [])
+    enabled_providers = (direct_providers if krisha_owner_search else
                          [name for name in settings.search_providers if name in PROVIDERS])
     jobs: list[tuple[str, str]] = []
 
     for provider_name in enabled_providers:
-        provider_queries = [f"owner:{settings.target_rooms}" if owner_search else str(settings.target_rooms)] if provider_name in QUERYLESS_PROVIDERS else queries
+        owner_only = krisha_owner_search if provider_name == "krisha_direct" else owner_search
+        provider_queries = [f"owner:{settings.target_rooms}" if owner_only else str(settings.target_rooms)] if provider_name in QUERYLESS_PROVIDERS else queries
         summary.providers[provider_name] = {
             "queries": len(provider_queries),
             "found": 0,
@@ -477,7 +515,7 @@ async def _run_search(*, seller: str | None = None) -> SearchSummary:
     for provider_name, query, items, error in results:
         stats = summary.providers[provider_name]
         if error is not None:
-            if isinstance(error, KrishaSearchBlocked):
+            if isinstance(error, (KrishaSearchBlocked, olx.OlxSearchBlocked)):
                 summary.blocked += 1
                 stats["blocked"] += 1
                 await _save_provider_status(provider_name, query, "blocked", str(error))
@@ -488,8 +526,8 @@ async def _run_search(*, seller: str | None = None) -> SearchSummary:
             continue
 
         safe_items = items or []
-        if owner_search:
-            safe_items = [item for item in safe_items if item.seller_type == "Хозяин недвижимости"]
+        if owner_search or (provider_name == "krisha_direct" and krisha_owner_search):
+            safe_items = [item for item in safe_items if seller_category(item.seller_type) == "owner"]
         try:
             new_found, accepted_count, candidates = await _save_items(provider_name, query, safe_items)
             imported, import_errors, import_blocked = await _auto_import(candidates)

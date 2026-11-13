@@ -29,10 +29,10 @@ async def test_likes_share_canonical_url_across_import_and_both_lists(monkeypatc
         for index in range(203):
             url = ("http://www.krisha.kz/a/show/123/?x=1" if index == 0
                    else f"https://krisha.kz/a/show/{1000 + index}")
-            session.add(SearchResult(url=url, search_engine="test", query="test",
+            session.add(SearchResult(url=url, city="astana", search_engine="test", query="test",
                                      title="2-комнатная квартира 70 м² 30000000 ₸", status="new:normal",
                                      first_seen=start + timedelta(seconds=index)))
-        session.add(SearchResult(url="https://krisha.kz/a/show/123", search_engine="test", query="test",
+        session.add(SearchResult(url="https://krisha.kz/a/show/123", city="astana", search_engine="test", query="test",
                                  title="2-комнатная квартира 70 м² 30000000 ₸", status="new:normal",
                                  first_seen=start + timedelta(seconds=300)))
         await session.commit()

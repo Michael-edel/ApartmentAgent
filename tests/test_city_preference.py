@@ -13,7 +13,9 @@ def test_city_identity_and_direct_urls(monkeypatch):
     assert city_slug("Алма-Ата") == "almaty"
     assert city_matches("almaty", None, "Алматы")
     assert not city_matches("astana", None, "Алматы")
-    assert city_matches("astana", None, None)
+    assert not city_matches("astana", None, None)
+    assert city_slug("Тараз, Жамбылская обл.") == "taraz"
+    assert not city_matches("astana", "Тараз")
     assert city_slug("Екібастұз") == "ekibastuz"
     for city in ("astana", "ekibastuz"):
         monkeypatch.setattr(search_agent.settings, "search_city", city)

@@ -35,21 +35,22 @@ async def test_map_includes_all_matches_without_fabricating_pins(monkeypatch):
         # A stale search fragment must not override saved price or duplicate a saved pin.
         session.add_all([
             SearchResult(url='https://www.krisha.kz/a/show/1?x=1', title='3-комнатная квартира 80 м² 30000000 ₸',
-                         query='test', search_engine='test', first_seen=now),
+                         query='test', search_engine='test', city='astana', first_seen=now),
             SearchResult(url='https://krisha.kz/a/show/4', title='3-комнатная квартира 80 м² 30000000 ₸',
-                         query='test', search_engine='test', first_seen=now),
+                         query='test', search_engine='test', city='astana', first_seen=now),
         ])
         # >200 matching search-only records have no pins and must still be counted.
         for index in range(205):
             session.add(SearchResult(url=f'https://krisha.kz/a/show/{index + 1000}',
                                      title='3-комнатная квартира 80 м² 30000000 ₸', query='test',
-                                     search_engine='test', first_seen=now + timedelta(seconds=index)))
+                                     search_engine='test', city='astana', first_seen=now + timedelta(seconds=index)))
         await session.commit()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url='http://test') as client:
         response = await client.get('/api/v1/search/map')
         assert response.status_code == 200
         data = response.json()
         assert {item['source_url'].split('/')[-1] for item in data['items']} == {'1', '2'}
+        assert all(item['platform'] == 'krisha' for item in data['items'])
         assert data['without_coordinates'] == 206
         left = (await client.get('/api/v1/search/map', params={'bank': 'left'})).json()
         assert [item['source_url'].split('/')[-1] for item in left['items']] == ['1']
@@ -96,4 +97,33 @@ async def test_selected_city_filters_pins_and_search_before_limit(monkeypatch):
         assert result['city'] == 'almaty'
         assert [item['listing_id'] for item in result['items']] == [11]
         assert result['without_coordinates'] == 0
+    await engine.dispose()
+
+@pytest.mark.asyncio
+async def test_map_marks_olx_and_krisha_and_counts_missing_coordinates(monkeypatch):
+    engine = create_async_engine('sqlite+aiosqlite:///:memory:')
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(main, 'SessionLocal', sessions)
+    for key, value in {'search_city':'astana', 'target_rooms':2, 'min_area_m2':50,
+                       'max_area_m2':None, 'min_price_kzt':None, 'max_price_kzt':50_000_000,
+                       'min_bathrooms':0, 'exclude_pledged':False, 'market_type':'all'}.items():
+        monkeypatch.setattr(main.settings, key, value)
+    async with sessions() as session:
+        for source_url, latitude, longitude in [
+            ('https://krisha.kz/a/show/2', 51.13, 71.43),
+            ('https://www.olx.kz/d/obyavlenie/apartment-IDrfHFK.html', 51.14, 71.44),
+            ('https://www.olx.kz/d/obyavlenie/other-IDrfHFL.html', None, None),
+        ]:
+            session.add(Listing(source='manual', source_url=source_url, title='Квартира', city='Астана',
+                                rooms=3, area_m2=80, price_kzt=40_000_000,
+                                latitude=latitude, longitude=longitude))
+        await session.commit()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url='http://test') as client:
+        response = await client.get('/api/v1/search/map')
+        assert response.status_code == 200
+        data = response.json()
+        assert {item['platform'] for item in data['items']} == {'olx','krisha'}
+        assert data['without_coordinates'] == 1
     await engine.dispose()

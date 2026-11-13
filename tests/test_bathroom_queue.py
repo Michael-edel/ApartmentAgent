@@ -49,7 +49,7 @@ async def test_candidates_respect_snapshotted_city_and_linked_listing(env):
 async def seed(env, urls=("https://krisha.kz/a/show/100",), *, count=None, title=None):
     async with env.sessions() as session:
         session.add_all(SearchResult(url=url, title=title or "4-комнатная квартира, 96 м², 38 млн тг",
-                                    query="test", search_engine="test", bathrooms_count=count)
+                                    query="test", search_engine="test", city="astana", bathrooms_count=count)
                         for url in urls)
         await session.commit()
 
@@ -528,3 +528,38 @@ async def test_batch_queue_excludes_known_pledge_but_not_unknown(env):
     await queue.bathroom_check_cancel()
     env.settings.exclude_pledged = False
     assert (await queue.bathroom_check_start(queue.StartRequest(mode="details")))["total"] == 3
+
+
+@pytest.mark.asyncio
+async def test_city_guard_rechecks_pending_leases_and_preserves_manual(monkeypatch):
+    from app.models import BathroomCheckControl
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(queue, 'SessionLocal', sessions)
+    monkeypatch.setattr(queue, '_queue_lock', asyncio.Lock())
+    async with sessions() as session:
+        job = BathroomCheckJob(status='running', criteria={'city':'astana'})
+        session.add(job); await session.flush()
+        session.add(BathroomCheckControl(id=1, current_job_id=job.id))
+        cities = [None, 'Тараз', 'astana']
+        for i, city in enumerate(cities, 100):
+            row = SearchResult(url=f'https://krisha.kz/a/show/{i}', title='4-комнатная квартира',
+                               city=city, query='test', search_engine='test')
+            session.add(row); await session.flush()
+            session.add(BathroomCheckTask(job_id=job.id, search_result_id=row.id, url=row.url, status='pending'))
+        await session.commit()
+    result = await queue.bathroom_check_claim(queue.ClaimRequest(worker_id='browser'))
+    assert result['task']['url'].endswith('/102')
+    async with sessions() as session:
+        tasks = (await session.scalars(select(BathroomCheckTask).order_by(BathroomCheckTask.id))).all()
+        assert [task.status for task in tasks] == ['unknown', 'unknown', 'leased']
+        assert all('город' in task.error for task in tasks[:2])
+        job = await session.get(BathroomCheckJob, result['job_id'])
+        job.criteria = {'manual_import':True, 'mode':'bathrooms'}
+        tasks[2].search_result_id = None
+        await session.commit()
+    again = await queue.bathroom_check_claim(queue.ClaimRequest(worker_id='browser'))
+    assert again['task']['url'].endswith('/102')
+    await engine.dispose()

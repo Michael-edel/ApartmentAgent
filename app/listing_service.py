@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -25,6 +27,8 @@ from app.seller import seller_category
 from app.listing_tracking import changed_fields, evaluate_target_alerts, snapshot
 from app.telegram import notify_listing
 from app.twogis import lookup_twogis
+
+_olx_write_lock = asyncio.Lock()
 
 
 class ListingAlreadyExists(ValueError):
@@ -184,13 +188,18 @@ def sync_search_result_facts(result: SearchResult, listing: Listing, *, clear_un
 
 async def _matching_search_results(session: AsyncSession, source_url: str) -> list[SearchResult]:
     canonical = normalize_krisha_listing_url(source_url)
+    olx_id = olx_advert_id(source_url)
     query = select(SearchResult)
     if canonical:
         path = canonical.removeprefix("https://krisha.kz")
         query = query.where(SearchResult.url.contains(path, autoescape=True))
+    elif olx_id:
+        query = query.where(SearchResult.url.contains(f"{olx_id}.html", autoescape=True))
     else:
         query = query.where(SearchResult.url == source_url)
     rows = (await session.scalars(query)).all()
+    if olx_id:
+        return [row for row in rows if olx_advert_id(row.url) == olx_id]
     return [row for row in rows if not canonical or normalize_krisha_listing_url(row.url) == canonical]
 
 
@@ -402,7 +411,10 @@ async def persist_listing(
     if twogis_checked:
         values["twogis_checked_at"] = now
 
-    async with SessionLocal() as session:
+    # An OLX advert can change its slug. Serialize all writers through the
+    # ID lookup and commit so concurrent imports keep one saved listing.
+    write_lock = _olx_write_lock if olx_advert_id(str(values["source_url"])) else nullcontext()
+    async with write_lock, SessionLocal() as session:
         row = await _find_listing(session, str(values["source_url"]))
         if (not explicit_seller_type and payload.source in {"krisha-import", "browser"}
                 and (row is None or row.seller_type in {None, "", OWNER_FROM_DESCRIPTION})):
@@ -509,7 +521,7 @@ async def persist_listing(
             if changes:
                 session.add(ListingObservation(listing_id=row.id, observed_at=now, changes=changes))
         await _sync_search_results(session, row, now, clear_unknown_mortgage=mortgage_cleared)
-        if payload.source in {"krisha-import", "browser"} and payload.availability_status is not None:
+        if payload.source in {"krisha-import", "browser", "olx-import"} and payload.availability_status is not None:
             await set_source_availability(session, row.source_url, state=payload.availability_status, observed_at=now)
         await session.commit()
         await session.refresh(row)

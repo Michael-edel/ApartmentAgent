@@ -11,6 +11,8 @@ import httpx
 from app.config import SearchSettingsProxy
 from app.cities import CITY_NAMES
 from app.krisha_search import search_krisha_direct as fetch_krisha_direct
+from app import olx
+from app.schemas import ListingCreate
 
 settings = SearchSettingsProxy()
 
@@ -22,6 +24,7 @@ class SearchItem:
     snippet: str | None = None
     seller_type: str | None = None
     market_type: str | None = None
+    payload: ListingCreate | None = None
 
 
 def is_allowed_listing_url(url: str) -> bool:
@@ -146,8 +149,20 @@ async def search_krisha_direct(query: str) -> list[SearchItem]:
                        market_type=getattr(item, 'market_type', None)) for item in items]
 
 
+async def search_olx_direct(query: str) -> list[SearchItem]:
+    items = await olx.search_olx_direct(
+        city=settings.search_city, rooms=settings.target_rooms,
+        min_price_kzt=settings.min_price_kzt, max_price_kzt=settings.max_price_kzt,
+        min_area_m2=settings.min_area_m2, max_area_m2=settings.max_area_m2,
+        market_type=settings.market_type, owner_only=query.startswith("owner:"),
+    )
+    return [SearchItem(item.title, item.url, item.snippet, item.seller_type, item.market_type, item.payload)
+            for item in items]
+
+
 PROVIDERS = {
     "krisha_direct": search_krisha_direct,
+    "olx_direct": search_olx_direct,
     "brave": search_brave,
     "bing_rss": search_bing_rss,
 }

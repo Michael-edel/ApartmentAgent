@@ -94,8 +94,13 @@ async def test_secondary_uses_owner_filter_and_rejects_unmarked_advert(monkeypat
     monkeypatch.setattr(search_agent.settings, 'market_type', 'secondary')
     monkeypatch.setattr(search_agent.settings, 'target_rooms', 2)
     monkeypatch.setattr(search_agent.settings, 'search_city', 'astana')
+    monkeypatch.setattr(search_agent.settings, 'search_providers', ['krisha_direct', 'olx_direct', 'bing_rss'])
     received = []
+    olx_url = 'https://www.olx.kz/d/obyavlenie/fixture-IDabc123.html'
     async def fetch(provider, query):
+        if provider == 'olx_direct':
+            assert query == '2'
+            return provider, query, [SearchItem('realtor', olx_url, seller_type='Риелтор', market_type='secondary')], None
         assert (provider, query) == ('krisha_direct', 'owner:2')
         return provider, query, [SearchItem('owner', 'https://krisha.kz/a/show/1', seller_type='Хозяин недвижимости', market_type='secondary'),
                                  SearchItem('developer', 'https://krisha.kz/a/show/2', market_type='new')], None
@@ -107,4 +112,4 @@ async def test_secondary_uses_owner_filter_and_rejects_unmarked_advert(monkeypat
     monkeypatch.setattr(search_agent, '_save_items', save)
     monkeypatch.setattr(search_agent, '_auto_import', auto_import)
     await search_agent._run_search()
-    assert [item.url for item in received] == ['https://krisha.kz/a/show/1']
+    assert [item.url for item in received] == ['https://krisha.kz/a/show/1', olx_url]

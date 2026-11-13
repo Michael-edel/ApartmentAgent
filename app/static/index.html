@@ -11,8 +11,8 @@
   <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
   <link rel="apple-touch-icon" href="/static/icon.svg">
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="/static/styles.css?v=155">
-  <link rel="stylesheet" href="/static/listing-map.css?v=1">
+  <link rel="stylesheet" href="/static/styles.css?v=156">
+  <link rel="stylesheet" href="/static/listing-map.css?v=2">
   <link rel="stylesheet" href="/static/listing-workflow.css?v=1">
   <style>.bookmarklet-code{width:100%;min-height:96px;resize:vertical;border:1px solid #d8e2ec;border-radius:12px;background:#f8fafc;color:#142033;padding:12px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}</style>
   <title>ApartmentAgent</title>
@@ -167,7 +167,7 @@
         <button id="refreshSearchButton" class="icon-button" aria-label="Обновить результаты">↻</button>
       </div>
     </section>
-    <p class="microcopy">OLX пока не ищется автоматически. Добавьте объявление вручную — карточка появится в разделе «Квартиры». <a href="#listingForm">Добавить с OLX</a> · <a href="#savedListings">Сохранённые квартиры</a></p>
+    <p class="microcopy">Поиск по Krisha и OLX использует выбранные критерии. <a href="#savedListings">Сохранённые квартиры</a></p>
     <label class="checkbox"><input id="searchShowHidden" type="checkbox"> Показывать скрытые объявления</label>
     <section id="searchResults" class="listing-grid"></section>
 
@@ -181,14 +181,14 @@
 
     <section class="form-card card">
       <p class="eyebrow">Быстрое добавление</p>
-      <h2>Номер или ссылка объявления Krisha</h2>
+      <h2>Ссылка на Krisha или OLX</h2>
       <form id="importForm">
         <label>Номер или ссылка
           <input id="importUrl" name="source_url" type="text" maxlength="2000" required placeholder="1010095181 или https://krisha.kz/a/show/...">
         </label>
         <button type="submit">Импортировать автоматически</button>
         <button id="serverImportButton" class="secondary-action" type="submit">Загрузить без расширения</button>
-        <p class="microcopy">Автоматический импорт использует расширение: JSON объявления дополняется данными карточки. При активной очереди сначала завершите или остановите её.</p>
+        <p class="microcopy">Для OLX достаточно ссылки. Для Krisha можно указать номер и использовать расширение для браузерного импорта.</p>
         <p id="importMessage" class="form-message" aria-live="polite"></p>
       </form>
     </section>
@@ -245,7 +245,7 @@
     <section class="form-card card">
       <p class="eyebrow">Ручной ввод</p>
       <h2>Добавить квартиру</h2>
-      <p>Добавить с OLX.kz: откройте объявление, скопируйте ссылку и заполните известные поля ниже. Данные автоматически по ссылке не загружаются.</p>
+      <p>Для автоматического импорта ссылки воспользуйтесь формой быстрого добавления выше.</p>
       <form id="listingForm">
         <label>Ссылка<input name="source_url" type="url" required></label>
         <p id="olxManualHint" class="microcopy" hidden>Объявление OLX.kz: заполните данные вручную. При повторном сохранении карточка обновится.</p>
@@ -305,10 +305,10 @@
   </nav>
 
   <script src="/static/vendor/leaflet/leaflet.js" defer></script>
-  <script src="/static/listing-map.js?v=4" defer></script>
+  <script src="/static/listing-map.js?v=5" defer></script>
   <script src="/static/listing-workflow.js?v=1" defer></script>
   <script src="/static/listing-tracking.js?v=1" defer></script>
   <script src="/static/search-profiles.js?v=3" defer></script>
-  <script src="/static/app.js?v=176" defer></script>
+  <script src="/static/app.js?v=178" defer></script>
 </body>
 </html>

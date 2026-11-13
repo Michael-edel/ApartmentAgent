@@ -24,20 +24,20 @@ async def test_search_sorts_before_limit_and_places_unknown_values_last(monkeypa
     start = datetime(2026, 1, 1, tzinfo=UTC)
     async with sessions() as session:
         # The cheapest row is older than the first 200 newest candidates.
-        session.add(SearchResult(url="https://example.com/old", search_engine="test", query="test",
+        session.add(SearchResult(city='astana', url="https://example.com/old", search_engine="test", query="test",
                                  title="2-комнатная квартира 80 м² 10000000 ₸", status="new:normal",
                                  first_seen=start))
         for number in range(205):
-            session.add(SearchResult(url=f"https://example.com/{number}", search_engine="test", query="test",
+            session.add(SearchResult(city='astana', url=f"https://example.com/{number}", search_engine="test", query="test",
                                      title="2-комнатная квартира 60 м² 30000000 ₸", status="new:normal",
                                      first_seen=start + timedelta(seconds=number + 1)))
-        session.add(SearchResult(url="https://example.com/unknown", search_engine="test", query="test",
+        session.add(SearchResult(city='astana', url="https://example.com/unknown", search_engine="test", query="test",
                                  title="2-комнатная квартира 70 м²", status="new:normal",
                                  first_seen=start + timedelta(seconds=300)))
-        session.add(SearchResult(url="https://example.com/lower", search_engine="test", query="test",
+        session.add(SearchResult(city='astana', url="https://example.com/lower", search_engine="test", query="test",
                                  title="2-комнатная квартира 70 м² от 20000000 ₸", status="new:normal",
                                  first_seen=start + timedelta(seconds=301)))
-        session.add(SearchResult(url="https://example.com/larger", search_engine="test", query="test",
+        session.add(SearchResult(city='astana', url="https://example.com/larger", search_engine="test", query="test",
                                  title="2-комнатная квартира 95 м² 35000000 ₸", status="new:normal",
                                  first_seen=start + timedelta(seconds=299)))
         await session.commit()

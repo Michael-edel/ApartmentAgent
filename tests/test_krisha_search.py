@@ -127,3 +127,31 @@ def test_conflicting_duplicate_search_cards_do_not_confirm_owner():
       <div class="a-card__footer user-specialist"><div class="label-user-identified-specialist">Специалист</div></div></div>
     '''
     assert parse_krisha_search_page(html)[0].seller_type is None
+
+
+def test_selected_city_uses_only_own_card_and_structured_locality():
+    html = '''
+    <section class="a-search-list">
+      <div class="a-card" data-id="761172930"><div class="a-card__main-info">
+        <a class="a-card__title" href="/a/show/761172930">4-комнатная квартира · 100 м²</a>
+      </div><div class="a-card__city">Тараз</div></div>
+      <div class="a-card" data-id="222"><div class="a-card__main-info">
+        <a class="a-card__title" href="/a/show/222">4-комнатная квартира · 100 м²</a>
+      </div><div class="a-card__subtitle">р-н Байконур, Тараз 2</div></div>
+      <div class="a-card" data-id="333" data-city="Астана"><div class="a-card__main-info">
+        <a class="a-card__title" href="/a/show/333">4-комнатная квартира · 100 м²</a>
+      </div></div>
+      <div class="a-card" data-id="444"><div class="a-card__main-info">
+        <a class="a-card__title" href="/a/show/444">4-комнатная квартира · 100 м²</a>
+      </div></div>
+    </section>
+    <aside><a class="a-card__title" href="/a/show/555">4-комнатная квартира · 100 м²</a></aside>
+    <script type="application/ld+json">{"offers":[
+      {"url":"/a/show/333","address":{"addressLocality":"Тараз"}},
+      {"url":"/a/show/444","location":{"cityName":"Астана"},
+       "recommendations":[{"url":"/a/show/222","city":"Тараз"}]}
+    ]}</script>
+    '''
+    assert [item.url for item in parse_krisha_search_page(html, expected_city="astana")] == [
+        "https://krisha.kz/a/show/222", "https://krisha.kz/a/show/444",
+    ]

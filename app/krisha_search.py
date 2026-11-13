@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse
@@ -29,6 +29,7 @@ _JSON_SCRIPT_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _TAG_RE = re.compile(r"<[^>]+>")
+_ANCILLARY_JSON_RE = re.compile(r"^(?:recommend|related|similar|suggest|nearby|other(?:offers|listings|adverts))", re.I)
 _RECAPTCHA_POLICY_RE = re.compile(
     r'<p\b[^>]*\bclass=["\'][^"\']*\bg-recaptcha-policy\b[^"\']*["\'][^>]*>.*?</p\s*>',
     re.IGNORECASE | re.DOTALL,
@@ -56,15 +57,35 @@ class KrishaSearchItem:
     snippet: str | None = None
     seller_type: str | None = None
     market_type: str | None = None
+    city_evidence: set[str] = field(default_factory=set)
 
 
-class _SellerCardParser(HTMLParser):
-    """Associate an explicit seller label with its own search card only."""
+def _locality_key(value: object) -> str | None:
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("cityName")
+    if not isinstance(value, str):
+        return None
+    value = value.strip().split(",", 1)[0].strip()
+    value = re.sub(r"^(?:город\s+|г\.\s*)", "", value, flags=re.I)
+    if not re.fullmatch(r"[A-Za-zА-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі -]{2,80}", value):
+        return None
+    return city_slug(value) or value.casefold()
+
+
+class _CardMetadataParser(HTMLParser):
+    """Associate explicit metadata with its own search card only."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.roles: dict[str, set[str]] = {}
         self.markets: dict[str, set[str]] = {}
+        self.cities: dict[str, set[str]] = {}
+        self.catalog_urls: set[str] = set()
+        self.sections: list[bool] = []
+        self.city_depth: int | None = None
+        self.city_text: list[str] = []
+        self.city_is_explicit = False
+        self.card_cities: set[str] = set()
         self.depth = 0
         self.label_depth: int | None = None
         self.label_text: list[str] = []
@@ -76,6 +97,8 @@ class _SellerCardParser(HTMLParser):
         self.card_roles: set[str] = set()
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "section":
+            self.sections.append("a-search-list" in (dict(attrs).get("class") or "").split())
         if tag == "a" and self.depth:
             attributes = dict(attrs)
             if "a-card__title" in (attributes.get("class") or "").split():
@@ -90,9 +113,14 @@ class _SellerCardParser(HTMLParser):
             if not re.fullmatch(r"[1-9]\d{0,14}", card_id):
                 return
             self.card_id, self.depth, self.card_roles, self.title_url = card_id, 1, set(), None
+            self.card_cities = {city for key in ("data-city", "data-city-name")
+                                if (city := _locality_key(attributes.get(key)))}
             return
         if self.depth:
             self.depth += 1
+            if "a-card__city" in classes or "a-card__subtitle" in classes:
+                self.city_depth, self.city_text = self.depth, []
+                self.city_is_explicit = "a-card__city" in classes
             if "a-card__footer" in classes and "user-specialist" in classes:
                 self.specialist_footer_depth = self.depth
             if "a-card__footer" in classes and "user-complex" in classes:
@@ -109,10 +137,22 @@ class _SellerCardParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         if self.label_depth is not None:
             self.label_text.append(data)
+        if self.city_depth is not None:
+            self.city_text.append(data)
 
     def handle_endtag(self, tag: str) -> None:
+        if tag == "section" and self.sections:
+            self.sections.pop()
         if tag != "div" or not self.depth:
             return
+        if self.depth == self.city_depth:
+            text = " ".join(" ".join(self.city_text).split())
+            city = _locality_key(text)
+            # A subtitle may contain a street. Use a known city, or an explicit city label.
+            if city and (self.city_is_explicit or re.match(r"^(?:город\s+|г\.)", text, re.I)
+                         or (city_slug(city) and re.search(r",\s*(?:р-н|район)\s+", text, re.I))):
+                self.card_cities.add(city)
+            self.city_depth = None
         if self.depth == self.label_depth:
             label = " ".join(" ".join(self.label_text).split()).casefold()
             if self.label_kind == 'owner' and label == 'хозяин недвижимости':
@@ -129,7 +169,11 @@ class _SellerCardParser(HTMLParser):
             self.complex_footer_depth = None
         self.depth -= 1
         if not self.depth:
-            if self.card_roles and self.card_id and self.title_url == f"https://krisha.kz/a/show/{self.card_id}":
+            if self.card_id and self.title_url == f"https://krisha.kz/a/show/{self.card_id}":
+                if any(self.sections):
+                    self.catalog_urls.add(self.title_url)
+                if self.card_cities:
+                    self.cities.setdefault(self.title_url, set()).update(self.card_cities)
                 roles = self.card_roles - {'__new__'}
                 self.roles.setdefault(self.title_url, set()).update(roles)
                 if '__new__' in self.card_roles:
@@ -257,8 +301,9 @@ def _plain_text(value: str) -> str:
 def _walk(value: object):
     if isinstance(value, dict):
         yield value
-        for child in value.values():
-            yield from _walk(child)
+        for key, child in value.items():
+            if not _ANCILLARY_JSON_RE.match(key):
+                yield from _walk(child)
     elif isinstance(value, list):
         for child in value:
             yield from _walk(child)
@@ -281,17 +326,23 @@ def _extract_json_items(html: str) -> list[KrishaSearchItem]:
                 continue
             title = node.get("title") or node.get("name") or node.get("heading")
             description = node.get("description") or node.get("text")
+            locations = [node.get("address"), node.get("location")]
+            values = [node.get(key) for key in ("city", "cityName", "addressLocality")]
+            for location in locations:
+                if isinstance(location, dict):
+                    values.extend(location.get(key) for key in ("city", "cityName", "addressLocality"))
             items.append(
                 KrishaSearchItem(
                     title=str(title).strip() if title else "Новое объявление Krisha",
                     url=url,
                     snippet=str(description).strip()[:500] if description else None,
+                    city_evidence={city for value in values if (city := _locality_key(value))},
                 )
             )
     return items
 
 
-def parse_krisha_search_page(html: str) -> list[KrishaSearchItem]:
+def parse_krisha_search_page(html: str, *, expected_city: str | None = None) -> list[KrishaSearchItem]:
     lowered = _security_text(html)
     security_markers = (
         "captcha",
@@ -330,6 +381,7 @@ def parse_krisha_search_page(html: str) -> list[KrishaSearchItem]:
     for item in _extract_json_items(html):
         existing = by_url.get(item.url)
         if existing:
+            existing.city_evidence.update(item.city_evidence)
             if existing.title == "Новое объявление Krisha" and item.title:
                 existing.title = item.title[:300]
             if item.snippet and not existing.snippet:
@@ -337,16 +389,22 @@ def parse_krisha_search_page(html: str) -> list[KrishaSearchItem]:
         else:
             by_url[item.url] = item
 
-    sellers = _SellerCardParser()
-    sellers.feed(html)
-    for url, roles in sellers.roles.items():
+    metadata = _CardMetadataParser()
+    metadata.feed(html)
+    for url, cities in metadata.cities.items():
+        if url in by_url:
+            by_url[url].city_evidence.update(cities)
+    for url, roles in metadata.roles.items():
         if url in by_url and len(roles) == 1:
             by_url[url].seller_type = next(iter(roles))
-    for url, markets in sellers.markets.items():
+    for url, markets in metadata.markets.items():
         if url in by_url and len(markets) == 1:
             by_url[url].market_type = next(iter(markets))
 
-    return list(by_url.values())
+    selected = city_slug(expected_city)
+    return [item for item in by_url.values()
+            if (not metadata.catalog_urls or item.url in metadata.catalog_urls)
+            and (not selected or not item.city_evidence or item.city_evidence == {selected})]
 
 
 async def search_krisha_direct(rooms: int = 2, *, owner_only: bool = False) -> list[KrishaSearchItem]:
@@ -395,7 +453,7 @@ async def search_krisha_direct(rooms: int = 2, *, owner_only: bool = False) -> l
                 for marker in ("captcha", "проверка безопасности", "cloudflare", "access denied")
             ):
                 raise KrishaSearchBlocked("Krisha запросила проверку безопасности")
-            page_items = parse_krisha_search_page(response.text)
+            page_items = parse_krisha_search_page(response.text, expected_city=settings.search_city)
             if not page_items:
                 break
 

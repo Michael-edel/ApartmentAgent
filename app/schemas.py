@@ -21,13 +21,15 @@ class ListingImportRequest(BaseModel):
     @field_validator("source_url", mode="before")
     @classmethod
     def listing_number_or_url(cls, value):
+        from app.olx import normalize_olx_listing_url
+
         if isinstance(value, HttpUrl):
             value = str(value)
         if isinstance(value, str):
-            normalized = normalize_krisha_import_url(value)
+            normalized = normalize_krisha_import_url(value) or normalize_olx_listing_url(value)
             if normalized:
                 return normalized
-        raise ValueError("Укажите номер объявления или ссылку https://krisha.kz/a/show/номер")
+        raise ValueError("Укажите номер объявления Krisha или ссылку на объявление Krisha.kz или OLX.kz")
 
 
 class ListingCreate(BaseModel):

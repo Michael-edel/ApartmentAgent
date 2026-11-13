@@ -15,6 +15,14 @@
       return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
     } catch (_) { return null; }
   };
+  const sourceLabel = item => item.cross_platform === true ? 'Krisha.kz и OLX.kz' :
+    item.platform === 'krisha' ? 'Krisha.kz' : item.platform === 'olx' ? 'OLX.kz' : 'Источник не определён';
+  const groupSource = group => {
+    if (group.every(item => item.cross_platform === true)) return 'cross';
+    if (group.some(item => item.cross_platform === true)) return 'mixed';
+    const platform = group[0]?.platform;
+    return ['krisha', 'olx'].includes(platform) && group.every(item => item.platform === platform) ? platform : 'mixed';
+  };
   const validPoint = item => Number.isFinite(item.latitude) && Number.isFinite(item.longitude)
     && item.latitude >= -90 && item.latitude <= 90 && item.longitude >= -180 && item.longitude <= 180;
 
@@ -40,7 +48,14 @@
     const listLabel = node('summary', 'Список квартир на карте');
     const listItems = node('div', null, 'listing-map-list-items');
     list.append(listLabel, listItems);
-    content.append(status, alert, reset, canvas, list); shell.append(header, content); dialog.append(shell); document.body.append(dialog);
+    const legend = node('div', null, 'listing-map-legend');
+    legend.setAttribute('aria-label', 'Обозначения источников');
+    for (const [kind, label] of [['krisha', 'Krisha.kz'], ['olx', 'OLX.kz'], ['cross', 'Одна квартира на двух сайтах'], ['mixed', 'Разные источники или неизвестно']]) {
+      const entry = node('span', null, 'listing-map-legend-entry');
+      const swatch = node('span', null, `listing-map-swatch ${kind}`); swatch.setAttribute('aria-hidden', 'true');
+      entry.append(swatch, document.createTextNode(label)); legend.append(entry);
+    }
+    content.append(status, alert, reset, legend, canvas, list); shell.append(header, content); dialog.append(shell); document.body.append(dialog);
     const controller = new AbortController();
     const state = {dialog, map: null, controller}; active = state;
     let timedOut = false;
@@ -58,6 +73,7 @@
     const makeEntry = item => {
       const entry = node('div', null, 'listing-map-entry');
       entry.append(node('strong', item.title || 'Квартира'));
+      entry.append(node('span', `Источник: ${sourceLabel(item)}`, 'listing-map-source'));
       if (Number.isFinite(item.price_kzt) && item.price_kzt > 0) entry.append(node('span', `${fmt.format(item.price_kzt)} ₸`));
       else entry.append(node('span', 'Цена не указана'));
       if (item.address) entry.append(node('span', item.address));
@@ -111,7 +127,8 @@
         const positions = [];
         for (const group of groups.values()) {
           const first = group[0]; const position = [first.latitude, first.longitude]; positions.push(position);
-          const icon = L.divIcon({className:'listing-map-point', html:`<div class="listing-map-pin"><span>${group.length > 1 ? group.length : '•'}</span></div>`, iconSize:[30,30], iconAnchor:[15,30]});
+          const kind = groupSource(group);
+          const icon = L.divIcon({className:'listing-map-point', html:`<div class="listing-map-pin ${kind}"><span>${group.length > 1 ? group.length : '•'}</span></div>`, iconSize:[30,30], iconAnchor:[15,30]});
           const popup = node('div', null, 'listing-map-popup'); group.forEach(item => popup.append(makeEntry(item)));
           L.marker(position, {icon, title:group.length > 1 ? `Квартир в одной точке: ${group.length}` : first.title || 'Квартира'}).bindPopup(popup).addTo(map);
         }

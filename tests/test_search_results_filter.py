@@ -36,7 +36,7 @@ async def test_search_results_filters_old_rows_before_limit(monkeypatch):
     now = datetime.now(timezone.utc)
     def row(index, title):
         return SimpleNamespace(id=index, title=title, snippet=None, url=f"https://krisha.kz/a/show/{index}",
-                               market_type=None,
+                               market_type=None, city="astana",
                                search_engine="krisha_direct", query="", status="new:normal",
                                import_status="pending", imported_listing_id=None, import_error=None,
                                imported_at=None, first_seen=now, last_seen=now,
@@ -79,9 +79,9 @@ async def test_status_counts_only_results_matching_current_criteria(monkeypatch)
     now = datetime.now(timezone.utc)
     rows = [
         SimpleNamespace(url="https://krisha.kz/a/show/11", title="2-комнатная квартира, 60 м², 25 млн тг", snippet=None,
-                        status="new:urgent", import_status="pending", first_seen=now, search_engine="bing"),
+                        city="astana", status="new:urgent", import_status="pending", first_seen=now, search_engine="bing"),
         SimpleNamespace(url="https://krisha.kz/a/show/12", title="3-комнатная квартира, 80 м², 40 млн тг", snippet=None,
-                        status="new:normal", import_status="imported", first_seen=now, search_engine="krisha_direct"),
+                        city="astana", status="new:normal", import_status="imported", first_seen=now, search_engine="krisha_direct"),
     ]
 
     class AsyncRows:

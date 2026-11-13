@@ -109,6 +109,7 @@ def payload(number=123, **kwargs):
 
 
 def search_row(number, **kwargs):
+    kwargs.setdefault("city", "astana")
     return SearchResult(url=listing_url(number), title=TITLE, search_engine="fixture",
                         query="", status="new:urgent", **kwargs)
 

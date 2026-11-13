@@ -152,3 +152,25 @@ async def test_duplicates_api_returns_distinct_offers_and_status(monkeypatch):
         assert result['items'][1]['evidence']['kind'] == 'same_house_floor_area'
         assert (await client.get('/api/v1/listings/999/duplicates')).status_code == 404
     await engine.dispose()
+
+
+def test_shared_description_requires_cross_platform_location_and_long_unique_text():
+    text = ('Продаётся квартира с четырьмя отдельными комнатами и просторной кухней гостиной. '
+            'В квартире два санузла, отдельная гардеробная и встроенные шкафы для хранения. '
+            'Мебель и техника остаются новым владельцам, отдельная морозильная камера и посудомоечная машина. '
+            'Рядом с домом школа номер двадцать четыре, несколько детских садов, прогулочная аллея и спортивная площадка. '
+            'В подъезде установлен лифт и камеры на этажах, имеется система распознавания лица. '
+            'Квартира ухоженная, с современным ремонтом, прекрасным расположением и удобной планировкой.')
+    krisha = listing(1, address='Сарытогай 13', rooms=4, area_m2=90.3, floor=6, floors_total=7, description=text)
+    olx = listing(2, source_url='https://www.olx.kz/d/obyavlenie/apartments-IDrfHFK.html',
+                  address=None, rooms=4, area_m2=90, floor=6, floors_total=7,
+                  description='Иное краткое вступление. ' + text + ' Торг возможен.')
+    assert duplicate_evidence(krisha, olx)['kind'] == 'shared_description'
+    for overrides in ({'area_m2':91.0}, {'floor':5}, {'floors_total':8}, {'city':'Алматы'},
+                      {'address':'Сарытогай 14'}, {'description':text[:130]},
+                      {'source_url':'https://krisha.kz/a/show/99'}, {'source_url':'https://fake-olx.kz/d/obyavlenie/apartments-IDrfHFK.html'},
+                      {'floor':None}):
+        candidate = SimpleNamespace(**(vars(olx) | overrides))
+        assert duplicate_evidence(krisha, candidate) is None, overrides
+    unrelated = SimpleNamespace(**(vars(olx) | {'description': ' '.join(reversed(text.split()))}))
+    assert duplicate_evidence(krisha, unrelated) is None

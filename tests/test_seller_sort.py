@@ -29,11 +29,11 @@ async def test_seller_sort_uses_linked_listing_before_limit_and_preserves_newest
                               price_kzt=30_000_000, seller_type=seller)
             session.add(listing)
             await session.flush()
-            session.add(SearchResult(url=listing.source_url, search_engine="test", query="test",
+            session.add(SearchResult(city='astana', url=listing.source_url, search_engine="test", query="test",
                                      title="2-комнатная квартира 70 м² 30000000 ₸",
                                      status="new:normal", imported_listing_id=listing.id,
                                      first_seen=when + timedelta(seconds=index)))
-        session.add(SearchResult(url="https://krisha.kz/a/show/900", search_engine="test", query="test",
+        session.add(SearchResult(city='astana', url="https://krisha.kz/a/show/900", search_engine="test", query="test",
                                  title="2-комнатная квартира 70 м² 30000000 ₸ от хозяина",
                                  status="new:normal", first_seen=when + timedelta(seconds=10)))
         await session.commit()

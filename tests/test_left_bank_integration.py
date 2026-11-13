@@ -53,7 +53,7 @@ async def test_left_bank_view_filters_before_limit_and_matches_priority_counter(
                                  title='2-комнатная квартира 60 м²', status='new:normal',
                                  imported_listing_id=listing.id, first_seen=when))
         for index in range(205):
-            session.add(SearchResult(url=f'https://krisha.kz/a/show/{index + 1000}',
+            session.add(SearchResult(url=f'https://krisha.kz/a/show/{index + 1000}', city='astana',
                                      search_engine='test', query='test',
                                      title='2-комнатная квартира 60 м²', status='new:normal',
                                      first_seen=when + timedelta(seconds=index + 1)))

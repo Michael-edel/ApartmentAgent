@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     # The example .env uses a readable comma-separated value.  NoDecode keeps
     # pydantic-settings from trying to parse that value as JSON before the
     # validator below normalizes it.
-    search_providers: Annotated[list[str], NoDecode] = ["krisha_direct", "brave", "bing_rss"]
+    search_providers: Annotated[list[str], NoDecode] = ["krisha_direct", "olx_direct", "brave", "bing_rss"]
     brave_search_api_key: str = ""
     search_freshness: str = "pw"
 
@@ -81,10 +81,9 @@ class Settings(BaseSettings):
         else:
             requested = []
 
-        # Прямой поиск Krisha является обязательным основным источником.
-        # Старый локальный .env с SEARCH_PROVIDERS=bing_rss больше не отключает его.
-        allowed = {"krisha_direct", "brave", "bing_rss"}
-        providers = ["krisha_direct"]
+        # Include both direct sources in existing installations with legacy settings.
+        allowed = {"krisha_direct", "olx_direct", "brave", "bing_rss"}
+        providers = ["krisha_direct", "olx_direct"]
         for provider in requested or ["brave", "bing_rss"]:
             if provider in allowed and provider not in providers:
                 providers.append(provider)

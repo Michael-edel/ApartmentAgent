@@ -3,11 +3,11 @@ from typing import Literal
 import math
 
 SearchCity = Literal['astana', 'ekibastuz']
-KnownCity = Literal['astana', 'ekibastuz', 'almaty', 'shymkent', 'karaganda', 'pavlodar']
+KnownCity = Literal['astana', 'ekibastuz', 'almaty', 'shymkent', 'karaganda', 'pavlodar', 'taraz']
 SEARCH_CITIES = frozenset(('astana', 'ekibastuz'))
 CITY_NAMES: dict[KnownCity, str] = {
     'astana': 'Астана', 'almaty': 'Алматы', 'shymkent': 'Шымкент',
-    'karaganda': 'Караганда', 'pavlodar': 'Павлодар', 'ekibastuz': 'Экибастуз',
+    'karaganda': 'Караганда', 'pavlodar': 'Павлодар', 'ekibastuz': 'Экибастуз', 'taraz': 'Тараз',
 }
 _CITY_ALIASES: dict[str, KnownCity] = {
     'астана': 'astana', 'astana': 'astana', 'нур-султан': 'astana', 'нурсултан': 'astana',
@@ -17,6 +17,7 @@ _CITY_ALIASES: dict[str, KnownCity] = {
     'караганда': 'karaganda', 'қарағанды': 'karaganda', 'karaganda': 'karaganda', 'karagandy': 'karaganda',
     'павлодар': 'pavlodar', 'pavlodar': 'pavlodar',
     'экибастуз': 'ekibastuz', 'екібастұз': 'ekibastuz', 'ekibastuz': 'ekibastuz',
+    'тараз': 'taraz', 'taraz': 'taraz',
 }
 
 
@@ -32,12 +33,12 @@ def city_slug(value: str | None) -> KnownCity | None:
 
 
 def result_city_slug(result_city: str | None, linked_city: str | None = None) -> KnownCity | None:
-    """Use a known linked card first; legacy unlabelled search results are Astana."""
+    """Use the linked card or the recorded city. Unlabelled results have no city."""
     if linked_city and linked_city.strip():
         return city_slug(linked_city)
     if result_city and result_city.strip():
         return city_slug(result_city)
-    return 'astana'
+    return None
 
 
 def city_matches(selected_city: str, result_city: str | None, linked_city: str | None = None) -> bool:
@@ -54,6 +55,7 @@ _COORDINATE_BOUNDS: dict[KnownCity, tuple[float, float, float, float]] = {
     'karaganda': (49.4, 50.5, 72.2, 74.3),
     'pavlodar': (51.6, 53, 75.9, 78.5),
     'ekibastuz': (51.3, 52.1, 74.8, 75.9),
+    'taraz': (42.7, 43.1, 71.1, 71.7),
 }
 
 

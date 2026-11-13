@@ -17,7 +17,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.availability import set_source_availability, unavailable_urls
-from app.cities import city_matches
+from app.cities import SEARCH_CITIES, city_matches, city_slug
 from app.config import get_settings
 from app.database import SessionLocal
 from app.krisha_search import normalize_krisha_import_url, normalize_krisha_listing_url
@@ -368,6 +368,33 @@ class CompleteRequest(ClaimRequest):
     error: str | None = Field(default=None, max_length=1000)
 
 
+async def _task_city_allowed(session: AsyncSession, job: BathroomCheckJob, task: BathroomCheckTask) -> bool:
+    if job.criteria.get("manual_import"):
+        return True
+    selected = city_slug(job.criteria.get("city"))
+    if selected not in SEARCH_CITIES:
+        return False
+    canonical = normalize_krisha_listing_url(task.url)
+    if not canonical:
+        return False
+    path = canonical.removeprefix("https://krisha.kz")
+    listings = (await session.execute(select(Listing.source_url, Listing.city)
+                .where(Listing.source_url.contains(path, autoescape=True)))).all()
+    saved_city = next((city for url, city in listings
+                       if normalize_krisha_listing_url(url) == canonical and city and city.strip()), None)
+    result = await session.get(SearchResult, task.search_result_id) if task.search_result_id else None
+    # A linked result must actually belong to the queued URL.
+    result_city = result.city if result and normalize_krisha_listing_url(result.url) == canonical else None
+    return city_matches(selected, result_city, saved_city)
+
+
+def _skip_unknown_city(task: BathroomCheckTask, now: datetime) -> None:
+    task.status = "unknown"
+    task.error = "Пропущено: город объявления не подтверждён или не совпадает с городом задания."
+    task.completed_at = now
+    task.worker_id = task.lease_token = task.lease_expires_at = None
+
+
 @router.post("/claim")
 async def bathroom_check_claim(request: ClaimRequest) -> dict:
     async with _queue_lock, SessionLocal() as session, session.begin():
@@ -400,6 +427,9 @@ async def bathroom_check_claim(request: ClaimRequest) -> dict:
                 return result
         tasks = await _tasks(session, job)
         task = next((task for task in tasks if task.status == "leased"), None)
+        if task and not await _task_city_allowed(session, job, task):
+            _skip_unknown_city(task, now)
+            task = None
         if task and task.worker_id != request.worker_id:
             result["message"] = "Текущее объявление уже проверяет другой браузер."
             return result
@@ -410,6 +440,9 @@ async def bathroom_check_claim(request: ClaimRequest) -> dict:
             task = None
             for candidate in tasks:
                 if candidate.status != "pending":
+                    continue
+                if not await _task_city_allowed(session, job, candidate):
+                    _skip_unknown_city(candidate, now)
                     continue
                 count = await _stored_count(session, candidate.url)
                 details_mode = job.criteria.get("mode") == "details"

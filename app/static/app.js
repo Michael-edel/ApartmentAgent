@@ -750,7 +750,9 @@ function renderDuplicateOffers(offers, currentId, rejected = false) {
     const price = Number.isFinite(offer.price_kzt) ? money.format(offer.price_kzt) : 'Цена не указана';
     const evidence = offer.evidence?.kind === 'shared_photos'
       ? `Общих фото: ${number.format(offer.evidence.shared_photos)}`
-      : offer.evidence?.kind === 'same_house_floor_area' ? 'Тот же дом и этаж, близкая площадь' : offer.evidence?.kind === 'confirmed' ? 'Совпадение подтверждено вами' : '';
+      : offer.evidence?.kind === 'same_house_floor_area' ? 'Тот же дом и этаж, близкая площадь'
+      : offer.evidence?.kind === 'shared_description' ? 'Совпадают описание, этаж и площадь'
+      : offer.evidence?.kind === 'confirmed' ? 'Совпадение подтверждено вами' : '';
     const otherId = Number(offer.listing_id);
     const canDecide = Number.isSafeInteger(currentId) && Number.isSafeInteger(otherId) && otherId > 0 && otherId !== currentId;
     const photo = safeExternalUrl(offer.photo_url);
@@ -1024,7 +1026,8 @@ function render(listings, pinnedListing = null) {
       <span class="verdict">${escapeHtml(item.assessment.verdict)}</span>
       <details class="listing-comparables" data-details-key="score-reasons"><summary>Почему такая оценка</summary>${Array.isArray(item.assessment.reasons) && item.assessment.reasons.length ? `<ul>${item.assessment.reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join('')}</ul>` : '<p class="meta">Нет дополнительных замечаний к критериям.</p>'}</details>
       ${ai.summary ? `<div class="ai-summary"><b>AI-анализ</b><p>${escapeHtml(ai.summary)}</p></div>` : ''}
-      <div class="listing-actions">${isOlxUrl(item.source_url) ? `<button class="edit-olx secondary-action" data-listing-id="${Number(item.id)}" type="button">Обновить данные OLX</button>` : `<button class="check-listing secondary-action" data-listing-id="${item.id}" type="button">↻ Проверить квартиру</button>`}
+      <div class="listing-actions"><button class="check-listing secondary-action" data-listing-id="${item.id}" type="button">↻ Проверить квартиру</button>
+        ${isOlxUrl(item.source_url) ? `<button class="edit-olx secondary-action" data-listing-id="${Number(item.id)}" type="button">Редактировать данные OLX</button>` : ''}
         <button class="panel-action sale-action" data-sale-id="${Number(item.id)}" data-mark-sold="${item.availability !== 'sold'}" type="button">${item.availability === 'sold' ? 'Снять отметку «Продана»' : 'Отметить проданной'}</button></div>
       ${sourceUrl ? `<a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">Открыть объявление →</a>` : ''}
     </article>`;
@@ -1218,7 +1221,7 @@ async function loadSearchResults() {
         ? '<section class="empty card"><strong>Нет объявлений с выбранным типом продавца</strong></section>'
         : strictBathrooms
         ? '<section class="empty card"><strong>Квартир с подтверждёнными двумя санузлами пока нет</strong><p>При отборе «От 2 санузлов» объявления без подтверждённого количества скрыты. Подходящие квартиры появятся после получения данных объявления.</p></section>'
-        : '<section class="empty card"><strong>Новых ссылок пока нет</strong><p>Новые объявления появятся после следующей публикации на Krisha.</p></section>';
+        : '<section class="empty card"><strong>Новых ссылок пока нет</strong><p>Объявления Krisha и OLX появятся здесь, когда будут найдены по выбранным условиям.</p></section>';
       return;
     }
     searchResults.innerHTML = items.map(item => {
@@ -1406,9 +1409,11 @@ runSearchButton?.addEventListener('click', async () => {
     });
     const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось выполнить поиск');
-    if (searchMessage) searchMessage.textContent = ownerOnly && body.blocked
-      ? 'Krisha ограничила прямой поиск от хозяев. Ниже доступны ранее найденные объявления.'
-      : `Запросов: ${body.queries}. Найдено ссылок: ${body.found}. Новых: ${body.new}. Автоимпортировано: ${body.imported || 0}. Ошибок: ${body.errors + (body.import_errors || 0)}.`;
+    const blockedSites = [['krisha_direct', 'Krisha'], ['olx_direct', 'OLX']]
+      .filter(([provider]) => body.providers?.[provider]?.blocked)
+      .map(([, name]) => name);
+    const blockedNotice = blockedSites.length ? ` Ограничение доступа — ${blockedSites.join(', ')}.` : '';
+    if (searchMessage) searchMessage.textContent = `Запросов: ${body.queries}. Найдено ссылок: ${body.found}. Новых: ${body.new}. Автоимпортировано: ${body.imported || 0}. Ошибок: ${body.errors + (body.import_errors || 0)}.${blockedNotice}`;
     if (/^#listing-[1-9]\d*$/.test(location.hash)) history.replaceState(null, '', location.pathname + location.search);
     await loadSearchStatus();
     await loadListings();
@@ -1441,7 +1446,9 @@ runChecksButton?.addEventListener('click', async () => {
 
 importForm?.addEventListener('submit', async event => {
   event.preventDefault();
-  const browserImport = event.submitter?.id !== 'serverImportButton';
+  const data = new FormData(importForm);
+  const sourceUrl = String(data.get('source_url') || '').trim();
+  const browserImport = !isOlxUrl(sourceUrl) && event.submitter?.id !== 'serverImportButton';
   if (browserImport && bathroomCheckBusy) return;
   if (browserImport) {
     bathroomCheckRevision += 1;
@@ -1452,11 +1459,10 @@ importForm?.addEventListener('submit', async event => {
   if (importMessage) importMessage.textContent = browserImport ? 'Ставлю объявление в очередь импорта…' : 'Загружаю объявление и определяю параметры…';
   const buttons = [...importForm.querySelectorAll('button[type="submit"]')];
   buttons.forEach(button => { button.disabled = true; });
-  const data = new FormData(importForm);
   try {
     const options = {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({source_url:String(data.get('source_url') || '').trim(), ...(browserImport ? {mode:'details'} : {})})
+      body:JSON.stringify({source_url:sourceUrl, ...(browserImport ? {mode:'details'} : {})})
     };
     const response = await (browserImport ? fetchBathroomCheck('/start', options) : fetch('/api/v1/listings/import', options));
     const body = await readJson(response);
