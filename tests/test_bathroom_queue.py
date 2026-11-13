@@ -19,7 +19,7 @@ async def env(monkeypatch, tmp_path):
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    settings = SimpleNamespace(search_city="astana", search_conditions={}, target_rooms=4, min_price_kzt=None, max_price_kzt=50_000_000,
+    settings = SimpleNamespace(search_city="astana", market_type="all", search_conditions={}, target_rooms=4, min_price_kzt=None, max_price_kzt=50_000_000,
                                min_area_m2=80, max_area_m2=120, min_bathrooms=0, exclude_pledged=True)
     clock = {"now": datetime(2026, 11, 6, 12, 0, tzinfo=UTC)}
     monkeypatch.setattr(queue, "SessionLocal", sessions)

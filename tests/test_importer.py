@@ -219,7 +219,7 @@ async def test_import_preserves_bathrooms_lower_bound(monkeypatch):
 @pytest.mark.parametrize("city,latitude,longitude", [
     ("Астана", 51.128, 71.43), ("Алматы", 43.2389, 76.8897),
     ("Шымкент", 42.315, 69.59), ("Караганда", 49.806, 73.086),
-    ("Павлодар", 52.287, 76.967),
+    ("Павлодар", 52.287, 76.967), ("Экибастуз", 51.7237, 75.3229),
 ])
 async def test_import_city_coordinates(monkeypatch, city, latitude, longitude):
     import json
@@ -268,3 +268,39 @@ async def test_expected_city_used_only_when_offer_city_is_absent(monkeypatch):
 
 def test_title_address_supports_other_cities():
     assert _address_from_text('Продажа квартиры №123: Абая 10, Алматы') == 'Абая 10'
+    assert _address_from_text('Продажа квартиры №123: Абая 10, Экибастуз') == 'Абая 10'
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('market_type,expected', [('primary','new'), ('secondary','secondary'), ('новый дом',None), (None,None)])
+async def test_explicit_market_classification_only(monkeypatch, market_type, expected):
+    import json
+    obj = {'@type':'Apartment','url':'https://krisha.kz/a/show/123', 'marketType':market_type,
+           'buildingYear':2026, 'description':'Новый дом и свежий ремонт',
+           'recommendations':[{'marketType':'secondary'}]}
+    html = '<h1>3-комнатная квартира 80 м²</h1><div class="offer__price">45 000 000 ₸</div><script type="application/ld+json">' + json.dumps(obj, ensure_ascii=False) + '</script>'
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url): return httpx.Response(200, text=html, request=httpx.Request('GET', url))
+    monkeypatch.setattr(httpx, 'AsyncClient', FakeClient)
+    assert (await import_krisha_listing('https://krisha.kz/a/show/123')).market_type == expected
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('panel,market,expected', [
+    ('<aside class="owners"><b>Автор объявления</b><span>Хозяин недвижимости</span></aside>', None, 'secondary'),
+    ('<aside class="owners"><span>Хозяин недвижимости</span></aside>', 'primary', 'new'),
+    ('<div class="recommendations"><aside class="owners"><span>Хозяин недвижимости</span></aside></div>', None, None),
+    ('<div class="offer__description">Я хозяин недвижимости</div>', None, None),
+])
+async def test_market_owner_requires_own_visible_author_panel(monkeypatch, panel, market, expected):
+    import json
+    obj = {'@type':'Apartment', 'url':'https://krisha.kz/a/show/123', 'marketType':market}
+    html = '<h1>3-комнатная квартира 80 м²</h1><div class="offer__price">45 000 000 ₸</div>' + panel + '<script type="application/ld+json">' + json.dumps(obj, ensure_ascii=False) + '</script>'
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url): return httpx.Response(200, text=html, request=httpx.Request('GET', url))
+    monkeypatch.setattr(httpx, 'AsyncClient', FakeClient)
+    assert (await import_krisha_listing('https://krisha.kz/a/show/123')).market_type == expected

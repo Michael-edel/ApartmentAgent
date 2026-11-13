@@ -36,6 +36,7 @@ async def test_search_results_filters_old_rows_before_limit(monkeypatch):
     now = datetime.now(timezone.utc)
     def row(index, title):
         return SimpleNamespace(id=index, title=title, snippet=None, url=f"https://krisha.kz/a/show/{index}",
+                               market_type=None,
                                search_engine="krisha_direct", query="", status="new:normal",
                                import_status="pending", imported_listing_id=None, import_error=None,
                                imported_at=None, first_seen=now, last_seen=now,

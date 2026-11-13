@@ -67,6 +67,7 @@
     'бывшее общежитие':'Бывшее общежитие', 'возможен обмен':'Возможен обмен', 'обмен':'Возможен обмен',
     'отопление':'Отопление', 'газ':'Газ', 'водоснабжение':'Водоснабжение', 'канализация':'Канализация',
     'планировка':'Планировка', 'окна':'Окна', 'лифт':'Лифт', 'документы':'Документы',
+    'тип рынка':'Тип рынка', 'рынок жилья':'Рынок жилья', 'тип жилья':'Тип жилья',
   };
   const semanticLabels = {
     'flat.toilet':'Санузел', 'bathrooms':'Санузел', 'flat.renovation':'Состояние квартиры',
@@ -531,7 +532,7 @@
     const patterns = [
       /\d{1,2}\s*(?:из|\/)\s*\d{1,2}\s*(?:этаж|эт\.)\s*,\s*([^—–]{3,180})(?:\s*[—–]|$)/i,
       /\d{2,3}(?:[.,]\d+)?\s*(?:м²|м2)\s*,\s*([^—–·]{3,160}\s\d+[A-Za-zА-Яа-яЁё]?(?:\/\d+[A-Za-zА-Яа-яЁё]?)?)(?:\s*[—–·]|$)/i,
-      /(?:№\s*\d+\s*[:：]\s*|Продажа[^:—]{0,120}[:：]\s*)([^—]{3,120}?),\s*(?:Астана|Astana|Алматы|Almaty|Шымкент|Shymkent|Караганда|Karaganda|Павлодар|Pavlodar)(?![А-Яа-яЁё])/i,
+      /(?:№\s*\d+\s*[:：]\s*|Продажа[^:—]{0,120}[:：]\s*)([^—]{3,120}?),\s*(?:Астана|Astana|Алматы|Almaty|Шымкент|Shymkent|Караганда|Karaganda|Павлодар|Pavlodar|Экибастуз|Екібастұз|Ekibastuz)(?![А-Яа-яЁё])/i,
       /(?:^|[^\p{L}])((?:ул\.?|улица|просп\.?|проспект|пер\.?|переулок|мкр\.?|микрорайон|шоссе|набережная)\s+[^,;]{2,80},?\s+\d+[A-Za-zА-Яа-яЁё]?(?:\/\d+)?)/iu,
     ];
     for (const pattern of patterns) {
@@ -557,12 +558,13 @@
     'алматы':'almaty', 'almaty':'almaty', 'алма-ата':'almaty',
     'шымкент':'shymkent', 'shymkent':'shymkent', 'караганда':'karaganda',
     'қарағанды':'karaganda', 'karaganda':'karaganda', 'karagandy':'karaganda',
-    'павлодар':'pavlodar', 'pavlodar':'pavlodar'
+    'павлодар':'pavlodar', 'pavlodar':'pavlodar',
+    'экибастуз':'ekibastuz', 'екібастұз':'ekibastuz', 'ekibastuz':'ekibastuz'
   };
-  const cityNames = {astana:'Астана', almaty:'Алматы', shymkent:'Шымкент', karaganda:'Караганда', pavlodar:'Павлодар'};
+  const cityNames = {astana:'Астана', almaty:'Алматы', shymkent:'Шымкент', karaganda:'Караганда', pavlodar:'Павлодар', ekibastuz:'Экибастуз'};
   const cityKey = value => cityAliases[clean(value).split(',')[0].replace(/^(?:город|г\.)\s*/i, '').trim().toLowerCase()];
   const isCityCoordinates = (city, latitude, longitude) => {
-    const bounds = {astana:[50,52,69,73], almaty:[42.8,43.7,76,77.8], shymkent:[41.8,42.7,69,70.2], karaganda:[49.4,50.5,72.2,74.3], pavlodar:[51.6,53,75.9,78.5]}[cityKey(city)];
+    const bounds = {astana:[50,52,69,73], almaty:[42.8,43.7,76,77.8], shymkent:[41.8,42.7,69,70.2], karaganda:[49.4,50.5,72.2,74.3], pavlodar:[51.6,53,75.9,78.5], ekibastuz:[51.3,52.1,74.8,75.9]}[cityKey(city)];
     return !!bounds && latitude !== null && longitude !== null && latitude >= bounds[0] && latitude <= bounds[1] && longitude >= bounds[2] && longitude <= bounds[3];
   };
   const coordinatePair = (value, city) => {
@@ -715,6 +717,17 @@
     if (isCityCoordinates(city,latitude,longitude)) { jsonCoordinates = {latitude,longitude}; break; }
   }
   const locationCoordinates = coordinates || jsonCoordinates;
+  const marketValue = value => {
+    const text = clean(value).toLowerCase().replace(/ё/g, 'е');
+    if (['new','primary','первичка','первичный рынок','первичное жилье','новостройка'].includes(text)) return 'new';
+    if (['secondary','вторичка','вторичный рынок','вторичное жилье'].includes(text)) return 'secondary';
+    return null;
+  };
+  const rawMarketEvidence = [propertyDetails['Тип рынка'], propertyDetails['Рынок жилья'], propertyDetails['Тип жилья'],
+    ...roots.map(item => item.market_type ?? item.marketType)].filter(Boolean);
+  const marketEvidence = rawMarketEvidence.map(marketValue).filter(Boolean);
+  const marketTypes = new Set(marketEvidence);
+  const marketType = marketTypes.size === 1 ? marketEvidence[0] : !rawMarketEvidence.length && /^Хозяин недвижимости$/i.test(clean(domSellerType)) ? 'secondary' : null;
   const domComparison = cityKey(city) === 'astana' ? krishaComparison() : {};
   const comparison = Object.fromEntries(Object.keys(jsonComparison).map(key => [key,domComparison[key] ?? jsonComparison[key]]));
   const payload = {
@@ -729,6 +742,7 @@
     property_details: propertyDetails,
     details_extracted: !!(price && area && rooms && (hasDomEvidence || domMortgageText || jsonRichEvidence)),
     city,
+    market_type: marketType,
     city_observed: !!(cityText || headlineCity),
     district: districtFromText(propertyDetails['Город']) || districtFromText(propertyDetails['Район'], true) || districtFromText(findText(['district', 'districtName', 'areaName']), true)
       || districtFromText(findText(['regionName', 'addressRegion']))

@@ -3,16 +3,18 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 
-from app.cities import SearchCity
+from app.cities import SEARCH_CITIES, SearchCity
 from app.database import SessionLocal
 from app.models import SearchPreference, SearchProfile
 from app.search_conditions import SearchConditions
+from app.market_type import MarketFilter
 
 router = APIRouter(prefix='/api/v1/search/profiles', tags=['search-profiles'])
 
 
 class ProfileCriteria(BaseModel):
     city: SearchCity = 'astana'
+    market_type: MarketFilter = 'all'
     rooms: int = Field(default=2, ge=2, le=4)
     min_price_kzt: int | None = Field(default=None, gt=0)
     max_price_kzt: int = Field(gt=0)
@@ -55,7 +57,9 @@ async def list_profiles():
     async with SessionLocal() as session:
         rows = (await session.scalars(select(SearchProfile).order_by(SearchProfile.id))).all()
         pref = await session.get(SearchPreference, 1)
-        return {'items': [profile_dict(row) for row in rows], 'active_profile_id': pref.active_profile_id if pref else None}
+        visible = [row for row in rows if (row.criteria or {}).get('city', 'astana') in SEARCH_CITIES]
+        active = pref.active_profile_id if pref and any(row.id == pref.active_profile_id for row in visible) else None
+        return {'items': [profile_dict(row) for row in visible], 'active_profile_id': active}
 
 
 @router.post('', status_code=201)
@@ -103,9 +107,12 @@ async def activate_profile(profile_id: int):
             row = await session.get(SearchProfile, profile_id)
             if row is None:
                 raise HTTPException(404, 'Профиль не найден')
+            if (row.criteria or {}).get('city', 'astana') not in SEARCH_CITIES:
+                raise HTTPException(422, 'Город профиля больше не поддерживается для поиска')
             criteria = ProfileCriteria.model_validate(row.criteria)
         await save_search_preference(criteria.rooms, criteria.max_price_kzt, criteria.min_area_m2,
             criteria.max_area_m2, criteria.min_bathrooms, criteria.exclude_pledged,
             max_area_m2_is_set=True, min_price_kzt=criteria.min_price_kzt, min_price_kzt_is_set=True,
-            city=criteria.city, conditions=criteria.conditions.model_dump(), active_profile_id=profile_id)
+            city=criteria.city, conditions=criteria.conditions.model_dump(), active_profile_id=profile_id,
+            market_type=criteria.market_type)
         return {'active_profile_id': profile_id}

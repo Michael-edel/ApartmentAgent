@@ -1,6 +1,6 @@
 [project]
 name = "apartment-agent"
-version = "0.22.0"
+version = "0.22.2"
 description = "Apartment monitoring and comparison in Kazakhstan"
 requires-python = ">=3.12"
 dependencies = [

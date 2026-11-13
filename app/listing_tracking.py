@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import raiseload
 
+from app.cities import city_slug
 from app.models import Listing, ListingLike, ListingObservation, ListingTargetPrice, SearchResult
 from app.property_duplicates import (availability, canonical_url, confirmed_component, group_listings,
                                      load_duplicate_decisions)
@@ -103,7 +104,7 @@ async def tracking_summary(session, listing_id):
                        'updated_at': target.updated_at, 'paused': not liked} if target else None,
             'matching_offers': _matching(selected, group, confirmed, target)}
 
-async def evaluate_target_alerts(listing_id=None):
+async def evaluate_target_alerts(listing_id=None, *, city=None):
     """Evaluate configured liked listings after an import or a target update."""
     from app.config import get_settings
     from app.database import SessionLocal
@@ -120,7 +121,8 @@ async def evaluate_target_alerts(listing_id=None):
             if listing_id is not None and target.listing_id != listing_id:
                 continue
             context = await _context(session, target.listing_id)
-            if context is None or canonical_url(context[0].source_url) not in likes:
+            if (context is None or canonical_url(context[0].source_url) not in likes
+                    or (city is not None and city_slug(context[0].city) != city)):
                 continue
             for offer in _matching(*context, target):
                 events.append({'listing_id':target.listing_id, 'offer_id':offer['listing_id'],

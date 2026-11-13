@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 from app.krisha_search import normalize_krisha_import_url
+from app.market_type import MarketType
 
 
 def plain_detail_text(value: str) -> str:
@@ -43,6 +44,7 @@ class ListingCreate(BaseModel):
     details_extracted: bool = Field(default=False, exclude=True)
     availability_status: Literal['active', 'archived'] | None = Field(default=None, exclude=True)
     city: str = "Астана"
+    market_type: MarketType | None = None
     city_observed: bool | None = Field(default=None, exclude=True)
     district: str | None = None
     residential_complex: str | None = None

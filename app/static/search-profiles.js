@@ -32,16 +32,29 @@
     if (![price,minPrice,minArea,maxArea].every(input => input?.checkValidity())) throw Error('Проверьте цену и площадь в критериях поиска.');
     if (minPrice.value && Number(minPrice.value) > Number(price.value)) throw Error('Минимальная цена больше максимальной.');
     if (maxArea.value && Number(minArea.value) > Number(maxArea.value)) throw Error('Минимальная площадь больше максимальной.');
-    return {city:el('searchCity')?.value || 'astana', rooms, min_price_kzt:minPrice.value ? Number(minPrice.value) : null, max_price_kzt:Number(price.value), min_area_m2:Number(minArea.value), max_area_m2:maxArea.value ? Number(maxArea.value) : null, min_bathrooms:el('searchBathrooms')?.checked ? 2 : 0, exclude_pledged:!!el('searchExcludePledged')?.checked, conditions:read()};
+    return {city:el('searchCity')?.value || 'astana', market_type:el('searchMarketType')?.value || 'all', rooms, min_price_kzt:minPrice.value ? Number(minPrice.value) : null, max_price_kzt:Number(price.value), min_area_m2:Number(minArea.value), max_area_m2:maxArea.value ? Number(maxArea.value) : null, min_bathrooms:el('searchBathrooms')?.checked ? 2 : 0, exclude_pledged:!!el('searchExcludePledged')?.checked, conditions:read()};
   }
   const select=el('profileSelect'), name=el('profileName'), enabled=el('profileEnabled'), message=el('profileMessage');
   const selected = () => items.find(item => String(item.id) === select?.value);
+  function updateEnabledPolicy() {
+    const profileCity = selected()?.criteria?.city;
+    const formCity = el('searchCity')?.value;
+    const isManualOnly = profileCity ? profileCity !== 'astana' : formCity === 'ekibastuz';
+    enabled.disabled = isManualOnly;
+    if (isManualOnly) enabled.checked = false;
+    const hint = el('profileCityHint');
+    if (hint) hint.hidden = !isManualOnly && formCity !== 'ekibastuz';
+  }
   function updateSelected() {
     const item=selected();
     if (item) { name.value=item.name; enabled.checked=item.enabled === true; }
+    else { name.value=''; enabled.checked=false; }
     for (const id of ['profileUpdate','profileUpdateCriteria','profileActivate','profileDelete']) if (el(id)) el(id).disabled=!item;
+    if (item && !['astana','ekibastuz'].includes(item.criteria?.city)) el('profileActivate').disabled = true;
+    updateEnabledPolicy();
   }
   select?.addEventListener('change', updateSelected);
+  document.addEventListener('apartmentagent:city-changed', updateEnabledPolicy);
   async function request(url, method='GET', body) {
     const response=await fetch(url, {method,...(body ? {headers:{'Content-Type':'application/json'},body:JSON.stringify(body)} : {})});
     if (response.status === 204) return null;
@@ -64,13 +77,14 @@
     if (action === 'delete' && !window.confirm(`Удалить профиль «${current.name}»?`)) return;
     message.textContent='Выполняю…';
     try {
-      if (action === 'activate') { await request(`/api/v1/search/profiles/${current.id}/activate`,'POST'); location.reload(); return; }
+      if (action === 'activate') { await request(`/api/v1/search/profiles/${current.id}/activate`,'POST'); if (/^#listing-[1-9]\d*$/.test(location.hash)) history.replaceState(null, '', location.pathname + location.search); location.reload(); return; }
       if (action === 'delete') { await request(`/api/v1/search/profiles/${current.id}`,'DELETE'); await refresh(''); message.textContent='Профиль удалён.'; return; }
       const profileName=name.value.trim();
       if (!profileName) throw Error('Введите название профиля.');
-      const body={name:profileName,enabled:enabled.checked,criteria:action === 'update' ? current.criteria : criteria()};
+      const chosenCriteria = action === 'update' ? current.criteria : criteria();
+      const body={name:profileName,enabled:chosenCriteria.city === 'astana' && enabled.checked,criteria:chosenCriteria};
       const result=await request(action === 'create' ? '/api/v1/search/profiles' : `/api/v1/search/profiles/${current.id}`,action === 'create' ? 'POST' : 'PUT',body);
-      await refresh(result.id); message.textContent='Профиль сохранён.';
+      await refresh(result.id); message.textContent=chosenCriteria.city === 'ekibastuz' ? 'Профиль сохранён для ручного поиска.' : 'Профиль сохранён.';
     } catch (error) { message.textContent=error.message || 'Не удалось выполнить действие.'; }
   }
   for (const [id, action] of [['profileCreate','create'],['profileUpdate','update'],['profileUpdateCriteria','updateCriteria'],['profileActivate','activate'],['profileDelete','delete']]) el(id)?.addEventListener('click', () => void act(action));

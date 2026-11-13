@@ -41,7 +41,7 @@ async def test_browser_endpoint_corrects_office_address_from_old_extensions(monk
         return value
     monkeypatch.setattr(main, "_save_listing", save)
     value = payload(address="Явный адрес 7" if explicit else "Астана, Нура р-н, пр. Улы Дала, 13",
-                    property_details={"Адрес": "Явный адрес 7"} if explicit else {})
+                    property_details={"Город": "Астана", **({"Адрес": "Явный адрес 7"} if explicit else {})})
     value = value.model_copy(update={"title": "4-комнатная квартира · 95.66 м², Айтматова 21"})
     result = await main.import_listing_from_browser(value)
     assert result.address == (value.address if explicit else "Айтматова 21")

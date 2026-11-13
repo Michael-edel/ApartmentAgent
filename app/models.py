@@ -69,6 +69,7 @@ class SearchPreference(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     city: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    market_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     rooms: Mapped[int] = mapped_column(Integer, default=2)
     min_price_kzt: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     max_price_kzt: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -96,6 +97,7 @@ class Listing(Base):
     property_details: Mapped[dict[str, str]] = mapped_column(JSON, default=dict, server_default="{}", nullable=False)
     details_imported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     city: Mapped[str] = mapped_column(String(100), default="Астана")
+    market_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     district: Mapped[str | None] = mapped_column(String(150), nullable=True)
     residential_complex: Mapped[str | None] = mapped_column(String(200), nullable=True)
     complex_description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -204,6 +206,7 @@ class SearchResult(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     url: Mapped[str] = mapped_column(Text, unique=True, index=True)
     city: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    market_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     search_engine: Mapped[str] = mapped_column(String(30), index=True)
     query: Mapped[str] = mapped_column(Text)
     title: Mapped[str] = mapped_column(String(500))

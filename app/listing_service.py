@@ -165,6 +165,8 @@ def sync_search_result_facts(result: SearchResult, listing: Listing, *, clear_un
         result.mortgage_supported = listing.mortgage_supported
     if listing.is_pledged is not None:
         result.is_pledged = listing.is_pledged
+    if listing.market_type is not None:
+        result.market_type = listing.market_type
     if listing.bathrooms_count is not None:
         result.bathrooms_count = listing.bathrooms_count
         result.bathrooms_count_is_lower_bound = listing.bathrooms_count_is_lower_bound
@@ -184,7 +186,12 @@ async def _matching_search_results(session: AsyncSession, source_url: str) -> li
 
 async def _sync_search_results(session: AsyncSession, listing: Listing, now: datetime, *, clear_unknown_mortgage: bool = False) -> None:
     """Make every import path expose saved, confirmed fields in search results."""
-    for result in await _matching_search_results(session, listing.source_url):
+    results = await _matching_search_results(session, listing.source_url)
+    if listing.market_type is None:
+        known_types = {result.market_type for result in results if result.market_type is not None}
+        if len(known_types) == 1:
+            listing.market_type = known_types.pop()
+    for result in results:
         result.import_status = "imported"
         result.imported_listing_id = listing.id
         result.import_error = None
@@ -525,5 +532,5 @@ async def persist_listing(
             price_change=price_change,
         )
     if notify:
-        await evaluate_target_alerts()
+        await evaluate_target_alerts(city=city_slug(row.city))
     return PersistedListing(row=row, created=created, price_change=price_change)

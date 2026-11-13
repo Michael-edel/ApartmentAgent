@@ -4,7 +4,8 @@ from typing import Annotated
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
-from app.cities import SearchCity
+from app.cities import SEARCH_CITIES, SearchCity
+from app.market_type import MarketFilter
 
 
 class Settings(BaseSettings):
@@ -24,6 +25,7 @@ class Settings(BaseSettings):
 
     search_enabled: bool = True
     search_city: SearchCity = 'astana'
+    market_type: MarketFilter = 'all'
     search_conditions: dict = Field(default_factory=dict)
     target_rooms: int = 2
     search_interval_minutes: int = 15
@@ -61,6 +63,13 @@ class Settings(BaseSettings):
     min_score_to_notify: int = 85
     min_bathrooms: int = 0
     exclude_pledged: bool = True
+
+    @field_validator('search_city', mode='before')
+    @classmethod
+    def supported_search_city(cls, value):
+        # Preserve legacy configuration without assigning old cities to Astana
+        # records; the active search itself falls back to Astana.
+        return value if value in SEARCH_CITIES else 'astana'
 
     @field_validator("search_providers", mode="before")
     @classmethod

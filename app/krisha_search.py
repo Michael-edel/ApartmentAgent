@@ -11,7 +11,7 @@ from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 import httpx
 
 from app.config import SearchSettingsProxy
-from app.cities import city_slug
+from app.cities import city_slug, SEARCH_CITIES
 from app.seller import IDENTITY_CONFIRMED_REALTOR
 
 settings = SearchSettingsProxy()
@@ -55,6 +55,7 @@ class KrishaSearchItem:
     url: str
     snippet: str | None = None
     seller_type: str | None = None
+    market_type: str | None = None
 
 
 class _SellerCardParser(HTMLParser):
@@ -63,11 +64,13 @@ class _SellerCardParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.roles: dict[str, set[str]] = {}
+        self.markets: dict[str, set[str]] = {}
         self.depth = 0
         self.label_depth: int | None = None
         self.label_text: list[str] = []
         self.label_kind: str | None = None
         self.specialist_footer_depth: int | None = None
+        self.complex_footer_depth: int | None = None
         self.card_id: str | None = None
         self.title_url: str | None = None
         self.card_roles: set[str] = set()
@@ -92,10 +95,16 @@ class _SellerCardParser(HTMLParser):
             self.depth += 1
             if "a-card__footer" in classes and "user-specialist" in classes:
                 self.specialist_footer_depth = self.depth
+            if "a-card__footer" in classes and "user-complex" in classes:
+                self.complex_footer_depth = self.depth
             if "label-user-owner" in classes:
                 self.label_depth, self.label_text, self.label_kind = self.depth, [], 'owner'
             elif "label-user-identified-specialist" in classes and self.specialist_footer_depth is not None:
                 self.label_depth, self.label_text, self.label_kind = self.depth, [], 'specialist'
+            elif "a-card__complex-label" in classes and self.complex_footer_depth is not None:
+                self.label_depth, self.label_text, self.label_kind = self.depth, [], 'new'
+            elif "label-user-complex" in classes:
+                self.label_depth, self.label_text, self.label_kind = self.depth, [], 'new'
 
     def handle_data(self, data: str) -> None:
         if self.label_depth is not None:
@@ -110,14 +119,23 @@ class _SellerCardParser(HTMLParser):
                 self.card_roles.add('Хозяин недвижимости')
             elif self.label_kind == 'specialist' and label == 'специалист':
                 self.card_roles.add(IDENTITY_CONFIRMED_REALTOR)
+            elif self.label_kind == 'new' and label == 'новостройка':
+                self.card_roles.add('__new__')
             self.label_depth = None
             self.label_kind = None
         if self.depth == self.specialist_footer_depth:
             self.specialist_footer_depth = None
+        if self.depth == self.complex_footer_depth:
+            self.complex_footer_depth = None
         self.depth -= 1
         if not self.depth:
             if self.card_roles and self.card_id and self.title_url == f"https://krisha.kz/a/show/{self.card_id}":
-                self.roles.setdefault(self.title_url, set()).update(self.card_roles)
+                roles = self.card_roles - {'__new__'}
+                self.roles.setdefault(self.title_url, set()).update(roles)
+                if '__new__' in self.card_roles:
+                    self.markets.setdefault(self.title_url, set()).add('new')
+                if roles == {'Хозяин недвижимости'}:
+                    self.markets.setdefault(self.title_url, set()).add('secondary')
             self.card_id = None
 
 
@@ -176,7 +194,7 @@ class _CardParser(HTMLParser):
 
 def build_krisha_search_url(page: int = 1, rooms: int = 2, *, owner_only: bool = False) -> str:
     city = city_slug(settings.search_city)
-    if city is None:
+    if city not in SEARCH_CITIES:
         raise ValueError("Unsupported search city")
     base_url = f"https://krisha.kz/prodazha/kvartiry/{city}/"
     if rooms not in {2, 3, 4}:
@@ -197,6 +215,8 @@ def build_krisha_search_url(page: int = 1, rooms: int = 2, *, owner_only: bool =
     ])
     if owner_only:
         params.append(("das[who]", "1"))
+    if settings.market_type == 'new':
+        params.append(("das[novostroiki]", "1"))
     if page > 1:
         params.append(("page", str(page)))
     return f"{base_url}?{urlencode(params)}"
@@ -322,6 +342,9 @@ def parse_krisha_search_page(html: str) -> list[KrishaSearchItem]:
     for url, roles in sellers.roles.items():
         if url in by_url and len(roles) == 1:
             by_url[url].seller_type = next(iter(roles))
+    for url, markets in sellers.markets.items():
+        if url in by_url and len(markets) == 1:
+            by_url[url].market_type = next(iter(markets))
 
     return list(by_url.values())
 

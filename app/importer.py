@@ -630,6 +630,17 @@ def _json_property_details(item: dict[str, Any]) -> dict[str, str]:
     return result
 
 
+def _market_value(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = re.sub(r"\s+", " ", value.strip().casefold()).replace("ё", "е")
+    if text in {"new", "primary", "первичка", "первичный рынок", "первичное жилье", "новостройка"}:
+        return "new"
+    if text in {"secondary", "вторичка", "вторичный рынок", "вторичное жилье"}:
+        return "secondary"
+    return None
+
+
 def _normalized_json(data: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, str], bool]:
     """Flatten documented field shapes; nested seller/recommendation facts cannot leak."""
     normalized, details, rich = [], {}, False
@@ -652,6 +663,7 @@ def _normalized_json(data: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
                 return value.get("value") if value.get("value") is not None else value.get("amount")
             return value
         aliases = {
+            "market_type": ("market_type", "marketType"),
             "price": ("price", "priceKzt", "price_kzt"), "area": ("area", "areaM2", "area_m2", "square", "floorSize", "totalArea"),
             "rooms": ("rooms", "roomCount", "numberOfRooms", "roomsCount"), "floor": ("floor", "floorNumber"),
             "floorsTotal": ("floors", "floorsTotal", "floorCount", "numberOfFloors"),
@@ -900,7 +912,7 @@ def _address_from_text(value: str) -> str | None:
         ),
         re.compile(
             r"(?:№\s*\d+\s*[:：]\s*|Продажа[^:—]{0,120}[:：]\s*)"
-            r"(?P<address>[^—\n]{3,120}?),\s*(?:Астана|Astana|Алматы|Almaty|Шымкент|Shymkent|Караганда|Karaganda|Павлодар|Pavlodar)\b",
+            r"(?P<address>[^—\n]{3,120}?),\s*(?:Астана|Astana|Алматы|Almaty|Шымкент|Shymkent|Караганда|Karaganda|Павлодар|Pavlodar|Экибастуз|Екібастұз|Ekibastuz)\b",
             re.IGNORECASE,
         ),
         re.compile(
@@ -1217,6 +1229,16 @@ async def import_krisha_listing(source_url: str, *, expected_city: str | None = 
     )
     seller_name, seller_type = _seller_fields(detail_parser, data)
     repair_condition = _property_value(property_details, "Состояние квартиры", "Ремонт") or _find_text(data, {"repairCondition"})
+    market_evidence = [_property_value(property_details, "Тип рынка", "Рынок жилья", "Тип жилья")]
+    market_evidence.extend(row.get("market_type") for row in data)
+    market_values = {value for evidence in market_evidence if (value := _market_value(evidence))}
+    market_type = next(iter(market_values)) if len(market_values) == 1 else None
+    # Only an explicit role in the visible author panel supports this inference.
+    # Never infer market type from a description or JSON seller metadata.
+    if not any(market_evidence):
+        _, visible_role = _seller_fields(detail_parser, [])
+        if (visible_role or "").casefold().strip() == "хозяин недвижимости":
+            market_type = "secondary"
     title = (title or f"{rooms}-комнатная квартира, {city}")[:300]
     description = description[:20_000]
     mortgage_supported, mortgage_source_kind, mortgage_evidence = _mortgage_observation(data, property_details, description, title)
@@ -1250,6 +1272,7 @@ async def import_krisha_listing(source_url: str, *, expected_city: str | None = 
         title=title,
         description=description or None,
         city=city,
+        market_type=market_type,
         city_observed=bool(city_evidence or city_slug(expected_city)),
         district=district,
         residential_complex=residential_complex,

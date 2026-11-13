@@ -5,11 +5,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from app.availability import availability_key, set_source_availability, unavailable_urls
 from app.config import get_settings, SearchSettingsProxy, search_settings_override
-from app.cities import CITY_NAMES, SearchCity, city_matches, city_slug
+from app.cities import CITY_NAMES, SEARCH_CITIES, KnownCity, SearchCity, city_matches, city_slug
 from app.database import SessionLocal
 from app.importer import ListingArchived, ListingImportError, ListingUnavailable, import_krisha_listing
 from app.krisha_search import KrishaSearchBlocked, normalize_krisha_listing_url
@@ -20,6 +20,7 @@ from app.scoring import listing_river_bank
 from app.search_analysis import analyze_search_result, is_target_search_result, parse_bathrooms_count, bathrooms_is_lower_bound
 from app.search_providers import PROVIDERS, SearchItem
 from app.search_conditions import SearchConditions, evaluate_conditions, kitchen_area
+from app.market_type import MarketFilter, matches_market_type
 from app.seller import seller_category
 
 settings = SearchSettingsProxy()
@@ -164,6 +165,7 @@ _CITY_WORDS = {
     'shymkent': r'шымкент|shymkent',
     'karaganda': r'караганда|қарағанды|karaganda|karagandy',
     'pavlodar': r'павлодар|pavlodar',
+    'ekibastuz': r'экибастуз\w*|екібастұз\w*|ekibastuz',
 }
 
 
@@ -184,6 +186,8 @@ async def _save_items(
 ) -> tuple[int, int, list[SearchImportCandidate]]:
     accepted_by_url: dict[str, SearchItem] = {}
     for item in items:
+        if settings.market_type == 'new' and provider_name != 'krisha_direct':
+            continue  # Web snippets cannot establish a primary-market listing.
         if _matches_target(item) and (provider_name not in {'brave', 'bing_rss'} or _secondary_city_confirmed(item)):
             accepted_by_url[item.url] = item
     accepted_items = list(accepted_by_url.values())
@@ -193,12 +197,17 @@ async def _save_items(
     now = datetime.now(UTC)
     async with SessionLocal() as session:
         known_pledges: dict[str, bool] = {}
-        known_cities: dict[str, set[SearchCity | None]] = {}
+        known_cities: dict[str, set[KnownCity | None]] = {}
+        listing_urls: dict[str, list[str]] = {}
+        known_markets: dict[str, set[str]] = {}
         if accepted_items:
-            for url, city, pledged in (await session.execute(
-                select(Listing.source_url, Listing.city, Listing.is_pledged)
+            for url, city, pledged, saved_market in (await session.execute(
+                select(Listing.source_url, Listing.city, Listing.is_pledged, Listing.market_type)
             )).all():
                 key = normalize_krisha_listing_url(url) or url
+                listing_urls.setdefault(key, []).append(url)
+                if saved_market in {'new', 'secondary'}:
+                    known_markets.setdefault(key, set()).add(saved_market)
                 if city and city.strip():
                     known_cities.setdefault(key, set()).add(city_slug(city))
                 if pledged is not None:
@@ -216,14 +225,25 @@ async def _save_items(
                 accepted_count -= 1
                 continue
             seller_type = item.seller_type if krisha_url and seller_category(item.seller_type) != "unknown" else None
+            market_type = item.market_type if krisha_url and item.market_type in {'new', 'secondary'} else None
             if krisha_url and seller_type:
                 await fill_seller_from_krisha_search(session, krisha_url, seller_type)
+            if market_type and canonical in listing_urls:
+                await session.execute(update(Listing).where(
+                    Listing.source_url.in_(listing_urls[canonical]), Listing.market_type.is_(None)
+                ).values(market_type=market_type, updated_at=Listing.updated_at))
+            known_types = known_markets.get(canonical, set())
+            discovery_market = market_type if krisha_url else getattr(existing, 'market_type', None)
+            effective_market = (next(iter(known_types)) if len(known_types) == 1 else None) if known_types else discovery_market
+            included_market = matches_market_type(settings.market_type, effective_market)
             is_pledged = known_pledges.get(normalize_krisha_listing_url(item.url) or item.url)
             bathrooms_count = parse_bathrooms_count(f"{item.title or ''} {item.snippet or ''}")
             mortgage_supported = parse_mortgage_text(f"{item.title or ''}\n{item.snippet or ''}")
             if existing:
                 existing.city = settings.search_city
                 existing.last_seen = now
+                if krisha_url:
+                    existing.market_type = market_type
                 if seller_type:
                     existing.seller_type = seller_type
                 listing = (await session.get(Listing, existing.imported_listing_id)
@@ -243,6 +263,9 @@ async def _save_items(
                 if _row_hidden_by_pledge(existing):
                     accepted_count -= 1
                     continue
+                if not included_market:
+                    accepted_count -= 1
+                    continue
                 if existing.import_status != "imported" or existing.imported_listing_id is None:
                     candidates.append(SearchImportCandidate(result_id=existing.id, url=existing.url, city=settings.search_city))
                 continue
@@ -254,6 +277,7 @@ async def _save_items(
                 title=item.title,
                 snippet=item.snippet,
                 seller_type=seller_type,
+                market_type=market_type,
                 bathrooms_count=bathrooms_count,
                 mortgage_supported=mortgage_supported,
                 is_pledged=is_pledged,
@@ -263,6 +287,9 @@ async def _save_items(
             session.add(row)
             await session.flush()
             if _row_hidden_by_pledge(row):
+                accepted_count -= 1
+                continue
+            if not included_market:
                 accepted_count -= 1
                 continue
             candidates.append(SearchImportCandidate(result_id=row.id, url=row.url, city=settings.search_city))
@@ -332,6 +359,17 @@ async def _auto_import(candidates: list[SearchImportCandidate]) -> tuple[int, in
                        await import_krisha_listing(candidate.url, expected_city=candidate.city))
             if city_slug(payload.city) != candidate.city:
                 raise ValueError("Город объявления не совпадает с выбранным городом поиска")
+            actual_market = getattr(payload, 'market_type', None)
+            if actual_market in ('new', 'secondary') and not matches_market_type(settings.market_type, actual_market):
+                async with SessionLocal() as session:
+                    row = await session.get(SearchResult, candidate.result_id)
+                    if row is not None:
+                        row.market_type = actual_market
+                        row.import_status = 'market_mismatch'
+                        row.import_error = 'Тип рынка объявления не соответствует выбранному фильтру'
+                        await session.commit()
+                errors += 1
+                continue
             saved = await persist_listing(payload, allow_existing=True, notify=True)
             await _mark_import_result(
                 candidate,
@@ -398,12 +436,13 @@ async def run_search(rooms: int | None = None, max_price_kzt: int | None = None,
                      min_bathrooms: int | None = None, exclude_pledged: bool | None = None,
                      *, max_area_m2_is_set: bool = False, seller: str | None = None,
                      min_price_kzt: int | None = None, min_price_kzt_is_set: bool = False,
-                     city: SearchCity | None = None, conditions: dict | None = None) -> SearchSummary:
+                     city: SearchCity | None = None, conditions: dict | None = None,
+                     market_type: MarketFilter | None = None) -> SearchSummary:
     async with _search_lock:
-        if max_area_m2_is_set or min_price_kzt_is_set or any(value is not None for value in (rooms, min_price_kzt, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms, exclude_pledged, city, conditions)):
+        if max_area_m2_is_set or min_price_kzt_is_set or any(value is not None for value in (rooms, min_price_kzt, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms, exclude_pledged, city, conditions, market_type)):
             await save_search_preference(rooms, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms, exclude_pledged,
                                          max_area_m2_is_set=max_area_m2_is_set, min_price_kzt=min_price_kzt,
-                                         min_price_kzt_is_set=min_price_kzt_is_set, city=city, conditions=conditions)
+                                         min_price_kzt_is_set=min_price_kzt_is_set, city=city, conditions=conditions, market_type=market_type)
         return await _run_search(seller=seller)
 
 
@@ -413,12 +452,13 @@ async def _run_search(*, seller: str | None = None) -> SearchSummary:
         return summary
 
     queries = _rotated_queries()
-    enabled_providers = (["krisha_direct"] if seller == "owner" else
+    owner_search = seller == 'owner' or settings.market_type == 'secondary'
+    enabled_providers = (["krisha_direct"] if owner_search else
                          [name for name in settings.search_providers if name in PROVIDERS])
     jobs: list[tuple[str, str]] = []
 
     for provider_name in enabled_providers:
-        provider_queries = [f"owner:{settings.target_rooms}" if seller == "owner" else str(settings.target_rooms)] if provider_name in QUERYLESS_PROVIDERS else queries
+        provider_queries = [f"owner:{settings.target_rooms}" if owner_search else str(settings.target_rooms)] if provider_name in QUERYLESS_PROVIDERS else queries
         summary.providers[provider_name] = {
             "queries": len(provider_queries),
             "found": 0,
@@ -448,7 +488,7 @@ async def _run_search(*, seller: str | None = None) -> SearchSummary:
             continue
 
         safe_items = items or []
-        if seller == "owner":
+        if owner_search:
             safe_items = [item for item in safe_items if item.seller_type == "Хозяин недвижимости"]
         try:
             new_found, accepted_count, candidates = await _save_items(provider_name, query, safe_items)
@@ -481,9 +521,23 @@ async def periodic_search(stop_event: asyncio.Event) -> None:
                 preference = await session.get(SearchPreference, 1)
                 active_id = preference.active_profile_id if preference else None
                 active = await session.get(SearchProfile, active_id) if active_id else None
-                run_active = active is None or active.enabled
-            if run_active:
+                active_city = (active.criteria or {}).get('city', 'astana') if active else None
+                run_active = (active is None or active_city not in SEARCH_CITIES or active.enabled)
+                enabled_profiles = (await session.scalars(select(SearchProfile).where(SearchProfile.enabled.is_(True)))).all()
+                enabled_astana = any((row.criteria or {}).get('city', 'astana') == 'astana' for row in enabled_profiles)
+            if settings.search_city == 'astana' and run_active:
                 await run_search()
+            elif settings.search_city == 'ekibastuz' and not enabled_astana:
+                # Manual Ekibastuz search must not replace background Astana.
+                override = get_settings().model_copy(deep=True, update={
+                    'search_city': 'astana', 'auto_import_enabled': False,
+                })
+                async with _search_lock:
+                    token = search_settings_override.set(override)
+                    try:
+                        await _run_search()
+                    finally:
+                        search_settings_override.reset(token)
             await run_monitored_profiles()
         except Exception:
             logger.exception("Periodic search failed")
@@ -499,7 +553,8 @@ async def run_monitored_profiles() -> None:
         rows = (await session.scalars(select(SearchProfile).where(SearchProfile.enabled.is_(True)))).all()
         preference = await session.get(SearchPreference, 1)
         active_id = preference.active_profile_id if preference else None
-        profiles = [(row.id, row.criteria) for row in rows if row.id != active_id]
+        profiles = [(row.id, row.criteria) for row in rows
+                    if row.id != active_id and (row.criteria or {}).get('city', 'astana') == 'astana']
     for profile_id, raw in profiles:
         try:
             criteria = ProfileCriteria.model_validate(raw)
@@ -509,6 +564,7 @@ async def run_monitored_profiles() -> None:
                 'min_area_m2': criteria.min_area_m2, 'max_area_m2': criteria.max_area_m2,
                 'min_bathrooms': criteria.min_bathrooms, 'exclude_pledged': criteria.exclude_pledged,
                 'search_conditions': criteria.conditions.model_dump(),
+                'market_type': criteria.market_type,
                 # Import/notifications use active UI criteria; defer import until
                 # the profile is active rather than mixing two configurations.
                 'auto_import_enabled': False,
@@ -535,7 +591,7 @@ async def get_search_status() -> dict[str, object]:
         engine_counts: dict[str, int] = {}
         location_rows = (await session.execute(
                 select(Listing.id, Listing.city, Listing.latitude, Listing.longitude, Listing.floor,
-                       Listing.floors_total, Listing.building_year, Listing.property_details)
+                       Listing.floors_total, Listing.building_year, Listing.property_details, Listing.market_type)
             )).all()
         locations = {value.id: listing_river_bank(value.city, value.latitude, value.longitude) for value in location_rows}
         linked = {value.id: value for value in location_rows}
@@ -543,6 +599,8 @@ async def get_search_status() -> dict[str, object]:
         async for row in matching_rows:
             card = linked.get(getattr(row, "imported_listing_id", None))
             if not city_matches(settings.search_city, getattr(row, "city", None), card.city if card else None):
+                continue
+            if not matches_market_type(settings.market_type, (card.market_type if card and card.market_type else getattr(row, 'market_type', None))):
                 continue
             if not conditions_for_result(row, card)['matches_hard']:
                 continue
@@ -597,6 +655,7 @@ async def get_search_status() -> dict[str, object]:
 
     return {
         "city": settings.search_city,
+        "market_type": settings.market_type,
         "conditions": settings.search_conditions,
         "rooms": settings.target_rooms,
         "min_price_kzt": settings.min_price_kzt,
@@ -629,10 +688,11 @@ async def get_search_status() -> dict[str, object]:
 async def load_search_preference() -> None:
     async with SessionLocal() as session:
         preference = await session.get(SearchPreference, 1)
+        settings.market_type = preference.market_type if preference and preference.market_type in ('all', 'new', 'secondary') else 'all'
         if preference and preference.conditions is not None:
             settings.search_conditions = SearchConditions.model_validate(preference.conditions).model_dump()
-        if preference and city_slug(preference.city):
-            settings.search_city = city_slug(preference.city)
+        selected = city_slug(preference.city) if preference else None
+        settings.search_city = selected if selected in SEARCH_CITIES else 'astana'
         if preference and preference.rooms in (2, 3, 4):
             settings.target_rooms = preference.rooms
         if preference and preference.max_price_kzt is not None:
@@ -655,9 +715,11 @@ async def save_search_preference(rooms: int | None, max_price_kzt: int | None = 
                                  *, max_area_m2_is_set: bool = False,
                                  min_price_kzt: int | None = None, min_price_kzt_is_set: bool = False,
                                  city: SearchCity | None = None, conditions: dict | None = None,
-                                 active_profile_id: int | None = None) -> None:
+                                 active_profile_id: int | None = None, market_type: MarketFilter | None = None) -> None:
+    if market_type is not None and market_type not in ('all', 'new', 'secondary'):
+        raise ValueError('Неизвестный тип рынка')
     validated_conditions = SearchConditions.model_validate(conditions).model_dump() if conditions is not None else None
-    if city is not None and city not in CITY_NAMES:
+    if city is not None and city not in SEARCH_CITIES:
         raise ValueError("Неизвестный город поиска")
     update_min_price = min_price_kzt_is_set or min_price_kzt is not None
     update_price = update_min_price or max_price_kzt is not None
@@ -693,10 +755,14 @@ async def save_search_preference(rooms: int | None, max_price_kzt: int | None = 
             preference.city = city
         if validated_conditions is not None:
             preference.conditions = validated_conditions
+        if market_type is not None:
+            preference.market_type = market_type
         preference.active_profile_id = active_profile_id
         await session.commit()
     if city is not None:
         settings.search_city = city
+    if market_type is not None:
+        settings.market_type = market_type
     if validated_conditions is not None:
         settings.search_conditions = validated_conditions
     if rooms is not None:

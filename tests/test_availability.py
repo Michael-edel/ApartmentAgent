@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app import checker, listing_service, main, search_agent
 from app.availability import restore_verified_check_history
 from app.importer import ListingArchived, ListingImportError, ListingUnavailable
-from app.models import Base, Listing, ListingCheck, SearchResult
+from app.models import BathroomCheckControl, BathroomCheckJob, BathroomCheckTask, Base, Listing, ListingCheck, ListingLike, SearchResult
 
 
 def advert(number: int) -> str:
@@ -34,6 +34,79 @@ async def sessions(monkeypatch):
 def listing(number: int) -> Listing:
     return Listing(id=number, source_url=advert(number), title=f"Квартира {number}", rooms=2,
                    area_m2=60, price_kzt=25_000_000, latitude=51.1283, longitude=71.4306)
+
+
+@pytest.mark.asyncio
+async def test_saved_city_scope_and_browser_import(sessions):
+    async with sessions.begin() as session:
+        astana, ekibastuz, old = (listing(number) for number in (31, 32, 33))
+        ekibastuz.city = "Экибастуз"
+        old.city = "Шымкент"
+        session.add_all([astana, ekibastuz, old])
+        session.add_all([ListingLike(url=advert(number)) for number in (31, 32, 33)])
+        session.add(SearchResult(url=advert(33), city="astana", search_engine="fixture",
+                                 query="", title="2-комнатная квартира, 60 м², 25 млн тг"))
+
+    transport = httpx.ASGITransport(app=main.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        for city, expected_id in (("astana", 31), ("ekibastuz", 32)):
+            saved = await client.get("/api/v1/listings", params={"city": city})
+            liked = await client.get("/api/v1/comparison/liked", params={"city": city})
+            assert [row["id"] for row in saved.json()] == [expected_id]
+            assert [row["listing_id"] for row in liked.json()] == [expected_id]
+        assert (await client.get("/api/v1/listings/33")).json()["city"] == "Шымкент"
+        assert (await client.get("/api/v1/listings", params={"city": "shymkent"})).status_code == 422
+
+        import_url = "/api/v1/listings/browser-import"
+        payload = {"source_url": advert(34), "title": "Квартира 34", "price_kzt": 25_000_000,
+                   "area_m2": 60, "rooms": 2}
+        assert (await client.post(import_url, json=payload)).status_code == 422
+        assert (await client.post(import_url, json={**payload, "city": "Конаев", "city_observed": True})).status_code == 422
+        assert (await client.post(import_url, json={**payload, "city": "Экибастуз", "city_observed": True})).status_code == 422
+        assert (await client.post(import_url, json={**payload, "city": "Астана", "city_observed": True})).status_code == 201
+
+        manual_url = advert(35)
+        async with sessions.begin() as session:
+            job = BathroomCheckJob(status="running", criteria={"manual_import": True, "source_url": manual_url})
+            session.add(job)
+            await session.flush()
+            session.add(BathroomCheckControl(id=1, current_job_id=job.id))
+            session.add(BathroomCheckTask(job_id=job.id, url=manual_url, status="leased",
+                                          lease_expires_at=datetime.now(UTC) + timedelta(minutes=1)))
+        manual = await client.post(import_url, json={**payload, "source_url": manual_url,
+                                                    "city": "Экибастуз", "city_observed": True})
+        assert manual.status_code == 201
+        assert manual.json()["city"] == "Экибастуз"
+
+
+@pytest.mark.asyncio
+async def test_market_filter_applies_to_found_saved_map_and_favorites(sessions, monkeypatch):
+    monkeypatch.setattr(main.settings, "search_city", "astana")
+    async with sessions.begin() as session:
+        for number, market in ((41, "new"), (42, "secondary"), (43, None)):
+            card = listing(number)
+            card.market_type = market
+            session.add(card)
+            await session.flush()
+            session.add(ListingLike(url=advert(number)))
+            session.add(SearchResult(url=advert(number), city="astana", market_type=None,
+                                     imported_listing_id=number, search_engine="fixture", query="",
+                                     title="2-комнатная квартира, 60 м², 25 млн тг"))
+
+    transport = httpx.ASGITransport(app=main.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        for market, expected in (("new", {41}), ("secondary", {42}), ("all", {41, 42, 43})):
+            monkeypatch.setattr(main.settings, "market_type", market)
+            params = {"city": "astana", "market_type": market}
+            saved = (await client.get("/api/v1/listings", params=params)).json()
+            liked = (await client.get("/api/v1/comparison/liked", params=params)).json()
+            found = (await client.get("/api/v1/search/results")).json()
+            pins = (await client.get("/api/v1/search/map")).json()
+            assert {row["id"] for row in saved} == expected
+            assert {row["listing_id"] for row in liked} == expected
+            assert {row["imported_listing_id"] for row in found} == expected
+            assert {row["listing_id"] for row in pins["items"]} == expected
+            assert pins["market_type"] == market
 
 
 @pytest.mark.asyncio

@@ -21,14 +21,15 @@ from app.availability import listing_availability, set_listing_sold, set_source_
 from app.bathroom_queue import router as bathroom_check_router
 from app.ai_service import analyze_listing, current_analysis
 from app.checker import ListingNotFound, check_all_listings, check_listing, periodic_checker
-from app.cities import CITY_NAMES, SearchCity, city_matches, city_slug, is_city_coordinate_pair, result_city_slug
+from app.cities import CITY_NAMES, SEARCH_CITIES, SearchCity, city_matches, city_slug, is_city_coordinate_pair, result_city_slug
 from app.config import get_settings
 from app.database import SessionLocal, engine, initialize_database
 from app.importer import ListingArchived, ListingImportError, ListingUnavailable, _address_from_text, _is_krisha_host, import_krisha_listing
-from app.listing_service import ListingAlreadyExists, persist_listing
+from app.listing_service import ListingAlreadyExists, _find_listing, _matching_search_results, persist_listing
 from app.market_comparison import LOOKBACK_DAYS, compare_saved_listings
+from app.market_type import MarketFilter, matches_market_type
 from app.krisha_search import normalize_krisha_listing_url
-from app.models import DuplicateDecision, Listing, ListingCheck, ListingLike, ListingTargetPrice, ListingWorkflow, PriceSnapshot, SearchHistory, SearchResult
+from app.models import BathroomCheckControl, BathroomCheckJob, BathroomCheckTask, DuplicateDecision, Listing, ListingCheck, ListingLike, ListingTargetPrice, ListingWorkflow, PriceSnapshot, SearchHistory, SearchResult
 from app.listing_tracking import tracking_summary
 from app.property_duplicates import canonical_url, confirmed_component, decision_key, duplicate_hidden_ids, group_listings, load_duplicate_decisions, offer, unique_offers
 from app.schemas import ListingCreate, ListingImportRequest, ListingResponse, PriceSnapshotResponse
@@ -126,6 +127,7 @@ def _payload_from_row(row: Listing) -> ListingCreate:
         property_details=row.property_details or {},
         details_extracted=row.details_imported_at is not None,
         city=row.city,
+        market_type=row.market_type,
         district=row.district,
         residential_complex=row.residential_complex,
         complex_description=row.complex_description,
@@ -189,7 +191,16 @@ async def _finish_search_result_monitor(result_id: int, source_url: str) -> None
     import_error: str | None = None
     listing_id: int | None = None
     try:
+        async with SessionLocal() as session:
+            result = await session.get(SearchResult, result_id)
+            expected_city = result_city_slug(result.city) if result is not None else None
+        if expected_city not in SEARCH_CITIES:
+            raise ListingImportError("Город объявления не входит в выбранные города поиска.")
         payload = await import_krisha_listing(source_url)
+        observed = city_slug(payload.city)
+        if (payload.city_observed or observed != "astana") and observed != expected_city:
+            raise ListingImportError("Город объявления отличается от города в выдаче.")
+        payload = payload.model_copy(update={"city": CITY_NAMES[expected_city], "city_observed": True})
         saved = await persist_listing(payload, allow_existing=True, notify=True)
         import_status = "imported"
         listing_id = saved.row.id
@@ -297,6 +308,8 @@ async def _save_listing(payload: ListingCreate, *, allow_existing: bool) -> List
 
 @app.post("/api/v1/listings", response_model=ListingResponse, status_code=status.HTTP_201_CREATED)
 async def create_listing(payload: ListingCreate) -> ListingResponse:
+    if city_slug(payload.city) not in SEARCH_CITIES:
+        raise HTTPException(422, "Поддерживаются Астана и Экибастуз.")
     return await _save_listing(payload, allow_existing=False)
 
 
@@ -316,6 +329,8 @@ async def import_listing(payload: ListingImportRequest) -> ListingResponse:
         raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
     except ListingImportError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    if city_slug(listing_data.city) not in SEARCH_CITIES:
+        raise HTTPException(422, "Поддерживаются Астана и Экибастуз.")
     return await _save_listing(listing_data, allow_existing=True)
 
 
@@ -338,9 +353,14 @@ async def import_listing_from_browser(payload: ListingCreate) -> ListingResponse
         )
 
     canonical_url = normalize_krisha_listing_url(str(payload.source_url))
+    if not canonical_url:
+        raise HTTPException(422, "Укажите ссылку на объявление Krisha.")
+    city = await _browser_import_city(payload, canonical_url)
     browser_payload = payload.model_copy(update={
         "source": "browser",
-        "source_url": HttpUrl(canonical_url) if canonical_url else payload.source_url,
+        "source_url": HttpUrl(canonical_url),
+        "city": CITY_NAMES[city],
+        "city_observed": True,
     })
     # Keep older installed extensions from replacing a house address with the
     # seller's office address while a browser queue is still running.
@@ -350,6 +370,44 @@ async def import_listing_from_browser(payload: ListingCreate) -> ListingResponse
             and payload.title.lstrip()[:1].isdigit()):
         browser_payload = browser_payload.model_copy(update={"address": own_address})
     return await _save_listing(browser_payload, allow_existing=True)
+
+
+async def _browser_import_city(payload: ListingCreate, url: str) -> SearchCity:
+    # The browser extractor can use Astana as a display fallback when no city
+    # was extracted. Treat only actual fields or matching stored records as evidence.
+    explicit = payload.property_details.get("Город")
+    if not explicit and (payload.city_observed or city_slug(payload.city) != "astana"):
+        explicit = payload.city
+    selected = city_slug(explicit)
+    if selected == "astana":
+        return "astana"
+    if explicit and selected != "ekibastuz":
+        raise HTTPException(422, "Автоимпорт сохраняет объявления с подтверждённым городом Астана.")
+    async with SessionLocal() as session:
+        if explicit is None:
+            existing = await _find_listing(session, url)
+            if existing is not None:
+                selected = city_slug(existing.city)
+            else:
+                cities = {city_slug(row.city) for row in await _matching_search_results(session, url)}
+                if len(cities) == 1:
+                    selected = cities.pop()
+        if selected == "astana":
+            return "astana"
+        if selected == "ekibastuz":
+            job = await session.scalar(
+                select(BathroomCheckJob)
+                .join(BathroomCheckControl, BathroomCheckControl.current_job_id == BathroomCheckJob.id)
+                .join(BathroomCheckTask, BathroomCheckTask.job_id == BathroomCheckJob.id)
+                .where(BathroomCheckJob.status == "running", BathroomCheckTask.url == url,
+                       BathroomCheckTask.status == "leased",
+                       BathroomCheckTask.lease_expires_at > datetime.now(UTC))
+            )
+            if job and (job.criteria.get("city") == "ekibastuz"
+                        or job.criteria.get("manual_import") and job.criteria.get("source_url") == url):
+                return "ekibastuz"
+            raise HTTPException(422, "Для Экибастуза запустите импорт по номеру или проверку из ApartmentAgent.")
+    raise HTTPException(422, "Автоимпорт сохраняет объявления с подтверждённым городом Астана.")
 
 
 class ArchivedListingRequest(ListingImportRequest):
@@ -368,7 +426,7 @@ async def observe_archived_listing(payload: ArchivedListingRequest) -> dict[str,
 
 @app.post("/api/v1/checks/run")
 async def run_checks_now() -> dict[str, int]:
-    summary = await check_all_listings()
+    summary = await check_all_listings(city=settings.search_city)
     return {
         "checked": summary.checked,
         "updated": summary.updated,
@@ -422,6 +480,7 @@ async def latest_checks() -> list[dict[str, object]]:
 class SearchRunRequest(BaseModel):
     rooms: Literal[2, 3, 4]
     city: SearchCity | None = None
+    market_type: MarketFilter | None = None
     conditions: SearchConditions | None = None
     min_price_kzt: int | None = Field(default=None, strict=True, ge=1, le=10_000_000_000)
     max_price_kzt: int | None = Field(default=None, strict=True, ge=1, le=10_000_000_000)
@@ -454,6 +513,7 @@ async def run_search_now(request: SearchRunRequest | None = None) -> dict[str, o
                 min_price_kzt=request.min_price_kzt,
                 min_price_kzt_is_set="min_price_kzt" in request.model_fields_set,
                 **({"city": request.city} if request.city is not None else {}),
+                **({"market_type": request.market_type} if request.market_type is not None else {}),
                 **({"conditions": request.conditions} if request.conditions is not None else {}),
             )
     except (InvalidSearchArea, InvalidSearchPrice) as error:
@@ -470,6 +530,7 @@ async def run_search_now(request: SearchRunRequest | None = None) -> dict[str, o
         "providers": summary.providers,
         "exclude_pledged": settings.exclude_pledged,
         "city": settings.search_city,
+        "market_type": settings.market_type,
     }
 
 
@@ -479,7 +540,8 @@ async def search_status() -> dict[str, object]:
 
 
 @app.get("/api/v1/comparison/liked")
-async def comparison_liked() -> list[dict[str, object]]:
+async def comparison_liked(city: SearchCity | None = None,
+                           market_type: MarketFilter = "all") -> list[dict[str, object]]:
     """Return all favorites, preferring a saved card to a discovered duplicate."""
     async with SessionLocal() as session:
         liked_urls = set(await session.scalars(select(ListingLike.url)))
@@ -491,7 +553,7 @@ async def comparison_liked() -> list[dict[str, object]]:
             Listing.rooms, Listing.address, Listing.district, Listing.city, Listing.latitude,
             Listing.longitude, Listing.floor, Listing.floors_total, Listing.bathrooms_count,
             Listing.bathrooms_count_is_lower_bound, Listing.repair_condition,
-            Listing.mortgage_supported, Listing.is_pledged, Listing.seller_type,
+            Listing.mortgage_supported, Listing.is_pledged, Listing.seller_type, Listing.market_type,
         ).order_by(Listing.created_at.desc(), Listing.id.desc()))).all()
         by_url: dict[str, dict[str, object]] = {}
         for row in saved:
@@ -506,6 +568,7 @@ async def comparison_liked() -> list[dict[str, object]]:
                 'price_per_m2': round(row.price_kzt / row.area_m2) if row.area_m2 else None,
                 'area_m2': row.area_m2, 'rooms': row.rooms,
                 'address': row.address, 'district': row.district, 'city': row.city,
+                'market_type': row.market_type,
                 'river_bank': listing_river_bank(row.city, row.latitude, row.longitude),
                 'floor': row.floor, 'floors_total': row.floors_total,
                 'bathrooms_count': row.bathrooms_count,
@@ -515,6 +578,13 @@ async def comparison_liked() -> list[dict[str, object]]:
                 'seller_type': row.seller_type, 'seller_category': seller_category(row.seller_type),
             }
 
+        if city is not None or market_type != "all":
+            excluded = {key for key, item in by_url.items()
+                        if (city is not None and city_slug(item["city"]) != city)
+                        or not matches_market_type(market_type, item["market_type"])}
+            for key in excluded:
+                del by_url[key]
+            liked_urls -= excluded
         missing = liked_urls - by_url.keys()
         if missing:
             results = await session.stream_scalars(
@@ -523,7 +593,8 @@ async def comparison_liked() -> list[dict[str, object]]:
             )
             async for row in results:
                 key = _favorite_key(row.url)
-                if key not in missing:
+                if (key not in missing or (city is not None and not city_matches(city, row.city))
+                        or not matches_market_type(market_type, row.market_type)):
                     continue
                 analysis = analyze_search_result(
                     row.title or '', row.snippet, max_price=settings.max_price_kzt,
@@ -540,7 +611,8 @@ async def comparison_liked() -> list[dict[str, object]]:
                     'price_is_lower_bound': analysis['price_is_lower_bound'],
                     'price_per_m2': analysis['price_per_m2'], 'area_m2': analysis['area_m2'],
                     'rooms': analysis['rooms'], 'address': None, 'district': None,
-                    'city': CITY_NAMES.get(city_slug(getattr(row, 'city', None))),
+                    'city': CITY_NAMES.get(result_city_slug(row.city)),
+                    'market_type': row.market_type,
                     'river_bank': 'unknown', 'floor': analysis['floor'],
                     'floors_total': analysis['floors_total'], 'bathrooms_count': count,
                     'bathrooms_count_is_lower_bound': bool(
@@ -563,6 +635,7 @@ async def search_map(
 ) -> dict[str, object]:
     """Map current matches with actual saved pins; count other matches separately."""
     selected_city = settings.search_city
+    selected_market = settings.market_type
     async with SessionLocal() as session:
         unavailable = await unavailable_urls(session)
         hidden = await hidden_urls(session)
@@ -570,7 +643,7 @@ async def search_map(
             Listing.id, Listing.source_url, Listing.title, Listing.city, Listing.address,
             Listing.district, Listing.latitude, Listing.longitude, Listing.rooms, Listing.area_m2,
             Listing.price_kzt, Listing.bathrooms_count, Listing.is_pledged, Listing.seller_type,
-            Listing.floor, Listing.floors_total, Listing.building_year, Listing.property_details,
+            Listing.floor, Listing.floors_total, Listing.building_year, Listing.property_details, Listing.market_type,
         ).order_by(Listing.created_at.desc(), Listing.id.desc()))).all()
         saved: dict[str, Any] = {}
         for row in saved_rows:
@@ -591,7 +664,8 @@ async def search_map(
         listing = saved.get(key)
         result = found.get(key)
         if listing is not None:
-            if city_slug(listing.city) != selected_city:
+            actual_market = listing.market_type or (result.market_type if result is not None else None)
+            if city_slug(listing.city) != selected_city or not matches_market_type(selected_market, actual_market):
                 continue
             if not listing.area_m2 or not listing.price_kzt or not listing.rooms:
                 continue
@@ -625,16 +699,20 @@ async def search_map(
                 'source_url': key, 'title': listing.title, 'latitude': listing.latitude,
                 'longitude': listing.longitude, 'price_kzt': listing.price_kzt,
                 'address': listing.address, 'district': listing.district,
+                'market_type': actual_market,
                 'listing_id': listing.id, 'search_result_id': result.id if result else None,
                 'river_bank': river_bank, 'seller_category': category,
             })
         elif result is not None:
             if not city_matches(selected_city, result.city) or not _row_matches_target(result):
                 continue
+            if not matches_market_type(selected_market, result.market_type):
+                continue
             if seller != 'all' and seller_category(result.seller_type) != seller:
                 continue
             without_coordinates += 1
-    return {'city': selected_city, 'items': items, 'without_coordinates': without_coordinates}
+    return {'city': selected_city, 'market_type': selected_market, 'items': items,
+            'without_coordinates': without_coordinates}
 
 
 @app.get("/api/v1/search/results")
@@ -651,6 +729,7 @@ async def search_results(
 ) -> list[dict[str, object]]:
     safe_limit = min(max(limit, 1), 200)
     selected_city = settings.search_city
+    selected_market = settings.market_type
     async with SessionLocal() as session:
         unavailable = await unavailable_urls(session)
         hidden = await hidden_urls(session)
@@ -670,7 +749,8 @@ async def search_results(
             for start in range(0, len(listing_ids), 500):
                 values = await session.execute(
                     select(Listing.id, Listing.seller_type, Listing.city, Listing.latitude, Listing.longitude,
-                           Listing.floor, Listing.floors_total, Listing.building_year, Listing.property_details)
+                           Listing.floor, Listing.floors_total, Listing.building_year, Listing.property_details,
+                           Listing.market_type)
                     .where(Listing.id.in_(listing_ids[start:start + 500]))
                 )
                 listing_facts.update((item.id, item) for item in values.all())
@@ -678,6 +758,8 @@ async def search_results(
         def matches_filter(row: SearchResult) -> bool:
             linked = listing_facts.get(row.imported_listing_id)
             if result_city_slug(getattr(row, "city", None), linked.city if linked else None) != selected_city:
+                return False
+            if not matches_market_type(selected_market, (linked.market_type if linked else None) or row.market_type):
                 return False
             key = _favorite_key(row.url)
             if key in unavailable or (key in hidden and not include_hidden):
@@ -762,6 +844,7 @@ async def search_results(
                 "query": row.query,
                 "title": row.title,
                 "city": CITY_NAMES[selected_city],
+                "market_type": (linked.market_type if linked else None) or row.market_type,
                 "snippet": row.snippet,
                 "status": row.status.split(":", 1)[0],
                 "priority": "urgent" if analysis["score"] >= 85 else "good" if analysis["score"] >= 65 else "normal",
@@ -885,15 +968,18 @@ async def search_history(limit: int = 50) -> list[dict[str, object]]:
 async def list_listings(
     min_score: int | None = None,
     seller: Literal["all", "owner", "verified_agent", "realtor", "unknown"] = "all",
+    city: SearchCity | None = None,
+    market_type: MarketFilter = "all",
 ) -> list[ListingResponse]:
     async with SessionLocal() as session:
+        query = select(Listing).options(selectinload(Listing.prices)).order_by(Listing.created_at.desc())
+        if market_type != "all":
+            query = query.where(Listing.market_type == market_type)
         rows = (
-            await session.scalars(
-                select(Listing)
-                .options(selectinload(Listing.prices))
-                .order_by(Listing.created_at.desc())
-            )
+            await session.scalars(query)
         ).all()
+        if city is not None:
+            rows = [row for row in rows if city_slug(row.city) == city]
         liked_urls = set(await session.scalars(select(ListingLike.url)))
         workflows = {row.url: row for row in await session.scalars(select(ListingWorkflow))}
         hidden = {row.url for row in workflows.values() if row.hidden}

@@ -4,8 +4,9 @@ from sqlalchemy.engine import Connection
 # create_all intentionally remains the first step; these definitions only cover
 # columns introduced after the initial MVP schema was deployed.
 _COLUMNS: dict[str, dict[str, str]] = {
-    "search_preferences": {"city": "VARCHAR(30)", "min_price_kzt": "BIGINT", "max_price_kzt": "BIGINT", "min_area_m2": "DOUBLE PRECISION", "max_area_m2": "DOUBLE PRECISION", "min_bathrooms": "INTEGER", "exclude_pledged": "BOOLEAN", "active_profile_id": "INTEGER", "conditions": "JSON"},
+    "search_preferences": {"city": "VARCHAR(30)", "market_type": "VARCHAR(20)", "min_price_kzt": "BIGINT", "max_price_kzt": "BIGINT", "min_area_m2": "DOUBLE PRECISION", "max_area_m2": "DOUBLE PRECISION", "min_bathrooms": "INTEGER", "exclude_pledged": "BOOLEAN", "active_profile_id": "INTEGER", "conditions": "JSON"},
     "listings": {
+        "market_type": "VARCHAR(20)",
         "complex_description": "TEXT",
         "complex_description_source_url": "TEXT",
         "complex_description_source_kind": "VARCHAR(30)",
@@ -49,6 +50,7 @@ _COLUMNS: dict[str, dict[str, str]] = {
     "search_history": {"city": "VARCHAR(30)"},
     "search_results": {
         "city": "VARCHAR(30)",
+        "market_type": "VARCHAR(20)",
         "seller_type": "VARCHAR(100)",
         "mortgage_supported": "BOOLEAN",
         "is_pledged": "BOOLEAN",

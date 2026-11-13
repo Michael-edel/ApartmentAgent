@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 
 from app.availability import set_source_availability
+from app.cities import SEARCH_CITIES, SearchCity, city_slug
 from app.config import get_settings
 from app.database import SessionLocal
 from app.importer import ListingArchived, ListingImportError, ListingUnavailable, import_krisha_listing
@@ -48,9 +49,16 @@ async def check_listing(listing_id: int) -> ListingCheckResult:
             raise ListingNotFound(f"Listing {listing_id} not found")
         source_url = row.source_url
         old_price = row.price_kzt
+        saved_city = city_slug(row.city)
 
     try:
+        if saved_city not in SEARCH_CITIES:
+            raise ListingImportError("Поддерживаются Астана и Экибастуз.")
         fresh = await import_krisha_listing(source_url)
+        observed = city_slug(fresh.city)
+        if (fresh.city_observed or observed != "astana") and observed != saved_city:
+            raise ListingImportError("Город объявления отличается от сохранённого города.")
+        fresh = fresh.model_copy(update={"city": row.city, "city_observed": True})
     except ListingImportError as exc:
         text = str(exc)
         if isinstance(exc, ListingArchived):
@@ -115,11 +123,12 @@ async def check_listing(listing_id: int) -> ListingCheckResult:
     )
 
 
-async def check_all_listings() -> CheckSummary:
+async def check_all_listings(*, city: SearchCity = "astana") -> CheckSummary:
     summary = CheckSummary()
 
     async with SessionLocal() as session:
-        listing_ids = list(await session.scalars(select(Listing.id).where(Listing.sold_at.is_(None)).order_by(Listing.id)))
+        rows = await session.execute(select(Listing.id, Listing.city).where(Listing.sold_at.is_(None)).order_by(Listing.id))
+        listing_ids = [row.id for row in rows if city_slug(row.city) == city]
 
     for listing_id in listing_ids:
         summary.checked += 1
@@ -139,7 +148,7 @@ async def check_all_listings() -> CheckSummary:
         await asyncio.sleep(2)
 
     try:
-        await evaluate_target_alerts()
+        await evaluate_target_alerts(city=city)
     except Exception:
         logger.exception("Target price evaluation failed")
     return summary

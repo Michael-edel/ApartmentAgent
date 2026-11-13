@@ -32,11 +32,15 @@ const runChecksButton = document.querySelector('#runChecksButton');
 const checkMessage = document.querySelector('#checkMessage');
 const runSearchButton = document.querySelector('#runSearchButton');
 const searchCity = document.querySelector('#searchCity');
+const searchMarketType = document.querySelector('#searchMarketType');
 const manualCity = form?.querySelector('[name="city"]');
-const cityNames = new Map([['astana', 'Астана'], ['almaty', 'Алматы'], ['shymkent', 'Шымкент'], ['karaganda', 'Караганда'], ['pavlodar', 'Павлодар']]);
+const cityNames = new Map([['astana', 'Астана'], ['ekibastuz', 'Экибастуз']]);
+const marketNames = new Map([['all', 'Все типы рынка'], ['new', 'Новостройки'], ['secondary', 'Вторичное жильё']]);
 let searchCityInitialized = false;
+let searchMarketInitialized = false;
 let manualCityInitialized = false;
-let activeSearchCity = 'astana';
+let activeSearchCity = null;
+let activeMarketType = null;
 manualCity?.addEventListener('change', () => { manualCityInitialized = true; });
 const searchRooms = document.querySelector('#searchRooms');
 const searchMinPrice = document.querySelector('#searchMinPrice');
@@ -102,6 +106,8 @@ function updateCriteriaCity() {
   const city = searchCity?.value || 'astana';
   const label = document.querySelector('#criteriaCity');
   if (label) label.textContent = cityNames.get(city) || 'Астана';
+  const mode = document.querySelector('#searchModeDescription');
+  if (mode) mode.textContent = city === 'ekibastuz' ? 'Экибастуз ищется вручную по нажатию «Искать сейчас». Фоновый поиск работает для Астаны.' : 'Агент проверяет прямую выдачу Krisha и резервные поисковые источники каждые 15 минут.';
   if (searchLeftBankOnly) {
     searchLeftBankOnly.disabled = city !== 'astana';
     if (searchLeftBankOnly.disabled) searchLeftBankOnly.checked = false;
@@ -113,7 +119,20 @@ searchCity?.addEventListener('change', () => {
   searchCityInitialized = true;
   updateCriteriaCity();
   if (manualCity && !manualCityInitialized) manualCity.value = cityNames.get(searchCity.value) || 'Астана';
+  document.dispatchEvent(new CustomEvent('apartmentagent:city-changed'));
 });
+function updateCriteriaMarket() {
+  const label = document.querySelector('#criteriaMarketType');
+  if (label) label.textContent = marketNames.get(searchMarketType?.value) || marketNames.get('all');
+}
+searchMarketType?.addEventListener('change', () => {
+  searchMarketInitialized = true;
+  updateCriteriaMarket();
+});
+function marketBadge(item) {
+  const name = item.market_type === 'new' ? 'Новостройка' : item.market_type === 'secondary' ? 'Вторичное жильё' : '';
+  return name ? `<span class="bank-badge">${name}</span>` : '';
+}
 let searchResultsRevision = 0;
 const bathroomCheckPanel = document.querySelector('#bathroomCheckPanel');
 const bathroomCheckCounts = document.querySelector('#bathroomCheckCounts');
@@ -205,6 +224,7 @@ function renderBathroomCheck(state) {
     const criteria = state.criteria || {};
     const parts = [];
     if (cityNames.has(criteria.city)) parts.push(cityNames.get(criteria.city));
+    if (criteria.market_type && criteria.market_type !== 'all' && marketNames.has(criteria.market_type)) parts.push(marketNames.get(criteria.market_type));
     if ([2, 3, 4].includes(criteria.target_rooms)) parts.push(`от ${criteria.target_rooms} комн.`);
     if (Number.isFinite(criteria.min_area_m2)) parts.push(`${formatAreaRange(criteria.min_area_m2, criteria.max_area_m2)} м²`);
     if (Number.isSafeInteger(criteria.max_price_kzt) && criteria.max_price_kzt > 0) parts.push(formatPriceRange(criteria.min_price_kzt, criteria.max_price_kzt));
@@ -458,7 +478,7 @@ function setupLikedComparison() {
       input.disabled = selected.size >= 4 && !input.checked;
     }
     status.textContent = apartments.length < 2
-      ? 'Отметьте минимум две квартиры галочкой «Понравилась».'
+      ? 'В выбранном городе и типе рынка отметьте минимум две квартиры галочкой «Понравилась».'
       : `Выбрано ${selected.size} из 4. Для сравнения нужны минимум две квартиры.`;
     action.disabled = selected.size < 2;
   }
@@ -478,7 +498,10 @@ function setupLikedComparison() {
     status.textContent = 'Загружаю понравившиеся квартиры…';
     dialog.showModal();
     try {
-      const response = await fetch('/api/v1/comparison/liked', {signal:AbortSignal.timeout(10000)});
+      if (!activeSearchCity || !activeMarketType) await loadSearchStatus();
+      if (!activeSearchCity || !activeMarketType) throw new Error('Не удалось определить выбранные критерии');
+      const query = new URLSearchParams({city:activeSearchCity, market_type:activeMarketType});
+      const response = await fetch(`/api/v1/comparison/liked?${query}`, {signal:AbortSignal.timeout(10000)});
       if (!response.ok) throw new Error('Не удалось загрузить понравившиеся квартиры');
       const data = await readJson(response);
       if (!dialog.open || revision !== requestRevision) return;
@@ -851,7 +874,7 @@ async function loadComparisons(previous = null) {
   }));
 }
 
-function render(listings) {
+function render(listings, pinnedListing = null) {
   allSavedListings = Array.isArray(listings) ? listings : [];
   const openDetails = new Set();
   grid?.querySelectorAll('article[id^="listing-"] details[data-details-key][open]').forEach(detail => {
@@ -863,7 +886,8 @@ function render(listings) {
   const seller = listingSellerFilter?.value || 'all';
   const pinnedId = /^#listing-([1-9]\d*)$/.exec(location.hash)?.[1];
   const inactive = item => availabilityLabels.has(item.availability);
-  const visible = sortListings(listings).filter(item => item.assessment.score >= minScore
+  const displayedListings = pinnedListing ? [...listings, pinnedListing] : listings;
+  const visible = sortListings(displayedListings).filter(item => item.assessment.score >= minScore
     && (seller === 'all' || (item.seller_category || 'unknown') === seller)
     && (!listingLeftBankOnly?.checked || item.river_bank === 'left')
     && (listingShowInactive?.checked || !inactive(item) || String(item.id) === pinnedId)
@@ -896,7 +920,7 @@ function render(listings) {
       ? '<section class="empty card"><strong>Сохранённые квартиры скрыты</strong><p>Включите «Показывать скрытые квартиры», чтобы вернуть их.</p></section>'
       : listings.length
       ? '<section class="empty card"><strong>Нет квартир с выбранным рейтингом</strong><p>Выберите «Все», чтобы увидеть остальные квартиры.</p></section>'
-      : '<section class="empty card"><strong>Сохранённых квартир пока нет</strong><p>Добавьте квартиру вручную или импортируйте объявление.</p></section>';
+      : '<section class="empty card"><strong>В выбранном городе и типе рынка пока нет сохранённых квартир</strong><p>Добавьте квартиру вручную или импортируйте объявление.</p></section>';
     return;
   }
   grid.innerHTML = visible.map(item => {
@@ -927,12 +951,13 @@ function render(listings) {
     const twogisReviews = Number(item.twogis_review_count || 0);
     const twogisLine = item.twogis_name ? `<div class="twogis-review"><b>2GIS</b> ${Number.isFinite(twogisRating) && twogisReviews ? `★ ${twogisRating.toFixed(1)}/5 · ${twogisReviews} отзывов` : 'оценка и отзывы не опубликованы'}${item.twogis_url ? ` · <a href="${escapeHtml(item.twogis_url)}" target="_blank" rel="noopener noreferrer">Открыть в 2GIS →</a>` : ''}</div>` : '';
     return `<article class="listing card" id="listing-${item.id}" tabindex="-1" aria-label="Карточка квартиры: ${escapeHtml(title)}">
+      ${pinnedListing && item.id === pinnedListing.id ? `<p class="meta" role="note">Карточка вне выбранного города или типа рынка показана по прямой ссылке. Критерии не изменены.</p>` : ''}
       ${previewPhotos.length ? `<div class="listing-photos">${previewPhotos.map((photo, index) => `<img class="listing-photo ${index ? 'thumbnail' : ''}" src="${escapeHtml(photo)}" alt="Фото квартиры ${index + 1}" loading="lazy" referrerpolicy="no-referrer">`).join('')}</div>` : ''}
       ${photos.length ? `<details class="listing-all-photos" data-details-key="photos"><summary>Все фотографии (${photos.length})</summary><div class="listing-gallery">${photos.map((photo, index) => `<a href="${escapeHtml(photo)}" target="_blank" rel="noopener noreferrer" aria-label="Открыть фото ${index + 1} в новой вкладке"><img src="${escapeHtml(photo)}" alt="Фото квартиры ${index + 1}" loading="lazy" referrerpolicy="no-referrer"><span>Фото ${index + 1} ↗</span></a>`).join('')}</div></details>` : ''}
       <div class="listing-top"><div><h3>${escapeHtml(title)}</h3><div class="meta">${escapeHtml(location)}</div></div><div class="rating ${scoreClass}">${item.assessment.score}</div></div>
       <div class="price">${money.format(item.price_kzt)}</div>
       <div class="meta">${item.rooms} комн. · ${number.format(item.area_m2)} м² · ${money.format(item.assessment.price_per_m2)}/м² · этаж ${item.floor || '—'}/${item.floors_total || '—'}</div>
-      <div class="listing-bank">${riverBankBadge(item)}${availabilityBadge(item)}</div>
+      <div class="listing-bank">${marketBadge(item)}${riverBankBadge(item)}${availabilityBadge(item)}</div>
       ${likeControl(item, 'listings')}
       ${hiddenControls(item, 'listing')}
       ${window.ApartmentAgentWorkflow?.render(item) || ''}
@@ -1022,13 +1047,24 @@ async function loadListings({reuseComparisons = false} = {}) {
   const revision = ++listingsRevision;
   if (refreshButton) refreshButton.disabled = true;
   try {
-    const response = await fetch('/api/v1/listings');
+    if (!activeSearchCity || !activeMarketType) await loadSearchStatus();
+    if (!activeSearchCity || !activeMarketType) throw new Error('Не удалось определить критерии поиска');
+    const requestCity = activeSearchCity;
+    const requestMarketType = activeMarketType;
+    const params = new URLSearchParams({city:requestCity, market_type:requestMarketType});
+    const response = await fetch(`/api/v1/listings?${params}`);
     if (!response.ok) throw new Error('Не удалось загрузить квартиры');
     const listings = await readJson(response);
-    if (revision !== listingsRevision) return false;
+    const pinnedId = /^#listing-([1-9]\d*)$/.exec(location.hash)?.[1];
+    let pinnedListing = null;
+    if (pinnedId && !listings.some(item => String(item.id) === pinnedId)) {
+      const pinnedResponse = await fetch(`/api/v1/listings/${encodeURIComponent(pinnedId)}`);
+      if (pinnedResponse.ok) pinnedListing = await readJson(pinnedResponse);
+    }
+    if (revision !== listingsRevision || requestCity !== activeSearchCity || requestMarketType !== activeMarketType) return false;
     const loaded = reuseComparisons ? [...(grid?.querySelectorAll('.price-comparison[data-loaded]') || [])] : [];
     const previous = new Map(loaded.map(node => [node.dataset.listingId, node]));
-    render(listings);
+    render(listings, pinnedListing);
     grid?.querySelectorAll('.check-listing').forEach(button => {
       button.addEventListener('click', () => checkListingNow(Number(button.dataset.listingId), button));
     });
@@ -1160,7 +1196,7 @@ async function loadSearchResults() {
           <div><span class="verdict">${escapeHtml(seenLabel)}</span><h3>${escapeHtml(cleanSearchTitle(item.title))}</h3></div>
           <div class="rating ${a.score < 85 ? 'medium' : ''}">${a.score ?? '—'}</div>
         </div>
-        <div class="search-facts">${facts.map(value => `<span>${escapeHtml(value)}</span>`).join('')}${typeof a.is_pledged === 'boolean' ? (a.is_pledged ? pledgeBadge(a) : '<span>Нет залога</span>') : ''}${bathroomBadge(a, true)}${sellerBadge(item)}${riverBankBadge(item)}</div>
+        <div class="search-facts">${facts.map(value => `<span>${escapeHtml(value)}</span>`).join('')}${marketBadge(item)}${typeof a.is_pledged === 'boolean' ? (a.is_pledged ? pledgeBadge(a) : '<span>Нет залога</span>') : ''}${bathroomBadge(a, true)}${sellerBadge(item)}${riverBankBadge(item)}</div>
         ${likeControl(item, 'search/results')}
         ${hiddenControls(item, 'search')}
         ${reasons ? `<ul class="reason-list">${reasons}</ul>` : `<p class="meta">${escapeHtml(item.snippet || 'Откройте объявление для проверки параметров.')}</p>`}
@@ -1213,12 +1249,23 @@ async function loadSearchStatus() {
     if (!response.ok) throw new Error('Не удалось получить статус поиска');
     const status = await readJson(response);
     window.ApartmentAgentProfiles?.apply(status.conditions);
-    if (cityNames.has(status.city)) {
-      activeSearchCity = status.city;
-      if (searchCity && !searchCityInitialized) searchCity.value = status.city;
-      if (manualCity && !manualCityInitialized) manualCity.value = cityNames.get(status.city);
-      updateCriteriaCity();
-    }
+    if (!cityNames.has(status.city)) throw new Error('Не удалось определить выбранный город');
+    if (!marketNames.has(status.market_type)) { activeMarketType = null; throw new Error('Не удалось определить тип рынка'); }
+    const previousCity = activeSearchCity;
+    const previousMarketType = activeMarketType;
+    activeSearchCity = status.city;
+    activeMarketType = status.market_type;
+    if (searchCity && !searchCityInitialized) searchCity.value = status.city;
+    if (searchMarketType && !searchMarketInitialized) searchMarketType.value = status.market_type;
+    if (manualCity && !manualCityInitialized) manualCity.value = cityNames.get(status.city);
+    const listingCityLabel = document.querySelector('#listingCityLabel');
+    if (listingCityLabel) listingCityLabel.textContent = cityNames.get(status.city);
+    const listingMarketLabel = document.querySelector('#listingMarketLabel');
+    if (listingMarketLabel) listingMarketLabel.textContent = marketNames.get(status.market_type);
+    updateCriteriaCity();
+    updateCriteriaMarket();
+    document.dispatchEvent(new CustomEvent('apartmentagent:city-changed'));
+    if ((previousCity && previousCity !== status.city) || (previousMarketType && previousMarketType !== status.market_type)) void loadListings();
     if (searchExcludePledged && !searchPledgeInitialized && typeof status.exclude_pledged === 'boolean') {
       searchExcludePledged.checked = status.exclude_pledged;
       searchPledgeInitialized = true;
@@ -1307,14 +1354,16 @@ runSearchButton?.addEventListener('click', async () => {
   try {
     const response = await fetch('/api/v1/search/run', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({city:searchCity?.value || 'astana', rooms:Number(searchRooms?.value || 2), min_price_kzt:minimumPrice, max_price_kzt:maximumPrice, min_area_m2:Number(searchMinArea.value), max_area_m2:maximumArea, min_bathrooms:searchBathrooms?.checked ? 2 : 0, exclude_pledged:searchExcludePledged?.checked ?? true, ...(conditions ? {conditions} : {}), ...(ownerOnly ? {seller:'owner'} : {})})
+      body:JSON.stringify({city:searchCity?.value || 'astana', market_type:searchMarketType?.value || 'all', rooms:Number(searchRooms?.value || 2), min_price_kzt:minimumPrice, max_price_kzt:maximumPrice, min_area_m2:Number(searchMinArea.value), max_area_m2:maximumArea, min_bathrooms:searchBathrooms?.checked ? 2 : 0, exclude_pledged:searchExcludePledged?.checked ?? true, ...(conditions ? {conditions} : {}), ...(ownerOnly ? {seller:'owner'} : {})})
     });
     const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось выполнить поиск');
     if (searchMessage) searchMessage.textContent = ownerOnly && body.blocked
       ? 'Krisha ограничила прямой поиск от хозяев. Ниже доступны ранее найденные объявления.'
       : `Запросов: ${body.queries}. Найдено ссылок: ${body.found}. Новых: ${body.new}. Автоимпортировано: ${body.imported || 0}. Ошибок: ${body.errors + (body.import_errors || 0)}.`;
-    await Promise.all([loadListings(), loadSearchStatus()]);
+    if (/^#listing-[1-9]\d*$/.test(location.hash)) history.replaceState(null, '', location.pathname + location.search);
+    await loadSearchStatus();
+    await loadListings();
     await loadSearchResults();
   } catch (error) {
     if (searchMessage) searchMessage.textContent = error.message;
@@ -1461,4 +1510,4 @@ if ('serviceWorker' in navigator) window.addEventListener('load', () => {
   void navigator.serviceWorker.register('/service-worker.js', {updateViaCache:'none'})
     .then(registration => registration.update()).catch(() => {});
 });
-(async () => { if (/^#listing-[1-9]\d*$/.test(location.hash)) await openSavedListingFromHash(); else await loadListings(); await Promise.all([loadSearchStatus(), loadSearchResults()]); })();
+(async () => { await loadSearchStatus(); if (/^#listing-[1-9]\d*$/.test(location.hash)) await openSavedListingFromHash(); else await loadListings(); await loadSearchResults(); })();

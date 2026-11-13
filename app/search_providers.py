@@ -21,6 +21,7 @@ class SearchItem:
     url: str
     snippet: str | None = None
     seller_type: str | None = None
+    market_type: str | None = None
 
 
 def is_allowed_listing_url(url: str) -> bool:
@@ -141,7 +142,8 @@ async def search_krisha_direct(query: str) -> list[SearchItem]:
     room_query = query.removeprefix("owner:") if owner_only else query
     rooms = int(room_query) if room_query in {"2", "3", "4"} else 2
     items = await fetch_krisha_direct(rooms, owner_only=True) if owner_only else await fetch_krisha_direct(rooms)
-    return [SearchItem(title=item.title, url=item.url, snippet=item.snippet, seller_type=item.seller_type) for item in items]
+    return [SearchItem(title=item.title, url=item.url, snippet=item.snippet, seller_type=item.seller_type,
+                       market_type=getattr(item, 'market_type', None)) for item in items]
 
 
 PROVIDERS = {

@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  const cityCenters = {astana:[51.128,71.43], almaty:[43.238,76.889], shymkent:[42.32,69.59], karaganda:[49.806,73.085], pavlodar:[52.287,76.967]};
+  const cityCenters = {astana:[51.128,71.43], ekibastuz:[51.718,75.322]};
   let active = null;
   const fmt = new Intl.NumberFormat('ru-RU');
   const node = (tag, text, className) => {

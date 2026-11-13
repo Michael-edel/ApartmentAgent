@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app import listing_service, search_agent
@@ -13,7 +14,8 @@ def test_city_identity_and_direct_urls(monkeypatch):
     assert city_matches("almaty", None, "Алматы")
     assert not city_matches("astana", None, "Алматы")
     assert city_matches("astana", None, None)
-    for city in ("astana", "almaty", "shymkent", "karaganda", "pavlodar"):
+    assert city_slug("Екібастұз") == "ekibastuz"
+    for city in ("astana", "ekibastuz"):
         monkeypatch.setattr(search_agent.settings, "search_city", city)
         assert f"/kvartiry/{city}/" in build_krisha_search_url()
 
@@ -31,14 +33,20 @@ async def test_search_city_persists_and_legacy_defaults_to_astana(monkeypatch, t
         await session.commit()
     await search_agent.load_search_preference()
     assert search_agent.settings.search_city == "astana"
-    await search_agent.save_search_preference(None, city="almaty")
-    assert search_agent.settings.search_city == "almaty"
+    await search_agent.save_search_preference(None, city="ekibastuz")
+    assert search_agent.settings.search_city == "ekibastuz"
     monkeypatch.setattr(search_agent.settings, "search_city", "astana")
     await search_agent.load_search_preference()
-    assert search_agent.settings.search_city == "almaty"
+    assert search_agent.settings.search_city == "ekibastuz"
     async with sessions() as session:
         preference = await session.get(SearchPreference, 1)
-        assert (preference.city, preference.rooms) == ("almaty", 3)
+        assert (preference.city, preference.rooms) == ("ekibastuz", 3)
+        preference.city = 'almaty'
+        await session.commit()
+    await search_agent.load_search_preference()
+    assert search_agent.settings.search_city == 'astana'
+    async with sessions() as session:
+        assert (await session.get(SearchPreference, 1)).city == 'almaty'
     await engine.dispose()
 
 
@@ -67,3 +75,24 @@ async def test_unconfirmed_import_city_uses_search_or_preserves_saved_city(monke
     corrected = await save(city='Астана', city_observed=True)
     assert (corrected.city, corrected.latitude, corrected.longitude) == ('Астана', None, None)
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_auto_import_rejects_explicit_wrong_city_before_persistence(monkeypatch):
+    monkeypatch.setattr(search_agent.settings, 'auto_import_enabled', True)
+    monkeypatch.setattr(search_agent.settings, 'auto_import_delay_seconds', 0)
+    events = []
+    async def import_card(url, **kwargs):
+        assert kwargs == {'expected_city': 'ekibastuz'}
+        return SimpleNamespace(city='Астана')
+    async def save(*args, **kwargs):
+        events.append('saved')
+    async def mark(candidate, **kwargs):
+        events.append(kwargs['import_status'])
+    monkeypatch.setattr(search_agent, 'import_krisha_listing', import_card)
+    monkeypatch.setattr(search_agent, 'persist_listing', save)
+    monkeypatch.setattr(search_agent, '_mark_import_result', mark)
+    result = await search_agent._auto_import([search_agent.SearchImportCandidate(
+        result_id=1, url='https://krisha.kz/a/show/123', city='ekibastuz')])
+    assert result == (0, 1, 0)
+    assert events == ['error']

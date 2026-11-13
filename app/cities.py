@@ -2,22 +2,25 @@
 from typing import Literal
 import math
 
-SearchCity = Literal['astana', 'almaty', 'shymkent', 'karaganda', 'pavlodar']
-CITY_NAMES: dict[SearchCity, str] = {
+SearchCity = Literal['astana', 'ekibastuz']
+KnownCity = Literal['astana', 'ekibastuz', 'almaty', 'shymkent', 'karaganda', 'pavlodar']
+SEARCH_CITIES = frozenset(('astana', 'ekibastuz'))
+CITY_NAMES: dict[KnownCity, str] = {
     'astana': 'Астана', 'almaty': 'Алматы', 'shymkent': 'Шымкент',
-    'karaganda': 'Караганда', 'pavlodar': 'Павлодар',
+    'karaganda': 'Караганда', 'pavlodar': 'Павлодар', 'ekibastuz': 'Экибастуз',
 }
-_CITY_ALIASES: dict[str, SearchCity] = {
+_CITY_ALIASES: dict[str, KnownCity] = {
     'астана': 'astana', 'astana': 'astana', 'нур-султан': 'astana', 'нурсултан': 'astana',
     'нұр-сұлтан': 'astana', 'нұрсұлтан': 'astana',
     'алматы': 'almaty', 'almaty': 'almaty', 'алма-ата': 'almaty',
     'шымкент': 'shymkent', 'shymkent': 'shymkent',
     'караганда': 'karaganda', 'қарағанды': 'karaganda', 'karaganda': 'karaganda', 'karagandy': 'karaganda',
     'павлодар': 'pavlodar', 'pavlodar': 'pavlodar',
+    'экибастуз': 'ekibastuz', 'екібастұз': 'ekibastuz', 'ekibastuz': 'ekibastuz',
 }
 
 
-def city_slug(value: str | None) -> SearchCity | None:
+def city_slug(value: str | None) -> KnownCity | None:
     if not value:
         return None
     name = value.strip().casefold().split(',', 1)[0].strip()
@@ -28,7 +31,7 @@ def city_slug(value: str | None) -> SearchCity | None:
     return _CITY_ALIASES.get(name)
 
 
-def result_city_slug(result_city: str | None, linked_city: str | None = None) -> SearchCity | None:
+def result_city_slug(result_city: str | None, linked_city: str | None = None) -> KnownCity | None:
     """Use a known linked card first; legacy unlabelled search results are Astana."""
     if linked_city and linked_city.strip():
         return city_slug(linked_city)
@@ -44,12 +47,13 @@ def city_matches(selected_city: str, result_city: str | None, linked_city: str |
 
 # Loose sanity bounds only, not official administrative or geographic borders.
 # A matched pair is still only as accurate as the original listing's coordinates.
-_COORDINATE_BOUNDS: dict[SearchCity, tuple[float, float, float, float]] = {
+_COORDINATE_BOUNDS: dict[KnownCity, tuple[float, float, float, float]] = {
     'astana': (50, 52, 69, 73),
     'almaty': (42.8, 43.7, 76, 77.8),
     'shymkent': (41.8, 42.7, 69, 70.2),
     'karaganda': (49.4, 50.5, 72.2, 74.3),
     'pavlodar': (51.6, 53, 75.9, 78.5),
+    'ekibastuz': (51.3, 52.1, 74.8, 75.9),
 }
 
 

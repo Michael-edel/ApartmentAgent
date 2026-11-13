@@ -1,11 +1,11 @@
-const CACHE = 'apartment-agent-v64';
+const CACHE = 'apartment-agent-v66';
 const ASSETS = [
-  '/', '/static/styles.css?v=153', '/static/app.js?v=171', '/static/icon.svg', '/manifest.webmanifest',
+  '/', '/static/styles.css?v=153', '/static/app.js?v=173', '/static/icon.svg', '/manifest.webmanifest',
   '/static/vendor/leaflet/leaflet.css', '/static/vendor/leaflet/leaflet.js',
-  '/static/listing-map.css?v=1', '/static/listing-map.js?v=3',
+  '/static/listing-map.css?v=1', '/static/listing-map.js?v=4',
   '/static/listing-workflow.css?v=1', '/static/listing-workflow.js?v=1',
   '/static/listing-tracking.js?v=1',
-  '/static/search-profiles.js?v=1',
+  '/static/search-profiles.js?v=3',
 ];
 
 self.addEventListener('install', event => {
