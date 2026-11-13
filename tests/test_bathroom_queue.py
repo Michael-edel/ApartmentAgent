@@ -19,7 +19,7 @@ async def env(monkeypatch, tmp_path):
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    settings = SimpleNamespace(target_rooms=4, max_price_kzt=50_000_000,
+    settings = SimpleNamespace(target_rooms=4, min_price_kzt=None, max_price_kzt=50_000_000,
                                min_area_m2=80, max_area_m2=120, min_bathrooms=0, exclude_pledged=True)
     clock = {"now": datetime(2026, 11, 6, 12, 0, tzinfo=UTC)}
     monkeypatch.setattr(queue, "SessionLocal", sessions)
@@ -299,7 +299,39 @@ async def test_details_mode_includes_saved_only_and_known_two_but_respects_minim
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", [None, "0.1.10", "0.3.1", "0.4.0", "invalid"])
+async def test_details_revisits_name_without_known_role_once_in_new_revision(env):
+    await seed(env, ("https://krisha.kz/a/show/100", "https://krisha.kz/a/show/200"), count=2)
+    await store_count(env, "https://krisha.kz/a/show/100", 2)
+    await store_count(env, "https://krisha.kz/a/show/200", 2)
+    async with env.sessions() as session:
+        listings = (await session.scalars(select(Listing).order_by(Listing.id))).all()
+        for row in listings:
+            row.details_imported_at = env.clock["now"] - timedelta(days=1)
+            row.repair_condition, row.mortgage_supported, row.seller_name = "Хороший ремонт", True, "Алия"
+        listings[1].seller_type = "Хозяин недвижимости"
+        old = BathroomCheckJob(status="completed", criteria={"mode": "details", "priority_details_revision": 2})
+        session.add(old)
+        await session.flush()
+        session.add(BathroomCheckTask(job_id=old.id, url="https://krisha.kz/a/show/100",
+                                      status="confirmed", last_outcome="imported"))
+        await session.commit()
+    started = await queue.bathroom_check_start(queue.StartRequest(mode="details"))
+    assert started["criteria"]["priority_details_revision"] == 3
+    assert started["total"] == 1
+    leased = await queue.bathroom_check_claim(queue.ClaimRequest(worker_id="browser-1", extension_version=queue.DETAILS_EXTENSION_RELEASE))
+    assert leased["task"]["url"].endswith("/100")
+    async with env.sessions() as session:
+        row = await session.scalar(select(Listing).where(Listing.source_url.endswith("100")))
+        row.details_imported_at = env.clock["now"] + timedelta(seconds=1)
+        await session.commit()
+    completed = await complete(leased)
+    assert completed["status"] == "completed"
+    assert completed["detail_fields"]["missing_author"] == 1
+    assert completed["details_candidate_count"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", [None, "0.1.10", "0.3.1", "0.4.0", "0.4.7", "invalid"])
 async def test_details_requires_new_extension_before_any_task_is_leased(env, version):
     await seed(env)
     await queue.bathroom_check_start(queue.StartRequest(mode="details"))

@@ -40,16 +40,26 @@
       ...(body === undefined ? {} : {body:JSON.stringify(body)}),
       ...(typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? {signal:AbortSignal.timeout(10000)} : {}),
     });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : `ApartmentAgent: HTTP ${response.status}`);
+    const result = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(typeof result?.detail === 'string' ? result.detail : `ApartmentAgent: HTTP ${response.status}`);
+    if (!['idle', 'running', 'paused', 'completed', 'cancelled'].includes(result?.status)
+        || (result.status === 'idle' ? result.job_id !== null : !Number.isSafeInteger(result.job_id) || result.job_id < 1)) {
+      throw new Error('ApartmentAgent вернул некорректный статус очереди');
+    }
     return result;
   };
-  const schedule = async delay => {
-    // Chromium may round alarms below 30 seconds; the server enforces its own gap.
-    state.next_wake = Date.now() + Math.max(30000, delay || 0);
-    await save();
-    await chrome.alarms.create(WAKE, {when:state.next_wake});
+  const armWake = async () => {
+    try { await chrome.alarms.create(WAKE, {when:state.next_wake}); }
+    catch (_) { /* The periodic heartbeat can observe the persisted deadline. */ }
   };
+  const scheduleAt = async when => {
+    if (state.next_wake === when) return;
+    state.next_wake = when;
+    await save();
+    await armWake();
+  };
+  // Chromium may round alarms below 30 seconds; the server enforces its own gap.
+  const schedule = delay => scheduleAt(Date.now() + Math.max(30000, delay));
   const getTab = async id => {
     try { return await chrome.tabs.get(id); } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -143,10 +153,13 @@
       if (!ownedUnchanged(latest, task)) { await complete('blocked', addressFailure(latest)); return; }
       if (effectiveURL(latest) === placeholder()) await chrome.tabs.update(tab.id, {url:task.url, active:false});
     }
-    await schedule(Math.max(0, task.started_at + TIMEOUT - Date.now()));
+    await scheduleAt(task.started_at + TIMEOUT);
   };
   const poll = async () => {
-    const status = await api();
+    // A failed read confirms neither a state change nor an operator resume.
+    // Leave the durable state untouched and retry on the next heartbeat.
+    const status = await api().catch(() => null);
+    if (!status) return;
     const sameJob = status.job_id === state.job_id;
     const reportedGeneration = status.criteria?.resume_generation;
     const resumeGeneration = Number.isSafeInteger(reportedGeneration) && reportedGeneration >= 0 ? reportedGeneration : 0;
@@ -214,7 +227,7 @@
       await openTask();
       return;
     }
-    if (state.next_wake > Date.now()) { await schedule(state.next_wake - Date.now()); return; }
+    if (state.next_wake > Date.now()) return;
     const claim = await api('/claim', {worker_id:state.worker_id, extension_version:chrome.runtime.getManifest().version});
     if (!claim.task) {
       if (claim.status === 'running') await schedule((claim.wait_seconds || 30) * 1000);
@@ -299,7 +312,7 @@
     }),
     start: () => run(async () => {
       await chrome.alarms.create(HEARTBEAT, {periodInMinutes:1});
-      if (state.next_wake) await chrome.alarms.create(WAKE, {when:Math.max(Date.now() + 30000, state.next_wake)});
+      if (state.next_wake > Date.now()) await armWake();
       await poll();
     }),
     canonical,

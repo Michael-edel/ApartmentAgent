@@ -19,13 +19,26 @@
     return true;
   };
   const propertyText = node => clean(node?.innerText ?? node?.textContent);
+  const adIdFromUrl = value => {
+    if (typeof value !== 'string') return null;
+    try {
+      const url = new URL(value, location.href);
+      return url.protocol === 'https:' && ['krisha.kz','www.krisha.kz'].includes(url.hostname)
+        && !url.port && !url.username && !url.password ? url.pathname.match(/^\/a\/show\/(\d+)\/?$/)?.[1] || null : null;
+    } catch (_) { return null; }
+  };
+  const targetId = adIdFromUrl(location.href);
   const outsideListing = (node, asideContext = null) => {
+    let insideOfferInfo = false;
     for (let current = node; current; current = current.parentElement) {
       const markers = `${current.className || ''} ${current.getAttribute?.('data-testid') || ''}`.split(/\s+/);
+      if (asideContext === 'condition' && markers.includes('offer__info')) insideOfferInfo = true;
+      if (asideContext === 'specifications' && ['FOOTER','NAV'].includes(current.tagName)) return true;
       if (current.tagName === 'ASIDE' || current.getAttribute?.('role') === 'complementary') {
-        if (asideContext !== 'author' && !(asideContext === 'offer' && markers.includes('offer__sidebar'))) return true;
+        const offerSidebar = (asideContext === 'offer' || asideContext === 'condition') && markers.includes('offer__sidebar');
+        if (asideContext !== 'author' && asideContext !== 'specifications' && !offerSidebar && !insideOfferInfo) return true;
       }
-      if (markers.some(marker => /^(?:recommendations?(?:__.*|-.*)?|similar(?:__.*|-.*)?|related(?:__.*|-.*)?|advertisement|ad-banner)$/i.test(marker)
+      if (markers.some(marker => /^(?:(?:recommendations?|similar|related|nearby|promo(?:tion)?|sponsored)(?:[-_].*)?|advertisement|ad-banner)$/i.test(marker)
         || /^(?:(?:offer|listing)__(?:recommendations?|similar)|(?:a|offer|listing)-card)(?:$|[_-])/i.test(marker))) return true;
     }
     return false;
@@ -66,6 +79,11 @@
     'city':'Город', 'flat.city':'Город', 'flat.address':'Адрес',
   };
   const labelKey = value => clean(value).replace(/[:—–-]\s*$/, '').toLowerCase();
+  const detailValue = value => value && typeof value === 'object' ? value.text ?? value.label ?? value.value : value;
+  const usableRepair = value => {
+    const text = detailValue(value);
+    return typeof text === 'string' && /\p{L}/u.test(text) && !/^(?:не\s+указан[оа]?|нет\s+данных|неизвестно)[.!]?$/i.test(clean(text)) ? clean(text) : null;
+  };
   const propertyDetails = {};
   const propertyPair = node => {
     const text = propertyText(node);
@@ -97,6 +115,72 @@
     const pair = propertyPair(row);
     if (pair && pair[1] && !(pair[0] in propertyDetails) && Object.keys(propertyDetails).length < 60) propertyDetails[pair[0].slice(0,100)] = pair[1].slice(0,1500);
   }
+  const repairField = 'Состояние квартиры';
+  const repairFromSpecifications = () => {
+    if (!targetId) return null;
+    const repairKey = labelKey(repairField);
+    const plausibleValues = {
+      'тип дома': /^\p{L}[\p{L}\s-]{1,39}$/u,
+      'год постройки': /^(?:19\d{2}|20\d{2}|2100)$/,
+      'этаж': /^\d{1,3}(?:\s*(?:из|\/)\s*\d{1,3})?$/i,
+      'площадь': /^\d{1,4}(?:[.,]\d+)?\s*(?:м[²2]|кв\.\s*м)(?:\s|$)/i,
+      'санузел': /^(?:раздельный|совмещ[её]нный|\d{1,2}(?:\s*с\s*\/\s*у)?(?:\s*и\s+более)?)$/i,
+    };
+    const ownVisible = node => visibleProperty(node) && !outsideListing(node, 'specifications') && !inAuthorContext(node);
+    const filledChildren = node => [...(node.children || [])].filter(child => clean(child.textContent));
+    const rowCells = row => {
+      const cells = filledChildren(row);
+      return cells.length === 1 ? filledChildren(cells[0]) : cells;
+    };
+    const groups = new Set();
+    for (const node of document.querySelectorAll('dt, th, td, label, div, span, p, b, strong')) {
+      if (labelKey(node.textContent) !== repairKey || !ownVisible(node)) continue;
+      let group = node.parentElement;
+      for (let level = 0; group && level < 5; level++, group = group.parentElement) groups.add(group);
+    }
+    const repairs = new Set();
+    for (const group of groups) {
+      if (['BODY','HTML','MAIN'].includes(group.tagName) || !ownVisible(group)) continue;
+      const rows = [...(group.children || [])];
+      if (rows.length < 4 || rows.length > 20) continue;
+      const foreignLink = [...(group.querySelectorAll?.('a[href*="/a/show/"]') || [])].some(link => {
+        const id = adIdFromUrl(link.href);
+        return id && id !== targetId;
+      });
+      if (foreignLink) continue;
+      const matches = new Set();
+      const candidates = new Set();
+      for (const row of rows) {
+        const cells = row.tagName === 'DT' && row.nextElementSibling?.tagName === 'DD'
+          ? [row,row.nextElementSibling] : rowCells(row);
+        if (cells.length !== 2 || !cells.every(ownVisible)) continue;
+        const key = labelKey(propertyText(cells[0]));
+        const value = propertyText(cells[1]);
+        if (key === repairKey && usableRepair(value) && value.length <= 500 && !labels[labelKey(value)]) candidates.add(value);
+        if (Object.hasOwn(plausibleValues,key) && plausibleValues[key].test(value)) matches.add(key);
+      }
+      if (matches.size >= 3) for (const condition of candidates) repairs.add(condition);
+    }
+    return repairs.size === 1 ? repairs.values().next().value : null;
+  };
+  if (!usableRepair(propertyDetails[repairField]) && (repairField in propertyDetails || Object.keys(propertyDetails).length < 60)) {
+    // A property may be displayed as a plain label/value pair without row classes.
+    const selector = ':is(.offer__info, .offer__sidebar) :is(dt, div, span)';
+    for (const label of document.querySelectorAll(selector)) {
+      if (labelKey(label.textContent) !== labelKey(repairField)) continue;
+      const value = label.nextElementSibling;
+      if (!value || (label.tagName === 'DT' ? value.tagName !== 'DD' : label.parentElement?.children?.length !== 2)) continue;
+      if (![label,value].every(node => visibleProperty(node) && !outsideListing(node, 'condition') && !inAuthorContext(node))) continue;
+      const condition = usableRepair(propertyText(value));
+      if (!condition || condition.length > 500 || labels[labelKey(condition)]) continue;
+      propertyDetails[repairField] = condition;
+      break;
+    }
+    if (!usableRepair(propertyDetails[repairField])) {
+      const condition = repairFromSpecifications();
+      if (condition) propertyDetails[repairField] = condition;
+    }
+  }
   const domMortgageField = propertyDetails['Ипотека'];
   const descriptionNodes = listingNodes('.offer__description, [data-testid="description"], [data-testid="advert-description"], [itemprop="description"]', 'offer');
   const prose = value => String(value ?? '').replace(/\r\n?/g,'\n').split('\n').map(line => line.replace(/[ \t]+/g,' ').trim()).join('\n').trim();
@@ -107,18 +191,27 @@
     for (let current = node; current; current = current.parentElement) if (authorNodes.includes(current)) return true;
     return false;
   };
-  const sellerRole = /^(Хозяин(?:\s+недвижимости)?|Собственник|Специалист(?:\s+по\s+недвижимости)?|Компания|Агентство\s+недвижимости|Застройщик|Ри[еэ]лтор|Агент\s+по\s+недвижимости|Частное\s+лицо)(?=$|[\s.,;:])/i;
+  const sellerRole = /^(Крыша\s+Агент|Хозяин(?:\s+недвижимости)?|Собственник|Специалист(?:\s+по\s+недвижимости)?|Компания|Агентство\s+недвижимости|Застройщик|Ри[еэ]лтор|Агент\s+по\s+недвижимости|Частное\s+лицо)(?=$|[\s.,;:])/i;
   const sellerTypeText = value => {
     const text = clean(value);
     const role = text.match(sellerRole)?.[0];
     return role === text ? role : null;
   };
-  const domSellerType = listingNodes('[data-testid="seller-type"], .owners__type, .owner__type', 'author')
+  const sellerBlockEvidence = authorNodes.flatMap(node => [propertyText(node), ...[...(node.querySelectorAll?.('[title], [aria-label], img[alt]') || [])]
+    .filter(child => visibleProperty(child) && !outsideListing(child, 'author')).flatMap(child => ['title','aria-label','alt'].map(name => child.getAttribute?.(name)).filter(Boolean))]);
+  const hasKrishaAgentBadge = sellerBlockEvidence.some(text => /(?:^|[\s:—–-])Крыша\s+Агент(?=$|[\s.,;:—–-])/i.test(clean(text)));
+  const domRole = listingNodes('[data-testid="seller-type"], .owners__type, .owner__type', 'author')
     .filter(withinAuthorBlock).map(node => sellerTypeText(propertyText(node))).find(Boolean)
+    || authorNodes.flatMap(node => [...(node.querySelectorAll?.('span, p, div, strong, h2, h3, h4') || [])])
+      .filter(node => visibleProperty(node) && !outsideListing(node, 'author'))
+      .map(node => sellerTypeText(propertyText(node))).find(Boolean)
     || authorNodes.map(node => {
       const text = propertyText(node);
       return text.match(/^Автор\s+объявления\s*[:—–-]?\s*(.*)$/i)?.[1]?.match(sellerRole)?.[0] || sellerTypeText(text);
     }).find(Boolean) || null;
+  const domSellerType = hasKrishaAgentBadge ? 'Крыша Агент'
+    : /^Специалист/i.test(domRole || '') && sellerBlockEvidence.some(text => /Специалист\s+подтвердил\s+личность\s+документами|личность\s+подтверждена/i.test(clean(text)))
+      ? 'Специалист — личность подтверждена' : domRole;
   const validSellerName = value => {
     if (typeof value !== 'string') return null;
     const text = clean(value);
@@ -254,15 +347,6 @@
       }
     }
   }
-  const adIdFromUrl = value => {
-    if (typeof value !== 'string') return null;
-    try {
-      const url = new URL(value, location.href);
-      return url.protocol === 'https:' && ['krisha.kz','www.krisha.kz'].includes(url.hostname)
-        && !url.port && !url.username && !url.password ? url.pathname.match(/^\/a\/show\/(\d+)\/?$/)?.[1] || null : null;
-    } catch (_) { return null; }
-  };
-  const targetId = adIdFromUrl(location.href);
   const excludedBranch = key => /^(?:recommendations?|recommended(?:Adverts?|Listings?|Offers?)?|other(?:Adverts?|Listings?|Offers?)|similar(?:Adverts?|Listings?|Offers?)?|related(?:Adverts?|Listings?|Offers?)?|suggestions?|nearby(?:Adverts?|Listings?|Offers?)?)$/i.test(key.replace(/[_-]/g, ''));
   const authorBranch = key => /^(?:(?:seller|owner|advertiser|author|publisher|agent|broker|realtor|agency|realEstateAgent|contact|provider)(?:s|Profile)?)$/i.test(key.replace(/[_-]/g, ''));
   const entityTypes = item => (Array.isArray(item['@type']) ? item['@type'] : [item['@type']]).map(value => String(value || ''));
@@ -334,11 +418,6 @@
   };
   const findText = keys => findValue(keys, textValue);
   const jsonDetailValues = {};
-  const detailValue = value => value && typeof value === 'object' ? value.text ?? value.label ?? value.value : value;
-  const usableRepair = value => {
-    const text = detailValue(value);
-    return typeof text === 'string' && /\p{L}/u.test(text) && !/^(?:не\s+указан[оа]?|нет\s+данных|неизвестно)[.!]?$/i.test(clean(text)) ? clean(text) : null;
-  };
   const addJsonDetail = (rawLabel, rawValue) => {
     const label = semanticLabels[labelKey(rawLabel)] || labels[labelKey(rawLabel)] || clean(rawLabel);
     if (!label || label.length > 100 || /Автор|Реклама|Похожие|телефон|Политика|Подписаться/i.test(label)) return;
@@ -427,10 +506,15 @@
       || /^(?:ипотека (?:не (?:рассматривается|проходит|подходит|предусмотрена|возможна|доступна)|невозможна|недоступна)|в ипотеку не проходит|не подходит под ипотеку|не прода[её]тся в ипотеку)$/.test(normalized)) return false;
     return null;
   };
+  const cashOnlyField = value => {
+    const text = clean(value).replace(/[.!]+$/, '').toLowerCase();
+    return /^(?:только|исключительно)\s+(?:(?:за|с|по)\s+)?(?:наличные|наличными|наличкой|наличный\s+расч[её]т(?:ом)?)$/.test(text)
+      || /^(?:наличные|наличными|наличкой|наличный\s+расч[её]т(?:ом)?)\s+(?:только|исключительно)$/.test(text);
+  };
   // Seller prose and the headline are sent separately so the server can retain the source and quote.
   const domMortgageStatement = value => {
     if (!value) return null;
-    if (mortgageValue(value) !== null) return value;
+    if (mortgageValue(value) !== null || cashOnlyField(value)) return value;
     const labelled = `Ипотека ${value}`;
     return mortgageValue(labelled) !== null ? labelled : null;
   };
@@ -439,6 +523,7 @@
       .filter(node => !inAuthorContext(node)).map(node => domMortgageStatement(propertyText(node))).find(Boolean);
   if (domMortgageText) propertyDetails['Ипотека'] = domMortgageText.slice(0,1500);
   const mortgageSupported = mortgageValue(domMortgageText)
+    ?? (domMortgageText && cashOnlyField(domMortgageText) ? false : null)
     ?? mortgageValue(jsonDetailValues['Ипотека'])
     ?? jsonDetailField(['mortgageSupported', 'mortgage_supported', 'isMortgageAvailable'], mortgageValue);
   const addressFromText = value => {
@@ -575,6 +660,21 @@
     .filter(actualPhoto).slice(0, 30);
   const buildingText = (propertyDetails['Тип дома'] || findText(['buildingType', 'building_type', 'houseType', 'wallMaterial']) || '').toLowerCase();
   const description = domDescription || jsonDescription || clean(meta('og:description') || meta('description')).slice(0,20000) || null;
+  const archiveNotice = /^В\s+архиве\s*[.!]?\s*Объявление\s+может\s+быть\s+неактуальным\s*[.!]?$/i;
+  const inDescription = node => {
+    for (let current = node; current; current = current.parentElement) {
+      const classes = String(current.className || '').split(/\s+/);
+      if (classes.includes('offer__description') || current.getAttribute?.('itemprop') === 'description'
+        || ['description','advert-description'].includes(current.getAttribute?.('data-testid'))) return true;
+    }
+    return false;
+  };
+  const describedNotice = descriptionNodes.some(node => archiveNotice.test(propertyText(node)));
+  const archived = !!targetId && !describedNotice && listingNodes('div, p, section, aside, span', 'offer')
+    .some(node => !inDescription(node) && !inAuthorContext(node) && archiveNotice.test(propertyText(node)));
+  const normalOffer = !!(targetId && domHeadline && headlineRooms && headlineArea && domPrice && price && area && rooms
+    && (Object.keys(propertyDetails).length >= 2 || domDescription)
+    && !/проверка\s+(?:браузера|безопасности)|подтвердите.{0,30}(?:человек|робот)|access\s+denied/i.test(pageText));
   const cityText = clean(propertyDetails['Город'] || findText(['city', 'addressLocality']));
   const city = cityText ? cityText.split(',')[0].replace(/^Город\s+/i,'').replace(/\s+(?:р\s*-\s*н|район)\s+.*$/i,'').trim().slice(0,100) : 'Астана';
   const addressNodes = listingNodes('[itemprop="streetAddress"], [data-testid*="address" i], [class*="address" i]');
@@ -605,12 +705,13 @@
   const comparison = Object.fromEntries(Object.keys(jsonComparison).map(key => [key,domComparison[key] ?? jsonComparison[key]]));
   const payload = {
     source: 'browser-extension',
+    availability_status: archived ? 'archived' : normalOffer ? 'active' : null,
     ...comparison,
     ...complexDescription(),
     source_url: location.href.split('#')[0],
     title: clean(headline || `${rooms || 2}-комнатная квартира`).slice(0,300),
     description,
-    repair_condition: (usableRepair(propertyDetails['Состояние квартиры']) || jsonRepair)?.slice(0,500) || null,
+    repair_condition: (usableRepair(propertyDetails[repairField]) || jsonRepair)?.slice(0,500) || null,
     property_details: propertyDetails,
     details_extracted: !!(price && area && rooms && (hasDomEvidence || domMortgageText || jsonRichEvidence)),
     city,

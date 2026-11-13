@@ -5,7 +5,13 @@ const dateTime = new Intl.DateTimeFormat('ru-RU', {day:'2-digit', month:'2-digit
 const grid = document.querySelector('#listingGrid');
 const filter = document.querySelector('#scoreFilter');
 const listingSort = document.querySelector('#listingSort');
+const listingSellerFilter = document.querySelector('#listingSellerFilter');
+const listingLeftBankOnly = document.querySelector('#listingLeftBankOnly');
+let listingsRevision = 0;
 const listingShowPledged = document.querySelector('#listingShowPledged');
+const listingShowInactive = document.querySelector('#listingShowInactive');
+const listingAvailabilitySummary = document.querySelector('#listingAvailabilitySummary');
+const listingAvailabilityMessage = document.querySelector('#listingAvailabilityMessage');
 const listingPledgeSummary = document.querySelector('#listingPledgeSummary');
 const refreshButton = document.querySelector('#refreshButton');
 const form = document.querySelector('#listingForm');
@@ -24,12 +30,14 @@ const runChecksButton = document.querySelector('#runChecksButton');
 const checkMessage = document.querySelector('#checkMessage');
 const runSearchButton = document.querySelector('#runSearchButton');
 const searchRooms = document.querySelector('#searchRooms');
+const searchMinPrice = document.querySelector('#searchMinPrice');
 const searchMaxPrice = document.querySelector('#searchMaxPrice');
 const searchMinArea = document.querySelector('#searchMinArea');
 const searchMaxArea = document.querySelector('#searchMaxArea');
 const searchBathrooms = document.querySelector('#searchBathrooms');
 const searchExcludePledged = document.querySelector('#searchExcludePledged');
 let searchRoomsInitialized = false;
+let searchMinPriceInitialized = false;
 let searchPriceInitialized = false;
 let searchMinAreaInitialized = false;
 let searchMaxAreaInitialized = false;
@@ -39,7 +47,7 @@ searchBathrooms?.addEventListener('change', () => { searchBathroomsInitialized =
 searchExcludePledged?.addEventListener('change', () => { searchPledgeInitialized = true; });
 function updateCriteriaRooms() {
   const heading = document.querySelector('#criteriaRooms');
-  if (heading && searchRooms) heading.textContent = `${searchRooms.value}-комнатная квартира`;
+  if (heading && searchRooms) heading.textContent = `От ${searchRooms.value} комнат`;
 }
 searchRooms?.addEventListener('change', () => {
   searchRoomsInitialized = true;
@@ -47,18 +55,30 @@ searchRooms?.addEventListener('change', () => {
 });
 function updateCriteriaPrice() {
   const label = document.querySelector('#criteriaPrice');
-  const value = Number(searchMaxPrice?.value);
-  if (label && value > 0 && Number.isInteger(value)) label.textContent = money.format(value);
+  if (label && searchMinPrice?.checkValidity() && searchMaxPrice?.checkValidity()) {
+    const minimum = searchMinPrice.value === '' ? null : Number(searchMinPrice.value);
+    const maximum = Number(searchMaxPrice.value);
+    if (minimum === null || minimum <= maximum) label.textContent = formatPriceRange(minimum, maximum);
+  }
 }
+function formatPriceRange(minimum, maximum) {
+  return minimum > 0 ? `от ${money.format(minimum)} до ${money.format(maximum)}` : `до ${money.format(maximum)}`;
+}
+searchMinPrice?.addEventListener('input', () => { searchMinPriceInitialized = true; updateCriteriaPrice(); });
 searchMaxPrice?.addEventListener('input', () => {
   searchPriceInitialized = true;
   updateCriteriaPrice();
 });
 function updateCriteriaArea() {
   const label = document.querySelector('#criteriaArea');
-  if (label && searchMinArea?.checkValidity() && searchMaxArea?.checkValidity() && Number(searchMinArea.value) <= Number(searchMaxArea.value)) {
-    label.textContent = `${number.format(Number(searchMinArea.value))}–${number.format(Number(searchMaxArea.value))}`;
+  if (label && searchMinArea?.checkValidity() && searchMaxArea?.checkValidity()) {
+    const minimum = Number(searchMinArea.value);
+    const maximum = searchMaxArea.value === '' ? null : Number(searchMaxArea.value);
+    if (maximum === null || minimum <= maximum) label.textContent = formatAreaRange(minimum, maximum);
   }
+}
+function formatAreaRange(minimum, maximum) {
+  return Number.isFinite(maximum) ? `${number.format(minimum)}–${number.format(maximum)}` : `от ${number.format(minimum)}`;
 }
 searchMinArea?.addEventListener('input', () => { searchMinAreaInitialized = true; updateCriteriaArea(); });
 searchMaxArea?.addEventListener('input', () => { searchMaxAreaInitialized = true; updateCriteriaArea(); });
@@ -67,6 +87,8 @@ const searchMeta = document.querySelector('#searchMeta');
 const searchResults = document.querySelector('#searchResults');
 const reloadSearchResults = document.querySelector('#refreshSearchButton');
 const searchResultsSort = document.querySelector('#searchResultsSort');
+const searchSellerFilter = document.querySelector('#searchSellerFilter');
+const searchLeftBankOnly = document.querySelector('#searchLeftBankOnly');
 let searchResultsRevision = 0;
 const bathroomCheckPanel = document.querySelector('#bathroomCheckPanel');
 const bathroomCheckCounts = document.querySelector('#bathroomCheckCounts');
@@ -89,6 +111,7 @@ let bathroomCheckBusy = false;
 let bathroomCheckPolling = false;
 let bathroomCheckSignature = null;
 let bathroomCheckRevision = 0;
+let bathroomCheckFeedback = '';
 let savedUrls = new Set();
 let savedListingIds = new Map();
 
@@ -132,6 +155,10 @@ function queueCount(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
+function fetchBathroomCheck(path = '', options = {}) {
+  return fetch(`${bathroomCheckApi}${path}`, {...options, cache:'no-store', signal:AbortSignal.timeout(10000)});
+}
+
 function renderBathroomCheck(state) {
   if (!bathroomCheckPanel) return;
   bathroomCheckState = state;
@@ -151,9 +178,9 @@ function renderBathroomCheck(state) {
   if (bathroomCheckCriteria) {
     const criteria = state.criteria || {};
     const parts = [];
-    if ([2, 3, 4].includes(criteria.target_rooms)) parts.push(`${criteria.target_rooms} комн.`);
-    if (Number.isFinite(criteria.min_area_m2) && Number.isFinite(criteria.max_area_m2)) parts.push(`${number.format(criteria.min_area_m2)}–${number.format(criteria.max_area_m2)} м²`);
-    if (Number.isSafeInteger(criteria.max_price_kzt) && criteria.max_price_kzt > 0) parts.push(`до ${money.format(criteria.max_price_kzt)}`);
+    if ([2, 3, 4].includes(criteria.target_rooms)) parts.push(`от ${criteria.target_rooms} комн.`);
+    if (Number.isFinite(criteria.min_area_m2)) parts.push(`${formatAreaRange(criteria.min_area_m2, criteria.max_area_m2)} м²`);
+    if (Number.isSafeInteger(criteria.max_price_kzt) && criteria.max_price_kzt > 0) parts.push(formatPriceRange(criteria.min_price_kzt, criteria.max_price_kzt));
     if (criteria.exclude_pledged && !criteria.manual_import) parts.push('известные залоговые исключены');
     bathroomCheckCriteria.hidden = !state.job_id || parts.length === 0;
     bathroomCheckCriteria.textContent = criteria.manual_import
@@ -169,7 +196,7 @@ function renderBathroomCheck(state) {
     const facts = state.detail_fields;
     bathroomCheckDetails.hidden = !facts || !queueCount(state.enriched);
     bathroomCheckDetails.textContent = bathroomCheckDetails.hidden ? '' :
-      `Ремонт, ипотека и автор получены вместе: ${queueCount(facts.complete)}. В сохранённых карточках не получено: ремонт — ${queueCount(facts.missing_repair)}, ипотека — ${queueCount(facts.missing_mortgage)}, автор — ${queueCount(facts.missing_author)}.`;
+      `Ремонт, ипотека и тип продавца получены вместе: ${queueCount(facts.complete)}. В сохранённых карточках не получено: ремонт — ${queueCount(facts.missing_repair)}, ипотека — ${queueCount(facts.missing_mortgage)}, тип продавца — ${queueCount(facts.missing_author)}.`;
   }
   if (bathroomCheckProgress) {
     bathroomCheckProgress.hidden = total === 0;
@@ -177,7 +204,11 @@ function renderBathroomCheck(state) {
     bathroomCheckProgress.value = Math.min(checked, total);
   }
   const phase = running && checked === 0 && !state.current_url ? 'Ожидается подключение расширения' : running && detailsMode ? 'Идёт дополнение карточек' : labels[state.status];
-  if (bathroomCheckMessage) bathroomCheckMessage.textContent = `${phase || 'Состояние проверки неизвестно'}.${state.message ? ` ${state.message}` : ''}`;
+  if (bathroomCheckMessage) {
+    const statusText = `${phase || 'Состояние проверки неизвестно'}.${state.message ? ` ${state.message}` : ''}`;
+    bathroomCheckMessage.textContent = bathroomCheckBusy && bathroomCheckFeedback
+      ? bathroomCheckFeedback : [statusText, bathroomCheckFeedback].filter(Boolean).join(' ');
+  }
   if (bathroomCheckCurrent) {
     const currentUrl = safeExternalUrl(state.current_url);
     bathroomCheckCurrent.hidden = !currentUrl;
@@ -201,6 +232,9 @@ function renderBathroomCheck(state) {
 }
 
 function updateBathroomCheck(state) {
+  if (!bathroomCheckBusy && (state.job_id !== bathroomCheckState?.job_id || state.status !== bathroomCheckState?.status)) {
+    bathroomCheckFeedback = '';
+  }
   const nextSignature = `${state.job_id || ''}:${state.mode || 'bathrooms'}:${state.status}:${queueCount(state.checked)}`;
   const changed = bathroomCheckSignature !== null && bathroomCheckSignature !== nextSignature;
   bathroomCheckSignature = nextSignature;
@@ -213,7 +247,7 @@ async function loadBathroomCheckStatus() {
   bathroomCheckPolling = true;
   const revision = bathroomCheckRevision;
   try {
-    const response = await fetch(bathroomCheckApi, {cache:'no-store'});
+    const response = await fetchBathroomCheck();
     const state = await readJson(response);
     if (!response.ok) throw new Error(state.detail || 'Не удалось получить состояние автопроверки');
     if (revision === bathroomCheckRevision && !bathroomCheckBusy) {
@@ -224,7 +258,9 @@ async function loadBathroomCheckStatus() {
       }, 1500);
     }
   } catch (error) {
-    if (bathroomCheckMessage) bathroomCheckMessage.textContent = error.message;
+    if (revision === bathroomCheckRevision && !bathroomCheckBusy && !bathroomCheckFeedback && bathroomCheckMessage) {
+      bathroomCheckMessage.textContent = error.name === 'TimeoutError' ? 'Сервер не ответил. Проверю состояние снова.' : error.message;
+    }
   } finally {
     bathroomCheckPolling = false;
   }
@@ -232,28 +268,33 @@ async function loadBathroomCheckStatus() {
 
 async function controlBathroomCheck(action, mode = 'bathrooms') {
   if (bathroomCheckBusy) return;
+  const [pending, unconfirmed] = {
+    start: ['Запускаю автопроверку…', 'Сервер не подтвердил запуск автопроверки.'],
+    pause: ['Отправляю команду «Пауза»…', 'Сервер не подтвердил паузу.'],
+    resume: ['Возобновляю автопроверку…', 'Сервер не подтвердил возобновление.'],
+    cancel: ['Останавливаю автопроверку…', 'Сервер не подтвердил остановку.'],
+  }[action];
   bathroomCheckRevision += 1;
   bathroomCheckBusy = true;
+  bathroomCheckFeedback = pending;
   if (bathroomCheckState) renderBathroomCheck(bathroomCheckState);
   try {
     const options = action === 'start'
       ? {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({mode})}
       : {method:'POST'};
-    const response = await fetch(`${bathroomCheckApi}/${action}`, options);
+    const response = await fetchBathroomCheck(`/${action}`, options);
     const state = await readJson(response);
     if (!response.ok) throw new Error(state.detail || 'Не удалось изменить состояние автопроверки');
+    bathroomCheckFeedback = '';
     updateBathroomCheck(state);
     window.postMessage({type:'apartment-agent-bathroom-queue'}, location.origin);
   } catch (error) {
-    if (bathroomCheckMessage) bathroomCheckMessage.textContent = error.message;
+    const reason = error.name === 'TimeoutError' ? 'Истекло время ожидания. Попробуйте ещё раз.'
+      : error.name === 'TypeError' ? 'Не удалось связаться с приложением. Попробуйте ещё раз.' : error.message;
+    bathroomCheckFeedback = `${unconfirmed} ${reason}`;
   } finally {
     bathroomCheckBusy = false;
-    if (bathroomCheckState) {
-      // Restore button availability without replacing a useful error message.
-      const messageText = bathroomCheckMessage?.textContent;
-      renderBathroomCheck(bathroomCheckState);
-      if (bathroomCheckMessage && messageText) bathroomCheckMessage.textContent = messageText;
-    }
+    if (bathroomCheckState) renderBathroomCheck(bathroomCheckState);
   }
 }
 
@@ -323,16 +364,217 @@ function pledgeBadge(item) {
   return item.is_pledged === false ? 'Нет залога' : 'Не указано';
 }
 
+const availabilityLabels = new Map([
+  ['sold', 'Продана'],
+  ['archived', 'В архиве'],
+  ['unavailable', 'Объявление недоступно'],
+]);
+
+function availabilityBadge(item) {
+  const label = availabilityLabels.get(item.availability);
+  return label ? `<span class="availability-badge availability-${item.availability}">${label}</span>` : '';
+}
+
+const sellerRoles = new Map([
+  ['owner', {label:'Собственник', order:0}],
+  ['verified_agent', {label:'Крыша Агент', order:1}],
+  ['realtor', {label:'Риелтор', order:2}],
+  ['unknown', {label:'Тип продавца не указан', order:3}],
+]);
+
+function sellerBadge(item) {
+  const category = sellerRoles.has(item.seller_category) ? item.seller_category : 'unknown';
+  const identityConfirmed = category === 'realtor' && /личность подтверждена/i.test(item.seller_type || '');
+  const otherRole = category === 'unknown' ? item.seller_type?.trim() : null;
+  const label = identityConfirmed ? 'Риелтор · личность подтверждена' : otherRole || sellerRoles.get(category).label;
+  return `<span class="seller-badge seller-${category}" data-seller-category="${category}">${escapeHtml(label)}</span>`;
+}
+
+function riverBankBadge(item) {
+  if (item.river_bank === 'left') return '<span class="bank-badge bank-left" data-river-bank="left">Левый берег · +5</span>';
+  if (item.river_bank === 'right') return '<span class="bank-badge" data-river-bank="right">Правый берег</span>';
+  return '<span class="bank-badge" data-river-bank="unknown">Берег не определён</span>';
+}
+
+function setupLikedComparison() {
+  const openButton = document.querySelector('#openLikedComparison');
+  const dialog = document.querySelector('#likedComparison');
+  if (!openButton || !dialog) return;
+  const picker = dialog.querySelector('#likedComparisonPicker');
+  const table = dialog.querySelector('#likedComparisonTable');
+  const status = dialog.querySelector('#likedComparisonStatus');
+  const action = dialog.querySelector('#runLikedComparison');
+  const selected = new Set();
+  let apartments = [];
+  let requestRevision = 0;
+  const apartmentName = item => item.address || cleanSearchTitle(item.title || '');
+  const unknown = '<span class="compare-unknown">Не указано</span>';
+  const textCell = value => value === null || value === undefined || value === '' ? unknown : escapeHtml(value);
+  const formattedPrice = value => Number.isFinite(value) ? money.format(value) : null;
+  const comparisonPrice = item => Number.isFinite(item.price_lower_bound_kzt)
+    ? `от ${money.format(item.price_lower_bound_kzt)}` : formattedPrice(item.price_kzt);
+  const fields = [
+    ['Цена', item => textCell(comparisonPrice(item))],
+    ['Цена за м²', item => textCell(Number.isFinite(item.price_per_m2) ? `${money.format(item.price_per_m2)}/м²` : null)],
+    ['Адрес', item => textCell(item.address)],
+    ['Этаж', item => textCell(Number.isInteger(item.floor) ? (Number.isInteger(item.floors_total) ? `${item.floor} из ${item.floors_total}` : item.floor) : null)],
+    ['Санузлы', item => Number.isInteger(item.bathrooms_count) ? bathroomBadge(item) : unknown],
+    ['Ремонт', item => textCell(item.repair_condition)],
+    ['Ипотека', item => textCell(item.mortgage_supported === true ? 'Указана возможность' : item.mortgage_supported === false ? 'Не предусмотрена' : null)],
+    ['Залог', item => typeof item.is_pledged === 'boolean' ? pledgeBadge(item) : unknown],
+    ['Тип продавца', item => sellerBadge(item)],
+  ];
+
+  function updatePicker() {
+    for (const input of picker.querySelectorAll('input[type="checkbox"]')) {
+      input.checked = selected.has(input.value);
+      input.disabled = selected.size >= 4 && !input.checked;
+    }
+    status.textContent = apartments.length < 2
+      ? 'Отметьте минимум две квартиры галочкой «Понравилась».'
+      : `Выбрано ${selected.size} из 4. Для сравнения нужны минимум две квартиры.`;
+    action.disabled = selected.size < 2;
+  }
+
+  function showPicker() {
+    table.hidden = true;
+    picker.hidden = !apartments.length;
+    action.hidden = apartments.length < 2;
+    action.textContent = 'Сравнить выбранные';
+    updatePicker();
+  }
+
+  openButton.addEventListener('click', async () => {
+    if (dialog.open) return;
+    const revision = ++requestRevision;
+    picker.hidden = table.hidden = action.hidden = true;
+    status.textContent = 'Загружаю понравившиеся квартиры…';
+    dialog.showModal();
+    try {
+      const response = await fetch('/api/v1/comparison/liked', {signal:AbortSignal.timeout(10000)});
+      if (!response.ok) throw new Error('Не удалось загрузить понравившиеся квартиры');
+      const data = await readJson(response);
+      if (!dialog.open || revision !== requestRevision) return;
+      apartments = data;
+      const available = new Set(apartments.map(item => item.source_url));
+      for (const key of selected) if (!available.has(key)) selected.delete(key);
+      picker.innerHTML = apartments.map(item => {
+        const meta = [comparisonPrice(item), Number.isFinite(item.area_m2) ? `${number.format(item.area_m2)} м²` : null].filter(Boolean);
+        if (item.source === 'found') meta.push('Из поиска');
+        return `<label class="compare-option"><input type="checkbox" value="${escapeHtml(item.source_url)}"><span><b>${escapeHtml(apartmentName(item))}</b>${meta.length ? `<small class="compare-option-meta">${escapeHtml(meta.join(' · '))}</small>` : ''}</span></label>`;
+      }).join('');
+      showPicker();
+    } catch {
+      if (dialog.open && revision === requestRevision) status.textContent = 'Не удалось загрузить квартиры. Закройте окно и попробуйте ещё раз.';
+    }
+  });
+
+  picker.addEventListener('change', event => {
+    const input = event.target;
+    if (input.checked && selected.size < 4) selected.add(input.value);
+    if (!input.checked) selected.delete(input.value);
+    updatePicker();
+  });
+
+  action.addEventListener('click', () => {
+    if (!table.hidden) {
+      showPicker();
+      picker.querySelector('input:checked')?.focus();
+      return;
+    }
+    const chosen = [...selected].map(url => apartments.find(item => item.source_url === url)).filter(Boolean);
+    if (chosen.length < 2 || chosen.length > 4) return;
+    const columns = chosen.map(item => {
+      const url = safeExternalUrl(item.source_url);
+      const link = Number.isSafeInteger(item.listing_id) && item.listing_id > 0
+        ? `<a href="#listing-${item.listing_id}" data-compare-listing="${item.listing_id}">Карточка →</a>`
+        : url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Объявление ↗</a>` : '';
+      return `<th scope="col">${escapeHtml(apartmentName(item))}${link}</th>`;
+    }).join('');
+    table.innerHTML = `<table class="compare-table"><thead><tr><th scope="col">Параметр</th>${columns}</tr></thead><tbody>${fields.map(([label, value]) => `<tr><th scope="row">${label}</th>${chosen.map(item => `<td>${value(item)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+    status.textContent = '';
+    picker.hidden = true;
+    table.hidden = false;
+    action.textContent = 'Изменить выбор';
+    table.focus();
+  });
+
+  table.addEventListener('click', event => {
+    const link = event.target.closest('[data-compare-listing]');
+    if (!link || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    dialog.close();
+    jumpToSavedListing(Number(link.dataset.compareListing));
+  });
+}
+
+const pendingLikes = new Map();
+
+function likeControl(item, collection) {
+  const url = item.url || item.source_url;
+  const normalized = normalizeUrl(url);
+  const key = normalized.startsWith('https://krisha.kz/a/show/') ? normalized.replace(/\/+$/, '') : url;
+  const checked = pendingLikes.get(key) ?? item.liked;
+  return `<div class="like-control"><label><input type="checkbox" data-like-key="${escapeHtml(key)}" data-like-path="/api/v1/${collection}/${Number(item.id)}/liked" ${checked ? 'checked' : ''} ${pendingLikes.has(key) ? 'disabled' : ''}> Понравилась</label><small role="status" hidden></small></div>`;
+}
+
+function updateLikeControls(key, liked, busy, error = '') {
+  for (const input of document.querySelectorAll('input[data-like-key]')) {
+    if (input.dataset.likeKey !== key) continue;
+    input.checked = liked;
+    input.disabled = busy;
+    const status = input.closest('.like-control').querySelector('[role="status"]');
+    status.textContent = error;
+    status.hidden = !error;
+  }
+}
+
+async function changeLike(event) {
+  const input = event.target;
+  if (!input.matches('input[data-like-path]')) return;
+  const {likeKey, likePath} = input.dataset;
+  if (pendingLikes.has(likeKey)) return;
+  const desired = input.checked;
+  const hadFocus = document.activeElement === input;
+  let confirmed = !desired;
+  let feedback = '';
+  pendingLikes.set(likeKey, desired);
+  updateLikeControls(likeKey, desired, true);
+  try {
+    const response = await fetch(likePath, {
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({liked:desired}), signal:AbortSignal.timeout(10000),
+    });
+    const result = await readJson(response);
+    if (!response.ok || result?.liked !== desired) throw new Error('Отметка не подтверждена');
+    confirmed = result.liked;
+    await Promise.all([loadListings({reuseComparisons:true}), loadSearchResults()]);
+  } catch {
+    feedback = 'Не удалось сохранить отметку. Попробуйте ещё раз.';
+  } finally {
+    pendingLikes.delete(likeKey);
+    updateLikeControls(likeKey, confirmed, false, feedback);
+    if (hadFocus && document.activeElement === document.body) {
+      const replacement = [...document.querySelectorAll('input[data-like-path]')].find(node => node.dataset.likePath === likePath);
+      replacement?.focus({preventScroll:true});
+    }
+  }
+}
+
 function sortListings(listings) {
   const items = [...listings];
   const sort = listingSort?.value || 'newest';
   const pledgeOrder = item => item.is_pledged === false ? 0 : item.is_pledged === true ? 2 : 1;
+  const sellerOrder = item => (sellerRoles.get(item.seller_category) || sellerRoles.get('unknown')).order;
+  const newestFirst = (left, right) => String(right.created_at).localeCompare(String(left.created_at)) || right.id - left.id;
   const compare = (left, right) => {
     if (sort === 'pledge') return pledgeOrder(left) - pledgeOrder(right) || right.assessment.score - left.assessment.score || right.id - left.id;
+    if (sort === 'seller') return sellerOrder(left) - sellerOrder(right) || newestFirst(left, right);
+    if (sort === 'liked') return Number(right.liked === true) - Number(left.liked === true) || newestFirst(left, right);
     if (sort === 'score') return right.assessment.score - left.assessment.score || right.id - left.id;
     if (sort === 'price_m2') return left.assessment.price_per_m2 - right.assessment.price_per_m2 || left.id - right.id;
     if (sort === 'price') return left.price_kzt - right.price_kzt || left.id - right.id;
-    return String(right.created_at).localeCompare(String(left.created_at)) || right.id - left.id;
+    return newestFirst(left, right);
   };
   return items.sort(compare);
 }
@@ -383,14 +625,122 @@ function renderComparison(data) {
     <small>Срез: ${escapeHtml(dateLabel)}. Цена предложения; объявления могут быть подобраны по вашим фильтрам.</small>`;
 }
 
-async function loadComparisons() {
+function renderDuplicateOffers(offers, currentId) {
+  return `<ul class="duplicate-offers">${offers.map(offer => {
+    const url = safeExternalUrl(offer.source_url);
+    const title = escapeHtml(offer.address || offer.title || 'Объявление');
+    const price = Number.isFinite(offer.price_kzt) ? money.format(offer.price_kzt) : 'Цена не указана';
+    const evidence = offer.evidence?.kind === 'shared_photos'
+      ? `Общих фото: ${number.format(offer.evidence.shared_photos)}`
+      : offer.evidence?.kind === 'same_house_floor_area' ? 'Тот же дом и этаж, близкая площадь' : '';
+    return `<li>${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${title} ↗</a>` : title}
+      <div class="duplicate-facts"><b>${escapeHtml(price)}</b>${sellerBadge(offer)}${availabilityBadge(offer)}
+      ${offer.listing_id === currentId ? '<span class="meta">Это объявление</span>' : ''}</div>
+      ${evidence ? `<small class="meta">${escapeHtml(evidence)}</small>` : ''}</li>`;
+  }).join('')}</ul>`;
+}
+
+function renderClosestComparables(data) {
+  const renderGroup = (heading, group, showDistance) => {
+    const missing = {
+      complex_unknown:'Название ЖК не указано.',
+      coordinates_unknown:'Координаты квартиры не указаны.',
+      city_unknown:'Подбор аналогов доступен для Астаны.',
+    }[group.status];
+    if (missing) return `<section class="comparable-group"><h4>${heading}</h4><p>${missing}</p></section>`;
+    const items = group.items.map(item => {
+      const url = safeExternalUrl(item.source_url);
+      const title = escapeHtml(item.address || item.title || 'Объявление');
+      const meta = [Number.isFinite(item.area_m2) ? `${number.format(item.area_m2)} м²` : null,
+                    showDistance && Number.isFinite(item.distance_m) ? `${number.format(item.distance_m)} м` : null].filter(Boolean);
+      const variants = Array.isArray(item.offers) && item.offers.length > 1
+        ? `<details class="more-comparables"><summary>Все объявления (${number.format(item.offers.length)})</summary>${renderDuplicateOffers(item.offers, null)}</details>` : '';
+      return `<li>${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${title} ↗</a>` : title}
+        <div class="comparable-facts"><b>${escapeHtml(money.format(item.price_per_m2))}/м²</b>${meta.length ? `<span>${escapeHtml(meta.join(' · '))}</span>` : ''}</div>${variants}</li>`;
+    });
+    const rest = items.slice(5);
+    return `<section class="comparable-group"><h4>${heading} <span>${number.format(group.count)} в выборке</span></h4>
+      ${items.length ? `<ul>${items.slice(0, 5).join('')}</ul>` : '<p>Подходящих объявлений пока нет.</p>'}
+      ${rest.length ? `<details class="more-comparables"><summary>Ещё ${number.format(rest.length)} объявл.</summary><ul>${rest.join('')}</ul></details>` : ''}</section>`;
+  };
+  const radius = data.radius_m >= 1000 ? `${number.format(data.radius_m / 1000)} км` : `${number.format(data.radius_m)} м`;
+  return `<p class="comparable-criteria">Сохранённые объявления за ${number.format(data.lookback_days)} дней. Столько же комнат, площадь ±${number.format(data.area_tolerance_percent)}%. Соседние дома в радиусе ${radius}.</p>
+    ${renderGroup('В том же ЖК', data.same_complex, false)}
+    ${renderGroup('В соседних домах', data.nearby, true)}`;
+}
+
+async function loadClosestComparables(details) {
+  const content = details.querySelector('[data-comparables-content]');
+  if (!content || content.dataset.state === 'loading' || content.dataset.state === 'loaded') return;
+  content.dataset.state = 'loading';
+  content.innerHTML = '<p class="meta" role="status">Подбираю ближайшие аналоги…</p>';
+  try {
+    const id = encodeURIComponent(details.dataset.comparablesId);
+    const response = await fetch(`/api/v1/listings/${id}/comparison?include_comparables=true`, {signal:AbortSignal.timeout(10000)});
+    if (!response.ok) throw new Error('Не удалось загрузить аналоги');
+    const data = await readJson(response);
+    if (!details.isConnected) return;
+    content.innerHTML = renderClosestComparables(data.comparables);
+    content.dataset.state = 'loaded';
+  } catch {
+    if (!details.isConnected) return;
+    content.dataset.state = 'error';
+    content.innerHTML = '<p class="meta" role="alert">Не удалось загрузить аналоги.</p><button type="button" class="panel-action" data-comparables-retry>Повторить</button>';
+  }
+}
+
+async function loadDuplicateOffers(details) {
+  const content = details.querySelector('[data-duplicates-content]');
+  if (!content || content.dataset.state === 'loading' || content.dataset.state === 'loaded') return;
+  content.dataset.state = 'loading';
+  content.innerHTML = '<p class="meta" role="status">Проверяю сохранённые объявления…</p>';
+  try {
+    const id = encodeURIComponent(details.dataset.duplicatesId);
+    const response = await fetch(`/api/v1/listings/${id}/duplicates`, {signal:AbortSignal.timeout(10000)});
+    if (!response.ok) throw new Error('Не удалось загрузить дубли');
+    const data = await readJson(response);
+    if (!details.isConnected) return;
+    content.innerHTML = data.items.length > 1
+      ? `<p class="comparable-criteria">Вероятное совпадение · ${number.format(data.items.length)} в группе</p>${renderDuplicateOffers(data.items, data.listing_id)}`
+      : '<p class="comparable-criteria">В сохранённых карточках вероятных дублей пока нет.</p>';
+    content.dataset.state = 'loaded';
+  } catch {
+    if (!details.isConnected) return;
+    content.dataset.state = 'error';
+    content.innerHTML = '<p class="meta" role="alert">Не удалось проверить дубли.</p><button type="button" class="panel-action" data-duplicates-retry>Повторить</button>';
+  }
+}
+
+grid?.addEventListener('toggle', event => {
+  const details = event.target;
+  if (details.matches('details[data-comparables-id]') && details.open) void loadClosestComparables(details);
+  if (details.matches('details[data-duplicates-id]') && details.open) void loadDuplicateOffers(details);
+}, true);
+grid?.addEventListener('click', event => {
+  const retry = event.target.closest('[data-comparables-retry]');
+  if (retry) void loadClosestComparables(retry.closest('details[data-comparables-id]'));
+  const retryDuplicates = event.target.closest('[data-duplicates-retry]');
+  if (retryDuplicates) void loadDuplicateOffers(retryDuplicates.closest('details[data-duplicates-id]'));
+  const sale = event.target.closest('[data-sale-id]');
+  if (sale) void changeSaleStatus(sale);
+});
+
+async function loadComparisons(previous = null) {
   const nodes = [...(grid?.querySelectorAll('.price-comparison[data-listing-id]') || [])];
   await Promise.all(nodes.map(async node => {
+    const cached = previous?.get(node.dataset.listingId);
+    if (cached) {
+      node.replaceWith(cached);
+      return;
+    }
     try {
       const response = await fetch(`/api/v1/listings/${encodeURIComponent(node.dataset.listingId)}/comparison`);
       if (!response.ok) throw new Error('Не удалось загрузить сравнение');
       const data = await readJson(response);
-      if (node.isConnected) node.innerHTML = renderComparison(data);
+      if (node.isConnected) {
+        node.innerHTML = renderComparison(data);
+        node.dataset.loaded = 'true';
+      }
     } catch {
       if (node.isConnected) node.textContent = 'Не удалось загрузить сравнение цены.';
     }
@@ -405,20 +755,36 @@ function render(listings) {
   savedUrls = new Set(listings.map(item => normalizeUrl(item.source_url)));
   savedListingIds = new Map(listings.map(item => [normalizeUrl(item.source_url), item.id]));
   const minScore = Number(filter?.value || 0);
+  const seller = listingSellerFilter?.value || 'all';
   const pinnedId = /^#listing-([1-9]\d*)$/.exec(location.hash)?.[1];
+  const inactive = item => availabilityLabels.has(item.availability);
   const visible = sortListings(listings).filter(item => item.assessment.score >= minScore
+    && (seller === 'all' || (item.seller_category || 'unknown') === seller)
+    && (!listingLeftBankOnly?.checked || item.river_bank === 'left')
+    && (listingShowInactive?.checked || !inactive(item) || String(item.id) === pinnedId)
     && (listingShowPledged?.checked || item.is_pledged !== true || String(item.id) === pinnedId));
+  const hiddenInactive = listingShowInactive?.checked ? 0 : listings.filter(item => inactive(item) && String(item.id) !== pinnedId).length;
+  if (listingAvailabilitySummary) {
+    listingAvailabilitySummary.hidden = hiddenInactive === 0;
+    listingAvailabilitySummary.textContent = hiddenInactive ? `Скрыто проданных и снятых с публикации: ${hiddenInactive}.` : '';
+  }
   const hiddenPledged = listingShowPledged?.checked ? 0 : listings.filter(item => item.is_pledged === true && String(item.id) !== pinnedId).length;
   if (listingPledgeSummary) {
     listingPledgeSummary.hidden = hiddenPledged === 0;
     listingPledgeSummary.textContent = hiddenPledged ? `Скрыто квартир в залоге: ${hiddenPledged}.` : '';
   }
-  const strong = listings.filter(item => item.assessment.score >= 85);
+  const strong = listings.filter(item => !inactive(item) && item.assessment.score >= 85);
   document.querySelector('#totalCount').textContent = listings.length;
   document.querySelector('#strongCount').textContent = strong.length;
   if (!grid) return;
   if (!visible.length) {
-    grid.innerHTML = hiddenPledged && hiddenPledged === listings.length
+    grid.innerHTML = hiddenInactive > 0 && hiddenInactive === listings.length
+      ? '<section class="empty card"><strong>Все сохранённые квартиры проданы или сняты с публикации</strong><p>Включите «Показывать проданные и снятые», чтобы увидеть карточки.</p></section>'
+      : listingLeftBankOnly?.checked && listings.length
+      ? '<section class="empty card"><strong>По текущим условиям квартир на левом берегу нет</strong><p>Снимите галочку «Только левый берег», чтобы посмотреть остальные карточки.</p></section>'
+      : seller !== 'all' && listings.length
+      ? '<section class="empty card"><strong>Нет квартир с выбранным типом продавца</strong><p>Выберите «Все продавцы», чтобы увидеть остальные карточки.</p></section>'
+      : hiddenPledged && hiddenPledged === listings.length
       ? '<section class="empty card"><strong>Все сохранённые квартиры в залоге</strong><p>Включите «Показать сохранённые квартиры в залоге», чтобы посмотреть их.</p></section>'
       : listings.length
       ? '<section class="empty card"><strong>Нет квартир с выбранным рейтингом</strong><p>Выберите «Все», чтобы увидеть остальные квартиры.</p></section>'
@@ -445,7 +811,6 @@ function render(listings) {
     const ai = item.ai_analysis || {};
     const history = item.price_history || [];
     const latestChange = history[0]?.change_kzt;
-    const seller = [item.seller_name, item.seller_type].filter(Boolean).join(' · ') || 'Не указан';
     const propertyDetails = item.property_details && typeof item.property_details === 'object' && !Array.isArray(item.property_details)
       ? Object.entries(item.property_details).filter(([key, value]) => key.trim() && typeof value === 'string' && value.trim()) : [];
     const complexDescriptionUrl = safeExternalUrl(item.complex_description_source_url);
@@ -459,11 +824,25 @@ function render(listings) {
       <div class="listing-top"><div><h3>${escapeHtml(title)}</h3><div class="meta">${escapeHtml(location)}</div></div><div class="rating ${scoreClass}">${item.assessment.score}</div></div>
       <div class="price">${money.format(item.price_kzt)}</div>
       <div class="meta">${item.rooms} комн. · ${number.format(item.area_m2)} м² · ${money.format(item.assessment.price_per_m2)}/м² · этаж ${item.floor || '—'}/${item.floors_total || '—'}</div>
+      <div class="listing-bank">${riverBankBadge(item)}${availabilityBadge(item)}</div>
+      ${likeControl(item, 'listings')}
       <section class="price-comparison" data-listing-id="${Number(item.id)}" aria-label="Сравнение цены за квадратный метр">Загружаю сравнение цены…</section>
+      <details class="listing-comparables" data-details-key="closest-comparables" data-comparables-id="${Number(item.id)}"><summary>Ближайшие аналоги</summary><div data-comparables-content></div></details>
+      <details class="listing-comparables" data-details-key="duplicate-offers" data-duplicates-id="${Number(item.id)}"><summary>Вероятные дубли</summary><div data-duplicates-content></div></details>
       ${mapWidgetUrl ? `<div class="listing-map"><iframe src="${escapeHtml(mapWidgetUrl)}" title="Расположение квартиры: ${escapeHtml(title)}" loading="lazy" allowfullscreen></iframe></div>` : ''}
       ${mapUrl ? `<a class="location-link" href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener noreferrer">${hasCoordinates ? 'Открыть большую карту' : 'Найти адрес на карте'} →</a>${hasCoordinates ? '<p class="meta map-fallback">Если карта не загрузилась, воспользуйтесь ссылкой выше.</p>' : '<p class="meta">Координаты не получены. Карта найдёт дом по указанному адресу.</p>'}` : ''}
       ${locationMissing ? '<div class="meta location-missing">Адрес и координаты не указаны</div>' : ''}
-      <div class="listing-details"><div>${bathroomBadge(item)}</div>${repairDetails(item)}${mortgageDetails(item)}<div><b>Залог:</b> ${pledgeBadge(item)}</div><div><b>Автор объявления:</b> ${escapeHtml(seller)}</div></div>
+      <div class="listing-details"><div>${bathroomBadge(item)}</div>${repairDetails(item)}${mortgageDetails(item)}<div><b>Залог:</b> ${pledgeBadge(item)}</div><div class="listing-author"><b>Продавец</b>${sellerBadge(item)}${item.seller_name ? `<span>${escapeHtml(item.seller_name)}</span>` : ''}</div></div>
+      <details class="purchase-checklist" data-details-key="purchase-checklist">
+        <summary>Проверка перед покупкой · eGov</summary>
+        <ul>
+          <li>Уточните, кто собственник и на каком основании действует продавец.</li>
+          <li>Проверьте документы на квартиру, зарегистрированные права и обременения.</li>
+          <li>Сверьте адрес, площадь и планировку с техническими документами.</li>
+          <li>Уточните, нужны ли согласия других собственников или супруга.</li>
+        </ul>
+        <a href="https://beta.egov.kz/situations/10/49?lang=ru" target="_blank" rel="noopener noreferrer">Открыть инструкцию eGov ↗</a>
+      </details>
       ${item.building_year || item.building_type ? `<div class="meta">${item.building_year ? `Построен ${item.building_year}` : ''}${item.building_year && item.building_type ? ' · ' : ''}${escapeHtml(item.building_type || '')}</div>` : ''}
       ${twogisLine}
       <details class="seller-description" data-details-key="seller-description"><summary>Описание объявления</summary>${item.description ? `<p class="seller-description-text">${escapeHtml(item.description)}</p>` : '<p class="meta">Описание объявления не получено.</p>'}</details>
@@ -473,7 +852,8 @@ function render(listings) {
       <details class="price-history" data-details-key="price-history"><summary>История цены (${history.length})</summary>${history.length ? `<ol>${history.map(snapshot => `<li>${escapeHtml(dateTime.format(new Date(snapshot.observed_at)))} — ${escapeHtml(money.format(snapshot.price_kzt))}${snapshot.change_kzt ? ` (${snapshot.change_kzt > 0 ? '+' : '−'}${escapeHtml(money.format(Math.abs(snapshot.change_kzt)))})` : ''}</li>`).join('')}</ol>` : '<p>Пока нет записей о цене.</p>'}</details>
       <span class="verdict">${escapeHtml(item.assessment.verdict)}</span>
       ${ai.summary ? `<div class="ai-summary"><b>AI-анализ</b><p>${escapeHtml(ai.summary)}</p></div>` : ''}
-      <div class="listing-actions"><button class="check-listing secondary-action" data-listing-id="${item.id}" type="button">↻ Проверить квартиру</button></div>
+      <div class="listing-actions"><button class="check-listing secondary-action" data-listing-id="${item.id}" type="button">↻ Проверить квартиру</button>
+        <button class="panel-action sale-action" data-sale-id="${Number(item.id)}" data-mark-sold="${item.availability !== 'sold'}" type="button">${item.availability === 'sold' ? 'Снять отметку «Продана»' : 'Отметить проданной'}</button></div>
       ${sourceUrl ? `<a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">Открыть объявление →</a>` : ''}
     </article>`;
   }).join('');
@@ -503,30 +883,59 @@ async function checkListingNow(id, button) {
   }
 }
 
-async function loadListings() {
+async function changeSaleStatus(button) {
+  const id = Number(button.dataset.saleId);
+  const sold = button.dataset.markSold === 'true';
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Сохраняю…';
+  try {
+    const response = await fetch(`/api/v1/listings/${id}/sold`, {
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({sold}), signal:AbortSignal.timeout(10000),
+    });
+    if (!response.ok) throw new Error('Не удалось сохранить статус');
+    if (listingAvailabilityMessage) listingAvailabilityMessage.textContent = sold ? 'Квартира отмечена как проданная.' : 'Отметка «Продана» снята.';
+    await Promise.all([loadListings(), loadSearchResults(), loadSearchStatus()]);
+  } catch {
+    if (listingAvailabilityMessage) listingAvailabilityMessage.textContent = 'Не удалось изменить статус квартиры.';
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
+async function loadListings({reuseComparisons = false} = {}) {
+  const revision = ++listingsRevision;
   if (refreshButton) refreshButton.disabled = true;
   try {
     const response = await fetch('/api/v1/listings');
     if (!response.ok) throw new Error('Не удалось загрузить квартиры');
-    render(await readJson(response));
-    await loadComparisons();
+    const listings = await readJson(response);
+    if (revision !== listingsRevision) return false;
+    const loaded = reuseComparisons ? [...(grid?.querySelectorAll('.price-comparison[data-loaded]') || [])] : [];
+    const previous = new Map(loaded.map(node => [node.dataset.listingId, node]));
+    render(listings);
     grid?.querySelectorAll('.check-listing').forEach(button => {
       button.addEventListener('click', () => checkListingNow(Number(button.dataset.listingId), button));
     });
+    await loadComparisons(previous);
     return true;
   } catch (error) {
-    if (message) message.textContent = error.message;
+    if (revision === listingsRevision && message) message.textContent = error.message;
     return false;
   } finally {
-    if (refreshButton) refreshButton.disabled = false;
+    if (revision === listingsRevision && refreshButton) refreshButton.disabled = false;
   }
 }
 
 async function openSavedListingFromHash() {
   const match = /^#listing-([1-9]\d*)$/.exec(location.hash);
   if (!match) return;
-  // A direct link must also reveal a card hidden by the rating filter.
+  // Reveal a directly linked card even when the current filters hide it.
   if (filter) filter.value = '';
+  if (listingSellerFilter) listingSellerFilter.value = 'all';
+  if (listingLeftBankOnly) listingLeftBankOnly.checked = false;
   if (!await loadListings()) return;
   const card = document.getElementById(`listing-${match[1]}`);
   if (!card) {
@@ -537,6 +946,13 @@ async function openSavedListingFromHash() {
   if (history) history.open = true;
   card.focus({preventScroll:true});
   card.scrollIntoView({behavior:'auto', block:'start'});
+}
+
+function jumpToSavedListing(id) {
+  if (!Number.isSafeInteger(id) || id < 1) return;
+  const hash = `#listing-${id}`;
+  if (location.hash === hash) void openSavedListingFromHash();
+  else location.hash = hash;
 }
 
 window.addEventListener('hashchange', () => { void openSavedListingFromHash(); });
@@ -576,7 +992,10 @@ async function importSearchResult(url, button) {
 async function loadSearchResults() {
   if (!searchResults) return;
   const revision = ++searchResultsRevision;
-  const params = new URLSearchParams({limit:'200', only_new:'false', sort:searchResultsSort?.value || 'newest'});
+  const seller = searchSellerFilter?.value || 'all';
+  const params = new URLSearchParams({limit:'200', only_new:'false', sort:searchResultsSort?.value || 'newest', seller});
+  const leftBankOnly = searchLeftBankOnly?.checked;
+  if (leftBankOnly) params.set('bank', 'left');
   try {
     const [response, statusResponse] = await Promise.all([
       fetch(`/api/v1/search/results?${params}`),
@@ -593,7 +1012,13 @@ async function loadSearchResults() {
       ? results.filter(item => Number.isInteger(item.analysis?.bathrooms_count) && item.analysis.bathrooms_count >= 2)
       : results;
     if (!items.length) {
-      searchResults.innerHTML = strictBathrooms
+      searchResults.innerHTML = leftBankOnly
+        ? '<section class="empty card"><strong>По текущим условиям объявлений на левом берегу нет</strong><p>Берег определяется по координатам в карточке. Снимите галочку, чтобы увидеть остальные объявления.</p></section>'
+        : seller === 'owner'
+        ? '<section class="empty card"><strong>По текущим условиям объявлений от собственников пока нет</strong><p>Нажмите «Искать сейчас», чтобы проверить выдачу Krisha с фильтром «От хозяев».</p></section>'
+        : seller !== 'all'
+        ? '<section class="empty card"><strong>Нет объявлений с выбранным типом продавца</strong></section>'
+        : strictBathrooms
         ? '<section class="empty card"><strong>Квартир с подтверждёнными двумя санузлами пока нет</strong><p>При отборе «От 2 санузлов» объявления без подтверждённого количества скрыты. Подходящие квартиры появятся после получения данных объявления.</p></section>'
         : '<section class="empty card"><strong>Новых ссылок пока нет</strong><p>Новые объявления появятся после следующей публикации на Krisha.</p></section>';
       return;
@@ -621,7 +1046,8 @@ async function loadSearchResults() {
           <div><span class="verdict">${escapeHtml(seenLabel)}</span><h3>${escapeHtml(cleanSearchTitle(item.title))}</h3></div>
           <div class="rating ${a.score < 85 ? 'medium' : ''}">${a.score ?? '—'}</div>
         </div>
-        <div class="search-facts">${facts.map(value => `<span>${escapeHtml(value)}</span>`).join('')}${typeof a.is_pledged === 'boolean' ? (a.is_pledged ? pledgeBadge(a) : '<span>Нет залога</span>') : ''}${bathroomBadge(a, true)}</div>
+        <div class="search-facts">${facts.map(value => `<span>${escapeHtml(value)}</span>`).join('')}${typeof a.is_pledged === 'boolean' ? (a.is_pledged ? pledgeBadge(a) : '<span>Нет залога</span>') : ''}${bathroomBadge(a, true)}${sellerBadge(item)}${riverBankBadge(item)}</div>
+        ${likeControl(item, 'search/results')}
         ${reasons ? `<ul class="reason-list">${reasons}</ul>` : `<p class="meta">${escapeHtml(item.snippet || 'Откройте объявление для проверки параметров.')}</p>`}
         <div class="meta source-meta">Источник: ${escapeHtml(item.search_engine)} · обнаружено ${dateTime.format(new Date(item.first_seen))}</div>
         <div class="card-actions">
@@ -640,6 +1066,10 @@ async function loadSearchResults() {
 }
 
 searchResultsSort?.addEventListener('change', () => { void loadSearchResults(); });
+searchSellerFilter?.addEventListener('change', () => { void loadSearchResults(); });
+searchLeftBankOnly?.addEventListener('change', () => { void loadSearchResults(); });
+searchResults?.addEventListener('change', changeLike);
+grid?.addEventListener('change', changeLike);
 
 function monitorBeforeOpen(link) {
   const resultId = link.dataset.resultId;
@@ -675,17 +1105,21 @@ async function loadSearchStatus() {
       searchRoomsInitialized = true;
       updateCriteriaRooms();
     }
+    if (searchMinPrice && !searchMinPriceInitialized && (status.min_price_kzt === null || Number.isSafeInteger(status.min_price_kzt) && status.min_price_kzt > 0)) {
+      searchMinPrice.value = status.min_price_kzt === null ? '' : String(status.min_price_kzt);
+      searchMinPriceInitialized = true;
+    }
     if (searchMaxPrice && !searchPriceInitialized && Number.isInteger(status.max_price_kzt) && status.max_price_kzt > 0) {
       searchMaxPrice.value = String(status.max_price_kzt);
       searchPriceInitialized = true;
-      updateCriteriaPrice();
     }
+    updateCriteriaPrice();
     if (searchMinArea && !searchMinAreaInitialized && Number.isFinite(status.min_area_m2) && status.min_area_m2 > 0) {
       searchMinArea.value = String(status.min_area_m2);
       searchMinAreaInitialized = true;
     }
-    if (searchMaxArea && !searchMaxAreaInitialized && Number.isFinite(status.max_area_m2) && status.max_area_m2 > 0) {
-      searchMaxArea.value = String(status.max_area_m2);
+    if (searchMaxArea && !searchMaxAreaInitialized && (status.max_area_m2 === null || Number.isFinite(status.max_area_m2) && status.max_area_m2 > 0)) {
+      searchMaxArea.value = status.max_area_m2 === null ? '' : String(status.max_area_m2);
       searchMaxAreaInitialized = true;
     }
     updateCriteriaArea();
@@ -711,9 +1145,20 @@ async function loadSearchStatus() {
 }
 
 runSearchButton?.addEventListener('click', async () => {
+  if (!searchMinPrice?.checkValidity()) {
+    if (searchMessage) searchMessage.textContent = 'Введите целую минимальную цену от 1 до 10 000 000 000 ₸ или оставьте поле пустым.';
+    searchMinPrice?.reportValidity();
+    return;
+  }
   if (!searchMaxPrice?.checkValidity()) {
     if (searchMessage) searchMessage.textContent = 'Введите целую максимальную цену от 1 до 10 000 000 000 ₸.';
     searchMaxPrice?.reportValidity();
+    return;
+  }
+  const minimumPrice = searchMinPrice.value === '' ? null : Number(searchMinPrice.value);
+  const maximumPrice = Number(searchMaxPrice.value);
+  if (minimumPrice !== null && minimumPrice > maximumPrice) {
+    if (searchMessage) searchMessage.textContent = 'Минимальная цена не может быть выше максимальной.';
     return;
   }
   if (!searchMinArea?.checkValidity() || !searchMaxArea?.checkValidity()) {
@@ -721,20 +1166,24 @@ runSearchButton?.addEventListener('click', async () => {
     (!searchMinArea?.checkValidity() ? searchMinArea : searchMaxArea)?.reportValidity();
     return;
   }
-  if (Number(searchMinArea.value) > Number(searchMaxArea.value)) {
+  const maximumArea = searchMaxArea.value === '' ? null : Number(searchMaxArea.value);
+  if (maximumArea !== null && Number(searchMinArea.value) > maximumArea) {
     if (searchMessage) searchMessage.textContent = 'Минимальная площадь не может быть больше максимальной.';
     return;
   }
   runSearchButton.disabled = true;
+  const ownerOnly = searchSellerFilter?.value === 'owner';
   if (searchMessage) searchMessage.textContent = 'Проверяю поисковую выдачу…';
   try {
     const response = await fetch('/api/v1/search/run', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({rooms:Number(searchRooms?.value || 2), max_price_kzt:Number(searchMaxPrice.value), min_area_m2:Number(searchMinArea.value), max_area_m2:Number(searchMaxArea.value), min_bathrooms:searchBathrooms?.checked ? 2 : 0, exclude_pledged:searchExcludePledged?.checked ?? true})
+      body:JSON.stringify({rooms:Number(searchRooms?.value || 2), min_price_kzt:minimumPrice, max_price_kzt:maximumPrice, min_area_m2:Number(searchMinArea.value), max_area_m2:maximumArea, min_bathrooms:searchBathrooms?.checked ? 2 : 0, exclude_pledged:searchExcludePledged?.checked ?? true, ...(ownerOnly ? {seller:'owner'} : {})})
     });
     const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось выполнить поиск');
-    if (searchMessage) searchMessage.textContent = `Запросов: ${body.queries}. Найдено ссылок: ${body.found}. Новых: ${body.new}. Автоимпортировано: ${body.imported || 0}. Ошибок: ${body.errors + (body.import_errors || 0)}.`;
+    if (searchMessage) searchMessage.textContent = ownerOnly && body.blocked
+      ? 'Krisha ограничила прямой поиск от хозяев. Ниже доступны ранее найденные объявления.'
+      : `Запросов: ${body.queries}. Найдено ссылок: ${body.found}. Новых: ${body.new}. Автоимпортировано: ${body.imported || 0}. Ошибок: ${body.errors + (body.import_errors || 0)}.`;
     await Promise.all([loadListings(), loadSearchStatus()]);
     await loadSearchResults();
   } catch (error) {
@@ -767,16 +1216,22 @@ importForm?.addEventListener('submit', async event => {
   event.preventDefault();
   const browserImport = event.submitter?.id !== 'serverImportButton';
   if (browserImport && bathroomCheckBusy) return;
-  if (browserImport) { bathroomCheckRevision += 1; bathroomCheckBusy = true; }
+  if (browserImport) {
+    bathroomCheckRevision += 1;
+    bathroomCheckBusy = true;
+    bathroomCheckFeedback = 'Ставлю объявление в очередь импорта…';
+    if (bathroomCheckState) renderBathroomCheck(bathroomCheckState);
+  }
   if (importMessage) importMessage.textContent = browserImport ? 'Ставлю объявление в очередь импорта…' : 'Загружаю объявление и определяю параметры…';
   const buttons = [...importForm.querySelectorAll('button[type="submit"]')];
   buttons.forEach(button => { button.disabled = true; });
   const data = new FormData(importForm);
   try {
-    const response = await fetch(browserImport ? `${bathroomCheckApi}/start` : '/api/v1/listings/import', {
+    const options = {
       method:'POST', headers:{'Content-Type':'application/json'},
       body:JSON.stringify({source_url:String(data.get('source_url') || '').trim(), ...(browserImport ? {mode:'details'} : {})})
-    });
+    };
+    const response = await (browserImport ? fetchBathroomCheck('/start', options) : fetch('/api/v1/listings/import', options));
     const body = await readJson(response);
     if (!response.ok) {
       const detail = typeof body.detail === 'string' ? body.detail
@@ -796,11 +1251,12 @@ importForm?.addEventListener('submit', async event => {
     await loadListings();
     await loadSearchResults();
   } catch (error) {
-    if (importMessage) importMessage.textContent = error.message;
+    if (importMessage) importMessage.textContent = error.name === 'TimeoutError' ? 'Сервер не подтвердил постановку в очередь за 10 секунд. Проверьте состояние автопроверки.' : error.message;
   } finally {
     buttons.forEach(button => { button.disabled = false; });
     if (browserImport) {
       bathroomCheckBusy = false;
+      bathroomCheckFeedback = '';
       if (bathroomCheckState) renderBathroomCheck(bathroomCheckState);
     }
   }
@@ -844,7 +1300,22 @@ form?.addEventListener('submit', async event => {
 
 filter?.addEventListener('change', loadListings);
 listingSort?.addEventListener('change', loadListings);
+listingSellerFilter?.addEventListener('change', () => { void loadListings({reuseComparisons:true}); });
+listingLeftBankOnly?.addEventListener('change', () => { void loadListings({reuseComparisons:true}); });
 listingShowPledged?.addEventListener('change', loadListings);
+listingShowInactive?.addEventListener('change', () => { void loadListings({reuseComparisons:true}); });
+setupLikedComparison();
+document.querySelector('#openListingsMap')?.addEventListener('click', () => {
+  if (!window.ApartmentAgentMap) {
+    if (searchMessage) searchMessage.textContent = 'Не удалось загрузить карту. Обновите страницу и попробуйте ещё раз.';
+    return;
+  }
+  window.ApartmentAgentMap.open({
+    seller: searchSellerFilter?.value || 'all',
+    bank: searchLeftBankOnly?.checked ? 'left' : 'all',
+    openCard: jumpToSavedListing,
+  });
+});
 refreshButton?.addEventListener('click', async () => { await loadListings(); await Promise.all([loadSearchStatus(), loadSearchResults()]); });
 let lastReturnRefresh = 0;
 function refreshAfterReturn() {

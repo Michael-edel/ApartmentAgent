@@ -4,13 +4,36 @@ from app.krisha_search import (
     parse_krisha_search_page,
 )
 from app.search_providers import is_allowed_listing_url
+from urllib.parse import parse_qs, urlparse
+import pytest
+from app.krisha_search import settings
+
+
+@pytest.mark.parametrize(('minimum', 'expected'), [
+    (2, ['2', '3', '4', '5.100']),
+    (3, ['3', '4', '5.100']),
+    (4, ['4', '5.100']),
+])
+def test_rooms_minimum_and_price_interval_in_official_query(monkeypatch, minimum, expected):
+    monkeypatch.setattr(settings, 'min_price_kzt', 25_000_000)
+    monkeypatch.setattr(settings, 'max_price_kzt', 50_000_000)
+    params = parse_qs(urlparse(build_krisha_search_url(rooms=minimum, owner_only=True)).query)
+    assert params['das[live.rooms][]'] == expected
+    assert params['das[price][from]'] == ['25000000']
+    assert params['das[price][to]'] == ['50000000']
+    assert params['das[who]'] == ['1']
+
+
+def test_no_minimum_price_omits_lower_bound(monkeypatch):
+    monkeypatch.setattr(settings, 'min_price_kzt', None)
+    assert 'das[price][from]' not in parse_qs(urlparse(build_krisha_search_url()).query)
 
 
 def test_build_search_url_contains_filters() -> None:
     url = build_krisha_search_url(page=2)
 
     assert url.startswith("https://krisha.kz/prodazha/kvartiry/astana/")
-    assert "das%5Blive.rooms%5D=2" in url
+    assert parse_qs(urlparse(url).query)["das[live.rooms][]"] == ["2", "3", "4", "5.100"]
     assert "das%5Bprice%5D%5Bto%5D=30000000" in url
     assert "page=2" in url
 

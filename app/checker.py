@@ -4,9 +4,10 @@ from dataclasses import dataclass
 
 from sqlalchemy import select
 
+from app.availability import set_source_availability
 from app.config import get_settings
 from app.database import SessionLocal
-from app.importer import ListingImportError, import_krisha_listing
+from app.importer import ListingArchived, ListingImportError, ListingUnavailable, import_krisha_listing
 from app.listing_service import persist_listing
 from app.models import Listing, ListingCheck
 
@@ -19,6 +20,8 @@ class CheckSummary:
     updated: int = 0
     blocked: int = 0
     errors: int = 0
+    archived: int = 0
+    unavailable: int = 0
 
 
 class ListingNotFound(ValueError):
@@ -49,9 +52,16 @@ async def check_listing(listing_id: int) -> ListingCheckResult:
         fresh = await import_krisha_listing(source_url)
     except ListingImportError as exc:
         text = str(exc)
-        blocked = "провер" in text.lower() or "огранич" in text.lower()
-        status = "blocked" if blocked else "error"
+        if isinstance(exc, ListingArchived):
+            status = "archived"
+        elif isinstance(exc, ListingUnavailable):
+            status = "unavailable"
+        else:
+            blocked = "провер" in text.lower() or "огранич" in text.lower()
+            status = "blocked" if blocked else "error"
         async with SessionLocal() as session:
+            if status in {"archived", "unavailable"}:
+                await set_source_availability(session, source_url, state=status)
             session.add(
                 ListingCheck(
                     listing_id=listing_id,
@@ -108,7 +118,7 @@ async def check_all_listings() -> CheckSummary:
     summary = CheckSummary()
 
     async with SessionLocal() as session:
-        listing_ids = list(await session.scalars(select(Listing.id).order_by(Listing.id)))
+        listing_ids = list(await session.scalars(select(Listing.id).where(Listing.sold_at.is_(None)).order_by(Listing.id)))
 
     for listing_id in listing_ids:
         summary.checked += 1
@@ -117,6 +127,8 @@ async def check_all_listings() -> CheckSummary:
             summary.updated += int(result.updated)
             summary.blocked += int(result.status == "blocked")
             summary.errors += int(result.status == "error")
+            summary.archived += int(result.status == "archived")
+            summary.unavailable += int(result.status == "unavailable")
         except ListingNotFound:
             summary.checked -= 1
         except Exception:

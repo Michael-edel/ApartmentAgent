@@ -16,6 +16,10 @@ async def initialize_database() -> None:
         await connection.run_sync(Base.metadata.create_all)
         await connection.run_sync(ensure_legacy_columns)
 
+    from app.availability import restore_verified_check_history
+    async with SessionLocal() as session, session.begin():
+        await restore_verified_check_history(session)
+
     # Enrich only descriptions already stored locally; this never requests a site.
     from app.listing_service import (
         backfill_author_types, backfill_mortgage_and_addresses, backfill_pledge_status, backfill_repair_descriptions,

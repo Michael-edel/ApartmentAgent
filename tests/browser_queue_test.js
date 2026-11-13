@@ -5,6 +5,7 @@ const vm = require('node:vm');
 const source = fs.readFileSync('browser-extension/queue-worker.js', 'utf8');
 const appSender = {url:'http://localhost:8000/'};
 const KEY = 'apartmentAgentBathroomQueue';
+const WAKE = 'apartment-agent-bathroom-wake';
 const clone = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 
 function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/a/show/200']) {
@@ -16,7 +17,10 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
     },
     runtime:{getURL:path => `chrome-extension://fixture/${path}`,getManifest:() => ({version:'0.2.0'})},
     alarms:{
-      async create(name, value) {env.alarms.set(name, clone(value));},
+      async create(name, value) {
+        if (name === WAKE && env.failWake) throw new Error('Optional wake alarm unavailable');
+        env.alarms.set(name, clone(value));
+      },
       async clear(name) {return env.alarms.delete(name);},
       onAlarm:{addListener:handler => {env.handlers.alarm = handler;}},
     },
@@ -44,6 +48,8 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
     assert.ok(url.startsWith('http://localhost:8000/api/v1/search/bathroom-check'), 'only local application API is fetched');
     if (env.failApi) throw new Error('API unavailable');
     const path = url.slice('http://localhost:8000/api/v1/search/bathroom-check'.length);
+    if (!path && env.failStatus) throw new Error('Status transport unavailable');
+    if (!path && env.invalidStatus) return {ok:true,async json() {return {};}};
     const body = options.body ? JSON.parse(options.body) : null;
     env.requests.push({path,body});
     let result = {job_id:env.jobId,status:env.status,current_url:env.lease?.url || null,mode:env.mode || 'bathrooms'};
@@ -60,6 +66,7 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
       if (env.completeStatus) env.status = env.completeStatus;
       result.status = env.status;
       if (env.completeMessage) result.message = env.completeMessage;
+      if (env.invalidCompleteReply) return {ok:true,async json() {return {};}};
     } else if (path === '/pause') {env.status = 'paused'; result.status = 'paused';}
     return {ok:true,async json() {return result;}};
   };
@@ -141,11 +148,66 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   assert.deepEqual(env.outcomes, ['imported']);
   assert.deepEqual(env.removed, [tabId]);
   assert.equal(env.state().task, null);
-  await worker.kick(appSender);
-  assert.equal(env.created.length, 1, 'UI polling cannot bypass the inter-task gap');
-  env.now += 30000;
-  await worker.kick(appSender);
+  const deadline = env.state().next_wake;
+  for (const elapsed of [1000, 10000, 29999]) {
+    env.now = deadline - 30000 + elapsed;
+    await worker.kick(appSender);
+    await env.heartbeat();
+    assert.equal(env.created.length, 1, 'polling cannot bypass the inter-task gap');
+    assert.equal(env.state().next_wake, deadline, 'polling cannot postpone a persisted deadline');
+    assert.equal(env.alarms.get(WAKE).when, deadline, 'polling cannot postpone an already armed alarm');
+  }
+  worker = env.worker();
+  await worker.start();
+  assert.equal(env.alarms.get(WAKE).when, deadline, 'a restarted worker restores the original deadline');
+  env.now = deadline;
+  await env.heartbeat();
   assert.equal(env.created.length, 2);
+
+  const activeDeadline = env.state().next_wake;
+  env.now = activeDeadline - 1;
+  await env.heartbeat();
+  assert.equal(env.state().next_wake, activeDeadline, 'polling an active lease keeps its timeout deadline');
+
+  // Only the read failed, so the same heartbeat may safely retry after recovery.
+  const readFailure = environment();
+  readFailure.failStatus = true;
+  const readFailureWorker = readFailure.worker();
+  await readFailureWorker.start();
+  assert.equal(readFailure.state().halted, false);
+  assert.equal(readFailure.created.length, 0);
+  readFailure.failStatus = false;
+  await readFailure.heartbeat();
+  assert.equal(readFailure.created.length, 1, 'recover a temporary GET failure without manual resume');
+  const readFailureLease = clone(readFailure.state().task);
+  readFailure.failStatus = true;
+  await readFailure.heartbeat();
+  assert.deepEqual(readFailure.state().task, readFailureLease, 'a failed status read cannot modify an active lease');
+  assert.equal(readFailure.state().halted, false);
+  readFailure.failStatus = false;
+  await readFailure.heartbeat();
+  assert.equal(readFailure.created.length, 1);
+  assert.deepEqual(readFailure.state().task, readFailureLease);
+
+  const wakeFailure = environment();
+  let wakeFailureWorker = wakeFailure.worker();
+  await wakeFailureWorker.start();
+  const wakeFailureId = wakeFailure.state().task.tab_id;
+  await wakeFailureWorker.imported({tab:{id:wakeFailureId}}, {bathrooms_count:2});
+  wakeFailure.failWake = true;
+  wakeFailure.alarms.delete(WAKE);
+  await wakeFailureWorker.finished({tab:{id:wakeFailureId}}, 'imported');
+  assert.deepEqual(wakeFailure.outcomes, ['imported']);
+  assert.equal(wakeFailure.state().task, null);
+  assert.equal(wakeFailure.state().halted, false);
+  assert.equal(wakeFailure.state().next_wake, wakeFailure.now + 30000);
+  wakeFailureWorker = wakeFailure.worker();
+  await wakeFailureWorker.start();
+  assert.equal(wakeFailure.created.length, 1, 'restoring an optional alarm cannot bypass the gap');
+  wakeFailure.now += 30000;
+  await wakeFailure.heartbeat();
+  assert.equal(wakeFailure.created.length, 2, 'heartbeat continues after optional alarm failure');
+  assert.deepEqual(wakeFailure.outcomes, ['imported'], 'an acknowledged write must not be repeated');
 
   // Manual pause lets the leased page finish and stops the next claim.
   const paused = environment();
@@ -273,9 +335,28 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   await offlineWorker.start();
   assert.equal(offline.created.length, 1, 'no next task after an API failure');
   offline.failApi = false;
+  offline.invalidStatus = true;
+  await offline.heartbeat();
+  assert.equal(offline.state().halted, true, 'an invalid status response cannot clear a durable halt');
+  assert.ok(offline.state().task, 'an invalid status response cannot discard a lease');
+  offline.invalidStatus = false;
   await offlineWorker.kick(appSender);
   assert.equal(offline.state().halted, true, 'a UI wake-up cannot clear a network halt without a confirmed resume');
   assert.equal(offline.created.length, 1);
+
+  const ambiguousComplete = environment();
+  const ambiguousWorker = ambiguousComplete.worker();
+  await ambiguousWorker.start();
+  const ambiguousId = ambiguousComplete.state().task.tab_id;
+  ambiguousComplete.invalidCompleteReply = true;
+  await ambiguousWorker.finished({tab:{id:ambiguousId}}, 'unknown');
+  assert.deepEqual(ambiguousComplete.outcomes, ['unknown'], 'the fixture committed before returning an invalid reply');
+  assert.equal(ambiguousComplete.state().halted, true);
+  assert.equal(ambiguousComplete.state().task.tab_id, ambiguousId);
+  ambiguousComplete.now += 90000;
+  await ambiguousComplete.heartbeat();
+  assert.deepEqual(ambiguousComplete.outcomes, ['unknown'], 'heartbeat cannot replay an ambiguous completion');
+  assert.equal(ambiguousComplete.created.length, 1, 'heartbeat cannot claim after an ambiguous write');
 
   const resumed = environment(['https://krisha.kz/a/show/100']);
   const resumeWorker = resumed.worker();
@@ -432,34 +513,95 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
 
   // Existing ordinary import still saves public fields and returns its card.
   let backgroundListener;
-  let rejectImport = false;
+  let apiOrigin = 'http://localhost:8000';
+  let importRequests = 0;
+  let availabilityRequests = 0;
   const importHooks = [];
+  const payload = {source_url:'https://www.krisha.kz/a/show/123/?from=search',bathrooms_count:2};
+  const listing = {id:7,source:'browser',source_url:'https://krisha.kz/a/show/123',bathrooms_count:2,assessment:{score:95}};
+  const jsonResponse = (body, status = 201) => new Response(JSON.stringify(body), {status,headers:{'Content-Type':'application/json; charset=utf-8'}});
+  let serverReply = jsonResponse(listing);
   vm.runInNewContext(fs.readFileSync('browser-extension/background.js', 'utf8'), {
-    importScripts() {},
-    ApartmentAgentBathroomQueue:{async imported(sender,payload) {importHooks.push({sender,payload});},async kick(){},async finished(){}},
+    importScripts() {}, URL,
+    ApartmentAgentBathroomQueue:{canonical:invalidWorker.canonical,async imported(sender,data) {
+      importHooks.push({sender,payload:data}); return {waiting_details:true,observing:true};
+    },async kick(){},async finished(){}},
     chrome:{
       runtime:{onInstalled:{addListener(){}},onMessage:{addListener(handler){backgroundListener = handler;}}},
       action:{onClicked:{addListener(){}}},
-      storage:{sync:{get(_defaults, callback){callback({enabled:true,apiOrigin:'http://localhost:8000'});}}},
+      storage:{sync:{get(_defaults, callback){callback({enabled:true,apiOrigin});}}},
     },
     async fetch(url, options) {
+      if (url.endsWith('/api/v1/listings/availability')) {
+        assert.equal(JSON.parse(options.body).availability_status, 'archived');
+        assert.equal(options.redirect,'manual');
+        availabilityRequests += 1;
+        if (serverReply instanceof Error) throw serverReply;
+        return serverReply;
+      }
       assert.equal(url, 'http://localhost:8000/api/v1/listings/browser-import');
       assert.equal(JSON.parse(options.body).bathrooms_count, 2);
-      return rejectImport
-        ? {ok:false,status:422,async json() {return {detail:[{loc:['body','floor'],msg:'floor cannot exceed floors_total',input:'sensitive-test-input'}]};}}
-        : {ok:true, async json() {return {id:7,bathrooms_count:2,assessment:{score:95}};}};
+      assert.equal(options.redirect,'manual');
+      importRequests += 1;
+      if (serverReply instanceof Error) throw serverReply;
+      return serverReply;
     },
   });
-  const ordinaryResponse = await new Promise(resolve => backgroundListener({type:'apartment-agent-import',payload:{bathrooms_count:2}}, {tab:{id:77}}, resolve));
+  const importListing = (data = payload) => new Promise(resolve => backgroundListener({type:'apartment-agent-import',payload:data}, {tab:{id:77}}, resolve));
+  const ordinaryResponse = await importListing();
   assert.equal(ordinaryResponse.ok, true);
   assert.equal(ordinaryResponse.listing.id, 7);
   assert.equal(importHooks[0].sender.tab.id, 77);
-  assert.equal(importHooks[0].payload.bathrooms_count, 2);
-  rejectImport = true;
-  const badResponse = await new Promise(resolve => backgroundListener({type:'apartment-agent-import',payload:{bathrooms_count:2}}, {tab:{id:77}}, resolve));
-  assert.equal(badResponse.ok,false);
-  assert.match(badResponse.error,/floor: floor cannot exceed floors_total/);
-  assert.doesNotMatch(badResponse.error,/object Object|sensitive-test-input/);
+  assert.equal(importHooks[0].payload,payload,'queue observes only the successfully posted extraction');
+  assert.equal(ordinaryResponse.waiting_details,true);
+  assert.equal(ordinaryResponse.observing,true);
+  serverReply = jsonResponse({...listing,assessment:{score:0}});
+  const duplicateUpdate = await importListing();
+  assert.equal(duplicateUpdate.listing.id,7,'duplicate updates return the existing local card');
+  assert.equal(duplicateUpdate.listing.assessment.score,0,'a zero score is still valid');
+  const subdomainUrl = 'https://m.krisha.kz/a/show/123?from=search';
+  serverReply = jsonResponse({...listing,source_url:subdomainUrl});
+  assert.equal((await importListing({...payload,source_url:subdomainUrl})).ok,true);
+
+  const rejectedReplies = [
+    [jsonResponse({detail:[{loc:['body','floor'],msg:'floor cannot exceed floors_total',input:'sensitive-test-input'}]},422),/floor: floor cannot exceed floors_total/],
+    [new Response('<html>ApartmentAgent</html>',{status:200,headers:{'Content-Type':'text/html'}}),/ответ без JSON/],
+    [new Response('{invalid JSON',{status:201,headers:{'Content-Type':'application/json'}}),/повреждённый JSON/],
+    [jsonResponse(listing,200),/HTTP 200.*HTTP 201/],
+    [jsonResponse({}),/нет подтверждённой карточки/],
+    [jsonResponse({...listing,id:0}),/нет подтверждённой карточки/],
+    [jsonResponse({...listing,source:'manual'}),/нет подтверждённой карточки/],
+    [jsonResponse({...listing,assessment:{score:101}}),/нет подтверждённой карточки/],
+    [jsonResponse({...listing,source_url:'https://krisha.kz/a/show/456'}),/карточку другого объявления/],
+    [jsonResponse({...listing,source_url:subdomainUrl}),/карточку другого объявления/],
+    [{type:'opaqueredirect',status:0},/перенаправил запрос/],
+    [{redirected:true,status:201},/перенаправил запрос/],
+    [Response.redirect('http://localhost:8000/'),/перенаправил запрос/],
+    [new Error('Failed to fetch'),/Не удалось связаться с ApartmentAgent/],
+  ];
+  for (const [reply, pattern] of rejectedReplies) {
+    serverReply = reply;
+    const badResponse = await importListing();
+    assert.equal(badResponse.ok,false);
+    assert.match(badResponse.error,pattern);
+    assert.doesNotMatch(badResponse.error,/object Object|sensitive-test-input/);
+  }
+  const reportArchive = (senderUrl = 'https://krisha.kz/a/show/123', data = {source_url:'https://krisha.kz/a/show/123', availability_status:'archived'}) =>
+    new Promise(resolve => backgroundListener({type:'apartment-agent-availability',payload:data}, {tab:{id:77},url:senderUrl}, resolve));
+  serverReply = jsonResponse({id:7,source_url:'https://krisha.kz/a/show/123',availability_status:'archived'},200);
+  assert.equal((await reportArchive()).ok,true);
+  serverReply = jsonResponse({id:null,source_url:'https://krisha.kz/a/show/123',availability_status:'archived'},200);
+  assert.equal((await reportArchive()).ok,true);
+  serverReply = jsonResponse({id:7,source_url:'https://krisha.kz/a/show/456',availability_status:'archived'},200);
+  assert.equal((await reportArchive()).ok,false,'an archive response for a different advert is rejected');
+  assert.equal((await reportArchive('https://krisha.kz/a/show/456')).ok,false,'archive observation must match the sender tab');
+  assert.equal(availabilityRequests,3);
+  const requestsBeforeInvalidInput = importRequests;
+  assert.match((await importListing({...payload,source_url:'https://example.com/a/show/123'})).error,/номер открытого объявления/);
+  apiOrigin = 'http://localhost:8000/?wrong';
+  assert.match((await importListing()).error,/Укажите адрес ApartmentAgent/);
+  assert.equal(importRequests,requestsBeforeInvalidInput);
+  assert.equal(importHooks.length,3,'invalid confirmations cannot notify the queue about a save');
 
   const details = environment();
   details.mode = 'details';

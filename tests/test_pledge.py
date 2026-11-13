@@ -183,7 +183,7 @@ async def test_default_hide_and_preference_toggle_apply_to_search_and_statistics
     assert status["total_results"] == 2 and status["pledged_hidden_results"] == 2
     assert status["exclude_pledged"] is True
 
-    async def fixture_search():
+    async def fixture_search(*, seller=None):
         return search_agent.SearchSummary()
 
     monkeypatch.setattr(search_agent, "_run_search", fixture_search)

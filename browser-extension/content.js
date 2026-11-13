@@ -17,9 +17,8 @@
 
   // Each page reload can update an existing card, including after an upgrade.
   // Deduplicate successful payloads only during this bounded observation run.
-  const startedAt = Date.now();
-  const deadline = startedAt + 12000;
-  const saveDeadline = deadline + 3000;
+  const firstObservationDelay = 1200;
+  let startedAt = Date.now();
   let finalSnapshotSeen = false;
   let observedSignature = '';
   let stableSince = startedAt;
@@ -35,6 +34,7 @@
   let lastSavedBathrooms = null;
   let waitingDetails = false;
   let lastSavedDetails = false;
+  let archiveReporting = false;
   const hasText = value => typeof value === 'string' && !!value.trim();
   const fastSnapshotReady = payload => {
     let listingId = null;
@@ -99,8 +99,11 @@
     return [...document.querySelectorAll('form[action*="captcha" i], iframe[src*="/captcha" i], [data-testid="captcha"], #captcha')].some(visible);
   };
   const unavailableDetected = () => {
-    const text = `${document.title || ''} ${pageText()}`;
-    return /объявление(?:\s+(?:было|больше|уже|сейчас))?\s+(?:не\s*актуально|не\s*активно|удалено|снято\s+с\s+публикации|в\s+архиве|перенесено\s+в\s+архив|не\s+найдено)|архивное\s+объявление|такое\s+объявление\s+не\s+существует/i.test(text);
+    const unavailable = /^(?:(?:это\s+)?объявление(?:\s+(?:было|больше|уже|сейчас))?\s+(?:не\s*актуально|не\s*активно|удалено|снято\s+с\s+публикации|в\s+архиве|перенесено\s+в\s+архив|не\s+найдено)|архивное\s+объявление|такое\s+объявление\s+не\s+существует)[.!]?$/i;
+    const headings = [document.title || '', ...document.querySelectorAll('h1, [role="heading"][aria-level="1"]')]
+      .filter(value => typeof value === 'string' || visible(value))
+      .map(value => typeof value === 'string' ? value : value.innerText || value.textContent || '');
+    return [...headings, pageText()].some(value => unavailable.test(String(value).replace(/\s+/g, ' ').trim()));
   };
   const bathroomLabel = payload => Number.isInteger(payload.bathrooms_count)
     ? `Санузлов: ${payload.bathrooms_count_is_lower_bound ? 'не менее ' : ''}${payload.bathrooms_count}.`
@@ -125,12 +128,30 @@
     }
   };
   const observe = () => {
+    const deadline = startedAt + 12000;
+    const saveDeadline = deadline + 3000;
     let payload = null;
     let extractionError = null;
     try { payload = window.ApartmentAgentExtract?.(); } catch (error) { extractionError = error; }
     if (challengeDetected(payload)) {
       show('ApartmentAgent: сайт запросил проверку браузера. Пройдите её самостоятельно и продолжите очередь в приложении.', true);
       notifyQueue('blocked', 'Сайт запросил проверку браузера');
+      return;
+    }
+    if (payload?.availability_status === 'archived') {
+      if (archiveReporting) return;
+      archiveReporting = true;
+      let finished = false;
+      const complete = response => {
+        if (finished) return;
+        finished = true;
+        const error = chrome.runtime.lastError?.message || (!response?.ok ? response?.error || 'Статус не подтверждён' : '');
+        show(error ? `ApartmentAgent: объявление в архиве, но статус не сохранён: ${error}`
+          : response.id ? 'ApartmentAgent: карточка помечена как архивная.' : 'ApartmentAgent: объявление в архиве; сохранённой карточки нет.', !!error);
+        notifyQueue('unknown', 'Объявление в архиве Krisha и может быть неактуальным', 'unavailable');
+      };
+      chrome.runtime.sendMessage({type:'apartment-agent-availability', payload:{source_url:payload.source_url, availability_status:'archived'}}, complete);
+      window.setTimeout(() => complete({ok:false,error:'нет ответа сервера'}), 6000);
       return;
     }
     if (unavailableDetected()) {
@@ -184,7 +205,9 @@
               lastSavedBathrooms = payload.bathrooms_count;
               lastSavedDetails = payload.details_extracted === true;
               waitingDetails = response.waiting_details === true;
-              savedMessage = `ApartmentAgent: сохранено, рейтинг ${response.listing?.assessment?.score ?? '—'}/100. ${bathroomLabel(payload)}`;
+              const listing = response.listing;
+              const advertId = new URL(listing.source_url).pathname.replace(/\/$/, '').split('/').at(-1);
+              savedMessage = `ApartmentAgent: сохранено объявление №${advertId} в карточку №${listing.id}. Рейтинг ${listing.assessment.score}/100. ${bathroomLabel(payload)}`;
               show(savedMessage);
             });
           }
@@ -199,5 +222,9 @@
     if (finalSnapshotSeen && !inFlight) finish();
     else window.setTimeout(observe, 400);
   };
-  window.setTimeout(observe, 1200);
+  window.setTimeout(() => {
+    // A delayed initial timer must not consume the observation and save window.
+    startedAt = Date.now() - firstObservationDelay;
+    observe();
+  }, firstObservationDelay);
 })();

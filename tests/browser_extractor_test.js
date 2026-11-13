@@ -4,7 +4,7 @@ const vm = require('node:vm');
 
 function extract(file, text, data = null, mortgageField = null, bathroomField = null, comparisonCells = null, comparisonHeading = 'Цена м² в похожих квартирах', complexBlock = null, descriptionText = null, extra = {}) {
   let posted;
-  const body = {innerText: text, appendChild() {}};
+  const body = {innerText: text, appendChild(node) { extra.onNotice?.(node.textContent); }};
   const document = {
     title: text.startsWith('4-комнатная') ? '4-комнатная квартира 100 м²' : '3-комнатная квартира 80 м²', body,
     currentScript: {src: 'http://localhost:8000/static/browser-import.js'},
@@ -31,7 +31,12 @@ function extract(file, text, data = null, mortgageField = null, bathroomField = 
   };
   const window = {setTimeout() {}};
   const context = {document, window, location: {href: 'https://krisha.kz/a/show/123'}, URL,
-    fetch(_url, options) { posted = JSON.parse(options.body); return new Promise(() => {}); }};
+    fetch(_url, options) {
+      posted = JSON.parse(options.body);
+      extra.onFetch?.(_url, posted);
+      assert.equal(options.redirect, 'manual');
+      return extra.response ? Promise.resolve(extra.response) : new Promise(() => {});
+    }};
   vm.runInNewContext(fs.readFileSync(file, 'utf8'), context);
   const result = window.ApartmentAgentExtract ? window.ApartmentAgentExtract() : posted;
   extra.onState?.(window.ApartmentAgentImportState);
@@ -46,6 +51,37 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
     assert.equal(result?.price_kzt ?? null, null, file);
   }
   const common = '3-комнатная квартира 80 м² Цена 45 000 000 ₸';
+  {
+    for (const field of ['только за наличный расчёт', 'только наличные', 'исключительно наличными', 'наличный расчет только']) {
+      const item = extract(file, common, null, field);
+      assert.equal(item.mortgage_supported, false, `${file}: ${field}`);
+      assert.equal(item.property_details['Ипотека'], field, `${file}: preserve exact field evidence`);
+    }
+    for (const field of ['наличные', 'наличные или ипотека', 'не только наличные', 'только за наличный расчёт или ипотека', 'скидка только наличными']) {
+      const item = extract(file, common, null, field);
+      assert.equal(item.mortgage_supported, null, `${file}: ambiguous field ${field}`);
+    }
+    const description = 'Квартира в хорошем состоянии. Продажа только за наличный расчёт.';
+    const item = extract(file, common, null, null, null, null, undefined, null, description);
+    assert.equal(item.description, description, 'seller description reaches the server verbatim');
+    assert.equal(item.mortgage_supported, null, 'seller prose is classified by the server, with provenance');
+  }
+  const archiveText = 'В архиве. Объявление может быть неактуальным.';
+  const archiveCase = node => extract(file, common, null, null, null, null, undefined, null, null,
+    {nodes:{'div, p, section, aside, span':[node]}});
+  assert.equal(archiveCase({textContent:archiveText}).availability_status, 'archived', file);
+  assert.equal(archiveCase({textContent:archiveText, hidden:true}).availability_status, null, file);
+  assert.equal(archiveCase({textContent:archiveText, parentElement:{className:'offer__description'}}).availability_status, null, file);
+  assert.equal(archiveCase({textContent:archiveText, parentElement:{className:'recommendations'}}).availability_status, null, file);
+  if (file === 'app/static/browser-import.js') {
+    const requests = [];
+    extract(file, common, null, null, null, null, undefined, null, null,
+      {nodes:{'div, p, section, aside, span':[{textContent:archiveText}]}, onFetch:(url, body) => requests.push({url,body})});
+    assert.equal(requests.length,1);
+    assert.match(requests[0].url, /\/api\/v1\/listings\/availability$/);
+    assert.equal(requests[0].body.availability_status,'archived');
+    assert.equal(requests[0].body.price_kzt,undefined,'archived listing data must not overwrite existing card');
+  }
   for (const cityField of ['Город Астана, р-н Байконур', 'Город Астана, Байконур р-н', 'Город Астана, район Байконур', 'Город Астана, Байконур район']) {
     const result = extract(file, `4-комнатная квартира 100 м² Цена 45 000 000 ₸ ${cityField}`);
     assert.equal(result.rooms, 4, file);
@@ -182,6 +218,19 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
   assert.equal(full.seller_name,'Айгуль',file);
   assert.equal(full.seller_type,'Хозяин недвижимости',file);
   assert.equal(full.address,'Кудайбердыулы 36/3',file);
+  const roleCase = (panelText, role, data = null, badges = []) => {
+    const panel = {className:'owners__card', textContent:panelText, parentElement:{tagName:'ASIDE'}, querySelectorAll() { return badges; }};
+    return extract(file, common, data, null,null,null,undefined,null,null, {
+      nodes:{'[data-testid="seller"]':[panel], '[data-testid="seller-type"]':[{textContent:role,parentElement:panel}]},
+    });
+  };
+  assert.equal(roleCase('Автор объявления Хозяин недвижимости Ответил риелтор? Сообщите нам','Хозяин недвижимости').seller_type,'Хозяин недвижимости',file);
+  assert.equal(roleCase('Автор объявления Специалист','Специалист').seller_type,'Специалист',file);
+  assert.equal(roleCase('Автор объявления Специалист Специалист подтвердил личность документами','Специалист').seller_type,'Специалист — личность подтверждена',file);
+  assert.equal(roleCase('Автор объявления Специалист Крыша Агент','Специалист',{sellerType:'Хозяин'}).seller_type,'Крыша Агент',file);
+  assert.equal(roleCase('Автор объявления Специалист','Специалист',null,[{getAttribute(name) { return name === 'aria-label' ? 'Крыша Агент' : null; }}]).seller_type,'Крыша Агент',file);
+  assert.equal(extract(file, common, {sellerType:'Крыша Агент'}).seller_type,'Крыша Агент',file);
+  assert.equal(extract(file, `${common} Крыша Агент`, {sellerType:'Хозяин'}).seller_type,'Хозяин',`${file}: listing text must not supply seller role`);
   const employerNode = {className:'seller-address',textContent:'Работает в компании Royal Invest'};
   const exactHeadline = '4-комнатная квартира · 106.4 м² · 3/9 этаж, Кудайбердыулы 36/3 — Район Встречи';
   const employerBeforeHeadline = extract(file, common,null,null,null,null,undefined,null,null,{
@@ -307,6 +356,104 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
   }});
   assert.equal(splitDetails.repair_condition,'свежий ремонт',file);
   assert.equal(splitDetails.mortgage_supported,true,file);
+  const exactCondition = 'не новый, но аккуратный ремонт';
+  const plainConditionLabel = (context, text = exactCondition) => {
+    const row = {tagName:'DIV',parentElement:context};
+    const value = {tagName:'DIV',textContent:text,parentElement:row};
+    const label = {tagName:'SPAN',textContent:'Состояние квартиры',parentElement:row,nextElementSibling:value};
+    row.children = [label,value];
+    return label;
+  };
+  const plainInfo = {className:'offer__info',parentElement:{tagName:'ASIDE'}};
+  const exactConditionSelector = ':is(.offer__info, .offer__sidebar)';
+  const hiddenCondition = plainConditionLabel(plainInfo,'скрытая заглушка ремонта');
+  hiddenCondition.nextElementSibling.hidden = true;
+  const unrelatedNeighbor = plainConditionLabel(plainInfo,'посторонний текст');
+  unrelatedNeighbor.parentElement.children.push({});
+  const notFromConditionRow = [
+    plainConditionLabel({className:'offer__info',parentElement:{tagName:'ASIDE',className:'nearby-adverts'}},'ремонт другой квартиры'),
+    plainConditionLabel(sidebarAuthor,'ремонт офиса'),
+    plainConditionLabel(adInSidebar,'ремонт из рекламы'),
+    plainConditionLabel({tagName:'ASIDE'},'ремонт из сторонней колонки'),
+    hiddenCondition,
+    unrelatedNeighbor,
+    plainConditionLabel(plainInfo,'Год постройки'),
+    plainConditionLabel(plainInfo,'2'),
+  ];
+  const falseCondition = extract(file,common,null,null,null,null,undefined,null,'Состояние квартиры описано в свободном тексте.',{
+    nodes:{[exactConditionSelector]:notFromConditionRow},
+  });
+  assert.equal(falseCondition.repair_condition,null,file);
+  for (const context of [plainInfo,ownSidebar]) {
+    const rows = [...notFromConditionRow,plainConditionLabel(context)];
+    const fallback = extract(file,common,{rooms:3,area:80,price:45000000,repairCondition:'устаревшее значение'},null,null,null,undefined,null,null,{
+      nodes:{[exactConditionSelector]:rows},
+    });
+    assert.equal(fallback.property_details['Состояние квартиры'],exactCondition,file);
+    assert.equal(fallback.repair_condition,exactCondition,file);
+    assert.equal(fallback.details_extracted,true,file);
+    const directWins = extract(file,common,null,null,null,null,undefined,null,null,{
+      nodes:{'.offer__info-item':[property('Состояние квартиры','новый ремонт')],[exactConditionSelector]:rows},
+    });
+    assert.equal(directWins.repair_condition,'новый ремонт',file);
+  }
+  const visibleSpecs = [
+    ['Город','Астана, Алматы р-н'], ['Тип дома','кирпичный'], ['Год постройки','2011'],
+    ['Этаж','3 из 10'], ['Площадь','106.4 м²'], ['Состояние квартиры',exactCondition], ['Санузел','2 с/у и более'],
+  ];
+  const specElement = (tagName, textContent, children = []) => {
+    const node = {tagName,textContent,children};
+    children.forEach((child,index) => {
+      child.parentElement = node;
+      child.nextElementSibling = children[index + 1] || null;
+    });
+    return node;
+  };
+  const specBlock = (values, layout = 'wrapped', context = {tagName:'ASIDE',className:'unknown-sidebar'}) => {
+    const group = {tagName:'DIV',className:'unknown-specs',children:[],parentElement:context};
+    const repairLabels = [];
+    for (const [name,value] of values) {
+      const label = specElement(layout === 'definition' ? 'DT' : 'SPAN',name);
+      if (name === 'Состояние квартиры') repairLabels.push(label);
+      const renderedValue = specElement(layout === 'definition' ? 'DD' : layout === 'table' ? 'TD' : 'DIV',value);
+      renderedValue.innerText = value.replace('аккуратный ремонт','аккуратный\nремонт');
+      if (layout === 'definition') {
+        group.tagName = 'DL';
+        group.children.push(label,renderedValue);
+        label.parentElement = renderedValue.parentElement = group;
+        label.nextElementSibling = renderedValue;
+      } else {
+        const labelCell = specElement(layout === 'table' ? 'TH' : 'DIV',name,[label]);
+        const row = specElement(layout === 'table' ? 'TR' : 'DIV',`${name} ${value}`,[labelCell,renderedValue]);
+        const siblingRow = layout === 'table' ? row : specElement('DIV',row.textContent,[row]);
+        siblingRow.parentElement = group;
+        group.children.push(siblingRow);
+      }
+    }
+    return {group,repairLabels};
+  };
+  const structureSelector = 'dt, th, td, label, div, span, p, b, strong';
+  const structuralResult = blocks => extract(file,common,null,null,null,null,undefined,null,null,{
+    nodes:{[structureSelector]:blocks.flatMap(block => block.repairLabels)},
+  });
+  for (const layout of ['wrapped','definition','table']) {
+    const result = structuralResult([specBlock(visibleSpecs,layout)]);
+    assert.equal(result.repair_condition,exactCondition,`${file}: ${layout} exact condition without CSS classes`);
+    assert.equal(result.property_details['Состояние квартиры'],exactCondition,file);
+    assert.equal(result.details_extracted,true,file);
+  }
+  const shortSpecs = specBlock(visibleSpecs.filter(([label]) => ['Состояние квартиры','Город','Тип дома'].includes(label)));
+  const hiddenSpecs = specBlock(visibleSpecs,'wrapped',{hidden:true});
+  const foreignSpecs = specBlock(visibleSpecs,'wrapped',{className:'similar-listings'});
+  const promoSpecs = specBlock(visibleSpecs,'wrapped',{className:'promotion-widget'});
+  const officeSpecs = specBlock(visibleSpecs,'wrapped',{className:'offer__contacts'});
+  const linkedSpecs = specBlock(visibleSpecs);
+  linkedSpecs.group.querySelectorAll = () => [{href:'https://krisha.kz/a/show/999'}];
+  const rejectedSpecs = [shortSpecs,hiddenSpecs,foreignSpecs,promoSpecs,officeSpecs,linkedSpecs];
+  assert.equal(structuralResult(rejectedSpecs).repair_condition,null,file);
+  assert.equal(structuralResult([...rejectedSpecs,specBlock(visibleSpecs)]).repair_condition,exactCondition,file);
+  const conflictingSpecs = specBlock(visibleSpecs.map(([label,value]) => [label,label === 'Состояние квартиры' ? 'требуется ремонт' : value]));
+  assert.equal(structuralResult([specBlock(visibleSpecs),conflictingSpecs]).repair_condition,null,file);
   const nativeTerm = splitInfo('Ремонт','аккуратный ремонт','');
   nativeTerm.tagName = 'DT';
   nativeTerm.nextElementSibling.tagName = 'DD';
@@ -553,4 +700,23 @@ for (const file of ['app/static/browser-import.js', 'browser-extension/extractor
   assert.equal(domWins.krisha_city_price_per_m2,600000,file);
 }
 assert.ok(fs.readFileSync('app/static/browser-import.js','utf8').startsWith(fs.readFileSync('browser-extension/extractor.js','utf8')), 'bookmarklet and extension share exactly the same extraction implementation');
-console.log('Browser extraction checks passed');
+
+(async () => {
+  const saved = {id:1,source:'browser',source_url:'https://krisha.kz/a/show/123',assessment:{score:95}};
+  const json = body => new Response(JSON.stringify(body), {status:201,headers:{'Content-Type':'application/json'}});
+  const cases = [
+    [json(saved), /сохранено объявление №123 в карточку №1\. Рейтинг 95\/100/],
+    [new Response('<html>Login</html>'), /не подтвердил сохранение/],
+    [new Response('not json', {status:201,headers:{'Content-Type':'application/json'}}), /не подтвердил сохранение/],
+    [json({...saved, source_url:'https://krisha.kz/a/show/999'}), /не подтвердил сохранение/],
+    [{type:'opaqueredirect',status:0}, /перенаправил запрос/],
+  ];
+  for (const [response, expected] of cases) {
+    const notices = [];
+    extract('app/static/browser-import.js','3-комнатная квартира 80 м² Цена 45 000 000 ₸',
+      null,null,null,null,undefined,null,null,{response,onNotice:message => notices.push(message)});
+    await new Promise(setImmediate);
+    assert.match(notices.at(-1), expected);
+  }
+  console.log('Browser extraction checks passed');
+})().catch(error => { console.error(error); process.exitCode = 1; });

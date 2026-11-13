@@ -11,6 +11,7 @@ from pydantic import HttpUrl
 from app.schemas import ListingCreate, plain_detail_text
 from app.mortgage import mortgage_value, parse_mortgage_claim
 from app.krisha_search import normalize_krisha_import_url
+from app.seller import IDENTITY_CONFIRMED_REALTOR, seller_category
 
 
 _OTHER_ADVERT_BRANCH = re.compile(r"^(?:recommendations?|similar|related|suggested|suggestions?|other(?:Adverts?|Listings?|Offers?)|recommended|nearby)", re.I)
@@ -218,32 +219,70 @@ def _advert_description(parser: _BathroomFieldHTMLParser) -> str | None:
 
 
 def _seller_fields(parser: _BathroomFieldHTMLParser, data: list[Any]) -> tuple[str | None, str | None]:
-    name = _find_text(data, {"sellerName", "ownerName", "advertiserName"})
-    seller_type = _find_text(data, {"sellerType", "ownerType", "advertiserType"})
-    for node in parser.visible_nodes():
-        if node.attrs.get("data-testid") == "seller-name" and not _in_foreign_context(node):
-            name = node.text()[:200] or name
-        if node.text().casefold().rstrip(": ") != "автор объявления" or _in_foreign_context(node):
+    json_name = _find_text(data, {"sellerName", "ownerName", "advertiserName"})
+    json_role = _find_text(data, {"sellerType", "ownerType", "advertiserType"})
+    nodes = [node for node in parser.visible_nodes() if not _in_foreign_context(node)]
+    cards = set()
+    for node in nodes:
+        classes = set((node.attrs.get("class") or "").split())
+        if (classes & {"owner", "owners", "offer__contacts"} or node.attrs.get("itemprop") == "seller"
+                or node.attrs.get("data-testid") in {"author", "seller"}):
+            cards.add(node)
+        if node.parent and node.text().casefold().rstrip(": ") == "автор объявления":
+            if node.parent != parser.root and len(node.parent.text()) <= 1500:
+                cards.add(node.parent)
+
+    def in_seller_card(node: _FieldNode) -> bool:
+        within_card = False
+        while node is not None:
+            if (node.attrs.get("data-testid") in {"description", "advert-description"}
+                    or node.attrs.get("itemprop") == "description"
+                    or "offer__description" in (node.attrs.get("class") or "").split()):
+                return False
+            if node in cards:
+                within_card = True
+            node = node.parent
+        return within_card
+
+    name = None
+    names = []
+    roles = {}
+    other_role = None
+    identity_confirmed = False
+    for node in nodes:
+        testid = node.attrs.get("data-testid")
+        if testid not in {"seller-name", "seller-type"} and not in_seller_card(node):
             continue
-        card = node.parent
-        if not card:
-            continue
-        card_text = card.text()
-        if len(card_text) > 1500:
-            continue
-        type_match = re.search(r"Хозяин недвижимости|Агентство недвижимости|Специалист по недвижимости|Крыша Агент|Риелтор|Риэлтор", card_text, re.I)
-        if type_match:
-            seller_type = type_match.group(0)
-        for child in card.children:
-            if not isinstance(child, _FieldNode) or child.hidden():
-                continue
-            if (child.tag in {"h2", "h3", "h4"} or child.attrs.get("itemprop") == "name"
-                    or child.attrs.get("data-testid") == "seller-name"):
-                candidate = child.text()
-                if candidate and candidate.casefold() != "автор объявления" and not re.search(r"\+?\d[\d ()-]{5,}", candidate):
-                    if not type_match or candidate.casefold() != type_match.group(0).casefold():
-                        name = candidate[:200]
-    return name[:200] if name else None, seller_type[:100] if seller_type else None
+        classes = set((node.attrs.get("class") or "").split())
+        value = node.text()
+        is_name = (testid == "seller-name" or node.attrs.get("itemprop") == "name"
+                   or classes & {"owner__name", "owners__name"})
+        evidence = [value, *(node.attrs.get(attr) or "" for attr in ("title", "aria-label", "alt"))]
+        if not is_name:
+            for text in evidence:
+                category = seller_category(text)
+                if category != "unknown":
+                    roles.setdefault(category, text)
+                if "специалист подтвердил личность документами" in text.casefold():
+                    identity_confirmed = True
+        if testid == "seller-type" or classes & {"owner__type", "owners__type"}:
+            other_role = other_role or value
+        if (is_name or node.tag in {"h2", "h3", "h4"}) and 0 < len(value) <= 200:
+            if (value != other_role and seller_category(value) == "unknown"
+                    and value.casefold().rstrip(": ") != "автор объявления"
+                    and not value.casefold().startswith("работает в компании")
+                    and not re.fullmatch(r"\+?[\d ()-]{6,}", value)):
+                if is_name and name is None:
+                    name = value
+                names.append(value)
+    name = name or next(iter(names), None)
+    role = roles.get("verified_agent") or next(iter(roles.values()), other_role)
+    if identity_confirmed and seller_category(role) == "realtor":
+        role = IDENTITY_CONFIRMED_REALTOR
+    if not name or not json_name or name.casefold() == json_name.casefold():
+        role = role or json_role
+    name = name or json_name
+    return name[:200] if name else None, role[:100] if role else None
 
 
 def _krisha_comparison_fields(parser: _BathroomFieldHTMLParser) -> dict[str, Any]:
@@ -344,6 +383,36 @@ _YEAR_RE = re.compile(
 
 class ListingImportError(ValueError):
     pass
+
+
+class ListingArchived(ListingImportError):
+    """Krisha explicitly reports that the advert is in its archive."""
+
+
+class ListingUnavailable(ListingImportError):
+    """The canonical advert URL returned 404 or 410; the reason is unknown."""
+
+
+def _has_archive_notice(parser: _BathroomFieldHTMLParser) -> bool:
+    notice = re.compile(r'^В\s+архиве\s*[.!]?\s*Объявление\s+может\s+быть\s+неактуальным\s*[.!]?$', re.I)
+
+    def is_description(node: _FieldNode) -> bool:
+        while node is not None:
+            classes = set((node.attrs.get('class') or '').split())
+            if ('offer__description' in classes or node.attrs.get('itemprop') == 'description'
+                    or node.attrs.get('data-testid') in {'description', 'advert-description'}):
+                return True
+            node = node.parent
+        return False
+
+    nodes = list(parser.visible_nodes())
+    # A description quoting the notice must not be reinterpreted via its parent.
+    described = any(is_description(node) and notice.fullmatch(node.text()) for node in nodes)
+    return not described and any(
+        node.tag in {'div', 'p', 'section', 'aside', 'span'} and not is_description(node)
+        and not _in_foreign_context(node, include_author=True) and notice.fullmatch(node.text())
+        for node in nodes
+    )
 
 
 def _is_krisha_host(host: str) -> bool:
@@ -565,8 +634,8 @@ def _normalized_json(data: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
             "repairCondition": ("repairCondition", "repair_condition", "renovation"), "buildingType": ("buildingType", "houseType", "wallMaterial"),
             "districtName": ("district", "districtName", "areaName", "addressRegion"),
             "complexName": ("complexName", "residentialComplex", "housingComplex", "residentialComplexName"),
-            "sellerName": ("sellerName", "seller_name", "ownerName", "advertiserName"),
-            "sellerType": ("sellerType", "seller_type", "ownerType", "advertiserType"),
+            "sellerName": ("sellerName", "seller_name", "ownerName", "advertiserName", "authorName"),
+            "sellerType": ("sellerType", "seller_type", "ownerType", "advertiserType", "authorType"),
             "description": ("description", "descriptionText"), "title": ("title", "name", "headline"),
         }
         for target, keys in aliases.items():
@@ -594,13 +663,13 @@ def _normalized_json(data: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
         geo = item.get("geo") if isinstance(item.get("geo"), dict) else item
         for target, keys in (("latitude", ("latitude", "lat", "geoLatitude", "geoLat")), ("longitude", ("longitude", "lng", "lon", "geoLongitude", "geoLon"))):
             row[target] = next((geo[key] for key in keys if geo.get(key) is not None), None)
-        for key in ("seller", "author", "owner"):
+        for key in ("seller", "author", "owner", "advertiser"):
             seller = item.get(key)
             if not isinstance(seller, dict):
                 continue
             seller_name = next((_text_value(seller[field]) for field in ("name", "sellerName", "seller_name")
                                 if isinstance(seller.get(field), str) and seller[field].strip()), None)
-            seller_type = next((_text_value(seller[field]) for field in ("sellerType", "seller_type", "role")
+            seller_type = next((_text_value(seller[field]) for field in ("sellerType", "seller_type", "role", "type")
                                 if isinstance(seller.get(field), str) and seller[field].strip()), None)
             if seller_name or seller_type:
                 row["sellerName"] = _text_value(row.get("sellerName")) or seller_name
@@ -956,11 +1025,13 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
             f"Источник ограничил автоматический доступ (HTTP {response.status_code}). "
             "Откройте объявление в браузере и используйте браузерный импорт или введите данные вручную"
         )
-    if response.status_code != 200:
-        raise ListingImportError(f"Источник вернул HTTP {response.status_code}")
     final_source = normalize_krisha_import_url(str(response.url))
     if final_source is None or _listing_number(final_source) != _listing_number(source_url):
         raise ListingImportError("Источник перенаправил запрос с выбранного объявления. Проверьте открытую страницу в браузере")
+    if response.status_code in {404, 410}:
+        raise ListingUnavailable(f"Объявление недоступно (HTTP {response.status_code}); причина неизвестна")
+    if response.status_code != 200:
+        raise ListingImportError(f"Источник вернул HTTP {response.status_code}")
 
     html = response.text
     detail_parser, visible_details = _public_details(html)
@@ -970,6 +1041,8 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
     verification = r"проверка\s+(?:безопасности|браузера)|подтвердите.{0,30}(?:человек|робот)|checking\s+your\s+browser|are\s+you\s+(?:a\s+)?robot|(?:^|\W)(?:captcha|recaptcha)(?:$|\W)|^(?:403|429|468)(?:\s*$|\s+(?:Forbidden|Too Many Requests))|HTTP(?:\s+Error)?\s*[:—-]?\s*(?:403|429|468)"
     if any(re.search(verification, value, re.I) for value in titles):
         raise ListingImportError("Источник запросил проверку безопасности. Введите данные вручную")
+    if _has_archive_notice(detail_parser):
+        raise ListingArchived("Объявление в архиве Krisha и может быть неактуальным")
 
     raw_data = _json_scripts(html)
     scoped_data = _scoped_json(raw_data, source_url)
@@ -1121,8 +1194,24 @@ async def import_krisha_listing(source_url: str) -> ListingCreate:
             comparison_fields[key] = int(value) if value is not None else None
     comparison_fields["krisha_comparison_district"] = comparison_fields["krisha_comparison_district"] or _find_text(data, {"krisha_comparison_district"})
 
+    # Clearing a previous archive state requires positive evidence from this
+    # advert's visible content; an absent banner or JSON alone is insufficient.
+    own_headline = next((node.text() for node in detail_parser.visible_nodes()
+                         if node.tag == "h1" and not _in_foreign_context(node, include_author=True)
+                         and _ROOMS_RE.search(node.text()) and _AREA_RE.search(node.text())), None)
+    own_price = any(
+        not _in_foreign_context(node, include_author=True)
+        and ("offer__price" in (node.attrs.get("class") or "").split()
+             or node.attrs.get("data-testid") == "price")
+        and (value := _number(node.attrs.get("content") or node.text())) is not None
+        and 500_000 <= value <= 2_000_000_000
+        for node in detail_parser.visible_nodes()
+    )
+    verified_active = bool(own_headline and own_price and len(visible_details) >= 2)
+
     return ListingCreate(
         source="krisha-import",
+        availability_status="active" if verified_active else None,
         source_url=HttpUrl(normalized_source_url),
         title=title,
         description=description or None,

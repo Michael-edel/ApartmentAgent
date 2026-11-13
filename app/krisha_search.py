@@ -27,6 +27,16 @@ _JSON_SCRIPT_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _TAG_RE = re.compile(r"<[^>]+>")
+_RECAPTCHA_POLICY_RE = re.compile(
+    r'<p\b[^>]*\bclass=["\'][^"\']*\bg-recaptcha-policy\b[^"\']*["\'][^>]*>.*?</p\s*>',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _security_text(html: str) -> str:
+    # Krisha includes this legal notice on ordinary search pages.  It is not a
+    # challenge; preserve all other CAPTCHA/security text for blocking checks.
+    return _RECAPTCHA_POLICY_RE.sub("", html).lower()
 
 
 class KrishaSearchError(RuntimeError):
@@ -42,6 +52,58 @@ class KrishaSearchItem:
     title: str
     url: str
     snippet: str | None = None
+    seller_type: str | None = None
+
+
+class _OwnerCardParser(HTMLParser):
+    """Associate an explicit owner label with its own search card only."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.owner_urls: set[str] = set()
+        self.depth = 0
+        self.label_depth: int | None = None
+        self.label_text: list[str] = []
+        self.card_id: str | None = None
+        self.title_url: str | None = None
+        self.owner = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "a" and self.depth:
+            attributes = dict(attrs)
+            if "a-card__title" in (attributes.get("class") or "").split():
+                self.title_url = normalize_krisha_listing_url(attributes.get("href") or "")
+            return
+        if tag != "div":
+            return
+        attributes = dict(attrs)
+        classes = (attributes.get("class") or "").split()
+        if not self.depth and "a-card" in classes:
+            card_id = attributes.get("data-id") or ""
+            if not re.fullmatch(r"[1-9]\d{0,14}", card_id):
+                return
+            self.card_id, self.depth, self.owner, self.title_url = card_id, 1, False, None
+            return
+        if self.depth:
+            self.depth += 1
+            if "label-user-owner" in classes:
+                self.label_depth, self.label_text = self.depth, []
+
+    def handle_data(self, data: str) -> None:
+        if self.label_depth is not None:
+            self.label_text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag != "div" or not self.depth:
+            return
+        if self.depth == self.label_depth:
+            self.owner = " ".join(" ".join(self.label_text).split()).casefold() == "хозяин недвижимости"
+            self.label_depth = None
+        self.depth -= 1
+        if not self.depth:
+            if self.owner and self.card_id and self.title_url == f"https://krisha.kz/a/show/{self.card_id}":
+                self.owner_urls.add(self.title_url)
+            self.card_id = None
 
 
 class _CardParser(HTMLParser):
@@ -97,16 +159,26 @@ class _CardParser(HTMLParser):
                     self.items.append(KrishaSearchItem(title=title[:300], url=url, snippet=price or None))
 
 
-def build_krisha_search_url(page: int = 1, rooms: int = 2) -> str:
+def build_krisha_search_url(page: int = 1, rooms: int = 2, *, owner_only: bool = False) -> str:
     base_url = "https://krisha.kz/prodazha/kvartiry/astana/"
+    if rooms not in {2, 3, 4}:
+        raise ValueError("rooms must be 2, 3 or 4")
     params: list[tuple[str, str]] = [
-        ("das[live.rooms]", str(rooms)),
+        *(("das[live.rooms][]", str(value)) for value in range(rooms, 5)),
+        ("das[live.rooms][]", "5.100"),
         ("das[price][to]", str(settings.max_price_kzt)),
         ("das[live.square][from]", str(settings.min_area_m2)),
-        ("das[live.square][to]", str(settings.max_area_m2)),
+    ]
+    if settings.min_price_kzt is not None:
+        params.append(("das[price][from]", str(settings.min_price_kzt)))
+    if settings.max_area_m2 is not None:
+        params.append(("das[live.square][to]", str(settings.max_area_m2)))
+    params.extend([
         ("das[_sys.hasphoto]", "1"),
         ("sort_by", "add_date-desc"),
-    ]
+    ])
+    if owner_only:
+        params.append(("das[who]", "1"))
     if page > 1:
         params.append(("page", str(page)))
     return f"{base_url}?{urlencode(params)}"
@@ -182,7 +254,7 @@ def _extract_json_items(html: str) -> list[KrishaSearchItem]:
 
 
 def parse_krisha_search_page(html: str) -> list[KrishaSearchItem]:
-    lowered = html.lower()
+    lowered = _security_text(html)
     security_markers = (
         "captcha",
         "проверка безопасности",
@@ -227,10 +299,16 @@ def parse_krisha_search_page(html: str) -> list[KrishaSearchItem]:
         else:
             by_url[item.url] = item
 
+    owners = _OwnerCardParser()
+    owners.feed(html)
+    for url in owners.owner_urls:
+        if url in by_url:
+            by_url[url].seller_type = "Хозяин недвижимости"
+
     return list(by_url.values())
 
 
-async def search_krisha_direct(rooms: int = 2) -> list[KrishaSearchItem]:
+async def search_krisha_direct(rooms: int = 2, *, owner_only: bool = False) -> list[KrishaSearchItem]:
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) "
@@ -252,7 +330,7 @@ async def search_krisha_direct(rooms: int = 2) -> list[KrishaSearchItem]:
         headers=headers,
     ) as client:
         for page in range(1, page_limit + 1):
-            url = build_krisha_search_url(page, rooms)
+            url = build_krisha_search_url(page, rooms, owner_only=owner_only)
             response: httpx.Response | None = None
 
             for attempt in range(3):
@@ -272,7 +350,7 @@ async def search_krisha_direct(rooms: int = 2) -> list[KrishaSearchItem]:
                 return list(result.values())
 
             if any(
-                marker in response.text.lower()
+                marker in _security_text(response.text)
                 for marker in ("captcha", "проверка безопасности", "cloudflare", "access denied")
             ):
                 raise KrishaSearchBlocked("Krisha запросила проверку безопасности")

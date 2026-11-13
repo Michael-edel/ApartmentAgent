@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai_service import analyze_listing
 from app.author import OWNER_FROM_DESCRIPTION, owner_type_from_description
+from app.availability import listing_availability, set_source_availability
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import Listing, PriceSnapshot, SearchResult
@@ -434,6 +435,8 @@ async def persist_listing(
                 price_change = (old_price, payload.price_kzt)
                 session.add(_snapshot(row.id, payload.price_kzt, payload.area_m2))
         await _sync_search_results(session, row, now, clear_unknown_mortgage=mortgage_cleared)
+        if payload.source in {"krisha-import", "browser"} and payload.availability_status is not None:
+            await set_source_availability(session, row.source_url, state=payload.availability_status, observed_at=now)
         await session.commit()
         await session.refresh(row)
 
@@ -452,9 +455,14 @@ async def persist_listing(
                 await session.refresh(current)
                 row = current
 
-    if notify:
+    if notify and listing_availability(row.sold_at, row.source_archived_at, row.source_unavailable_at) == "active":
+        # A partial re-import can omit coordinates kept on the stored card.
+        # Score the notification with that same location as the displayed card.
+        notification_payload = payload.model_copy(update={
+            "city": row.city, "latitude": row.latitude, "longitude": row.longitude,
+        })
         await notify_listing(
-            payload,
+            notification_payload,
             row.id,
             created=created,
             price_change=price_change,

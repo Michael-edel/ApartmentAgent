@@ -50,9 +50,10 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     ai_timeout_seconds: float = 20.0
 
+    min_price_kzt: int | None = None
     max_price_kzt: int = 30_000_000
     min_area_m2: float = 55.0
-    max_area_m2: float = 70.0
+    max_area_m2: float | None = 70.0
     min_score_to_notify: int = 85
     min_bathrooms: int = 0
     exclude_pledged: bool = True

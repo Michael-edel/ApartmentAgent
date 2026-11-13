@@ -2,16 +2,19 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from sqlalchemy import func, select
 
+from app.availability import availability_key, set_source_availability, unavailable_urls
 from app.config import get_settings
 from app.database import SessionLocal
-from app.importer import ListingImportError, import_krisha_listing
+from app.importer import ListingArchived, ListingImportError, ListingUnavailable, import_krisha_listing
 from app.krisha_search import KrishaSearchBlocked, normalize_krisha_listing_url
 from app.listing_service import persist_listing, sync_search_result_facts
 from app.models import Listing, SearchHistory, SearchPreference, SearchResult
 from app.mortgage import parse_mortgage_text
+from app.scoring import listing_river_bank
 from app.search_analysis import analyze_search_result, is_target_search_result, parse_bathrooms_count, bathrooms_is_lower_bound
 from app.search_providers import PROVIDERS, SearchItem
 
@@ -21,6 +24,14 @@ _search_lock = asyncio.Lock()
 
 DISTRICTS = ["Есильский район", "Нура район", "Алматы район", "Сарыарка район", "Байконур район"]
 QUERYLESS_PROVIDERS = {"krisha_direct"}
+
+
+class InvalidSearchArea(ValueError):
+    pass
+
+
+class InvalidSearchPrice(ValueError):
+    pass
 
 
 @dataclass(slots=True)
@@ -43,16 +54,19 @@ class SearchImportCandidate:
 
 
 def _priority(title: str, snippet: str | None, mortgage_supported: bool | None = None,
-              is_pledged: bool | None = None) -> str:
+              is_pledged: bool | None = None,
+              river_bank: Literal['left', 'right', 'unknown'] = 'unknown') -> str:
     result = analyze_search_result(
         title,
         snippet,
         max_price=settings.max_price_kzt,
+        min_price=settings.min_price_kzt,
         min_area=settings.min_area_m2,
         max_area=settings.max_area_m2,
         target_rooms=settings.target_rooms,
         mortgage_supported=mortgage_supported,
         is_pledged=is_pledged,
+        river_bank=river_bank,
     )
     if result["score"] >= 85:
         return "urgent"
@@ -66,6 +80,7 @@ def _matches_target(item: SearchItem) -> bool:
         item.title,
         item.snippet,
         max_price=settings.max_price_kzt,
+        min_price=settings.min_price_kzt,
         min_area=settings.min_area_m2,
         max_area=settings.max_area_m2,
         target_rooms=settings.target_rooms,
@@ -95,6 +110,7 @@ def _row_matches_basic(row: SearchResult, *, include_pledged: bool = False) -> b
         row.title,
         row.snippet,
         max_price=settings.max_price_kzt,
+        min_price=settings.min_price_kzt,
         min_area=settings.min_area_m2,
         max_area=settings.max_area_m2,
         target_rooms=settings.target_rooms,
@@ -103,7 +119,9 @@ def _row_matches_basic(row: SearchResult, *, include_pledged: bool = False) -> b
 
 def _rotated_queries() -> list[str]:
     rooms = settings.target_rooms
-    queries = [f"Астана {rooms}-комнатная квартира продажа krisha.kz"] + [f"Астана {rooms}-комнатная квартира {district} krisha.kz" for district in DISTRICTS]
+    queries = ["Астана квартиры продажа krisha.kz", "Астана квартиры продажа левый берег krisha.kz"]
+    queries += [f"Астана {count}-комнатная квартира продажа krisha.kz" for count in range(rooms, 6)]
+    queries += [f"Астана квартиры продажа {district} krisha.kz" for district in DISTRICTS]
     count = min(max(settings.search_queries_per_run, 1), len(queries))
     slot = int(datetime.now(UTC).timestamp() // (max(settings.search_interval_minutes, 15) * 60))
     start = (slot * count) % len(queries)
@@ -133,11 +151,14 @@ async def _save_items(
         } if accepted_items else {}
         for item in accepted_items:
             existing = await session.scalar(select(SearchResult).where(SearchResult.url == item.url))
+            seller_type = item.seller_type if provider_name == "krisha_direct" and item.seller_type == "Хозяин недвижимости" else None
             is_pledged = known_pledges.get(normalize_krisha_listing_url(item.url) or item.url)
             bathrooms_count = parse_bathrooms_count(f"{item.title or ''} {item.snippet or ''}")
-            mortgage_supported = parse_mortgage_text(f"{item.title or ''} {item.snippet or ''}")
+            mortgage_supported = parse_mortgage_text(f"{item.title or ''}\n{item.snippet or ''}")
             if existing:
                 existing.last_seen = now
+                if provider_name == "krisha_direct":
+                    existing.seller_type = seller_type
                 listing = (await session.get(Listing, existing.imported_listing_id)
                            if existing.imported_listing_id is not None else None)
                 if listing is not None:
@@ -164,6 +185,7 @@ async def _save_items(
                 query=query,
                 title=item.title,
                 snippet=item.snippet,
+                seller_type=seller_type,
                 bathrooms_count=bathrooms_count,
                 mortgage_supported=mortgage_supported,
                 is_pledged=is_pledged,
@@ -205,15 +227,18 @@ async def _mark_import_result(
         row = await session.get(SearchResult, candidate.result_id)
         if row is None:
             return
+        if import_status in {"archived", "unavailable"}:
+            await set_source_availability(session, row.url, state=import_status)
         row.import_status = import_status
         row.import_error = error[:500] if error else None
-        row.imported_listing_id = listing_id
         if listing_id is not None:
+            row.imported_listing_id = listing_id
             listing = await session.get(Listing, listing_id)
             if listing is not None and listing.bathrooms_count is not None:
                 row.bathrooms_count = listing.bathrooms_count
                 row.bathrooms_count_is_lower_bound = listing.bathrooms_count_is_lower_bound
-        row.imported_at = datetime.now(UTC) if import_status == "imported" else None
+        if import_status == "imported":
+            row.imported_at = datetime.now(UTC)
         await session.commit()
 
 
@@ -242,6 +267,9 @@ async def _auto_import(candidates: list[SearchImportCandidate]) -> tuple[int, in
                 listing_id=saved.row.id,
             )
             imported += 1
+        except (ListingArchived, ListingUnavailable) as exc:
+            state = "archived" if isinstance(exc, ListingArchived) else "unavailable"
+            await _mark_import_result(candidate, import_status=state, error=str(exc))
         except ListingImportError as exc:
             message = str(exc)
             is_blocked = any(word in message.lower() for word in ("огранич", "провер", "captcha", "403", "429"))
@@ -294,24 +322,29 @@ async def _fetch_one(
 
 async def run_search(rooms: int | None = None, max_price_kzt: int | None = None,
                      min_area_m2: float | None = None, max_area_m2: float | None = None,
-                     min_bathrooms: int | None = None, exclude_pledged: bool | None = None) -> SearchSummary:
+                     min_bathrooms: int | None = None, exclude_pledged: bool | None = None,
+                     *, max_area_m2_is_set: bool = False, seller: str | None = None,
+                     min_price_kzt: int | None = None, min_price_kzt_is_set: bool = False) -> SearchSummary:
     async with _search_lock:
-        if any(value is not None for value in (rooms, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms, exclude_pledged)):
-            await save_search_preference(rooms, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms, exclude_pledged)
-        return await _run_search()
+        if max_area_m2_is_set or min_price_kzt_is_set or any(value is not None for value in (rooms, min_price_kzt, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms, exclude_pledged)):
+            await save_search_preference(rooms, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms, exclude_pledged,
+                                         max_area_m2_is_set=max_area_m2_is_set, min_price_kzt=min_price_kzt,
+                                         min_price_kzt_is_set=min_price_kzt_is_set)
+        return await _run_search(seller=seller)
 
 
-async def _run_search() -> SearchSummary:
+async def _run_search(*, seller: str | None = None) -> SearchSummary:
     summary = SearchSummary()
     if not settings.search_enabled:
         return summary
 
     queries = _rotated_queries()
-    enabled_providers = [name for name in settings.search_providers if name in PROVIDERS]
+    enabled_providers = (["krisha_direct"] if seller == "owner" else
+                         [name for name in settings.search_providers if name in PROVIDERS])
     jobs: list[tuple[str, str]] = []
 
     for provider_name in enabled_providers:
-        provider_queries = [str(settings.target_rooms)] if provider_name in QUERYLESS_PROVIDERS else queries
+        provider_queries = [f"owner:{settings.target_rooms}" if seller == "owner" else str(settings.target_rooms)] if provider_name in QUERYLESS_PROVIDERS else queries
         summary.providers[provider_name] = {
             "queries": len(provider_queries),
             "found": 0,
@@ -341,6 +374,8 @@ async def _run_search() -> SearchSummary:
             continue
 
         safe_items = items or []
+        if seller == "owner":
+            safe_items = [item for item in safe_items if item.seller_type == "Хозяин недвижимости"]
         try:
             new_found, accepted_count, candidates = await _save_items(provider_name, query, safe_items)
             imported, import_errors, import_blocked = await _auto_import(candidates)
@@ -383,11 +418,21 @@ async def get_search_status() -> dict[str, object]:
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     async with SessionLocal() as session:
+        unavailable = await unavailable_urls(session)
         total = new_total = imported_total = found_hour = found_today = urgent = bathrooms_unconfirmed = 0
         pledged_hidden = 0
         engine_counts: dict[str, int] = {}
+        locations = {
+            listing_id: listing_river_bank(city, latitude, longitude)
+            for listing_id, city, latitude, longitude in (await session.execute(
+                select(Listing.id, Listing.city, Listing.latitude, Listing.longitude)
+                .where(Listing.latitude.is_not(None), Listing.longitude.is_not(None))
+            )).all()
+        }
         matching_rows = await session.stream_scalars(select(SearchResult))
         async for row in matching_rows:
+            if availability_key(row.url) in unavailable:
+                continue
             if _row_hidden_by_pledge(row):
                 pledged_hidden += int(_row_matches_basic(row, include_pledged=True))
                 continue
@@ -403,7 +448,8 @@ async def get_search_status() -> dict[str, object]:
             found_hour += int(first_seen >= hour_ago)
             found_today += int(first_seen >= day_start)
             urgent += int(is_new and _priority(row.title or "", row.snippet, getattr(row, "mortgage_supported", None),
-                                              getattr(row, "is_pledged", None)) == "urgent")
+                                              getattr(row, "is_pledged", None),
+                                              locations.get(getattr(row, "imported_listing_id", None), "unknown")) == "urgent")
             engine_counts[row.search_engine] = engine_counts.get(row.search_engine, 0) + 1
         last_run = await session.scalar(select(func.max(SearchHistory.searched_at)))
         latest_history = (
@@ -435,6 +481,7 @@ async def get_search_status() -> dict[str, object]:
 
     return {
         "rooms": settings.target_rooms,
+        "min_price_kzt": settings.min_price_kzt,
         "max_price_kzt": settings.max_price_kzt,
         "min_area_m2": settings.min_area_m2,
         "max_area_m2": settings.max_area_m2,
@@ -467,8 +514,11 @@ async def load_search_preference() -> None:
         if preference and preference.rooms in (2, 3, 4):
             settings.target_rooms = preference.rooms
         if preference and preference.max_price_kzt is not None:
+            settings.min_price_kzt = preference.min_price_kzt
             settings.max_price_kzt = preference.max_price_kzt
-        if preference and preference.min_area_m2 is not None and preference.max_area_m2 is not None:
+        # A saved minimum distinguishes a configured range from a legacy row
+        # without an area preference. Its maximum can deliberately be null.
+        if preference and preference.min_area_m2 is not None:
             settings.min_area_m2 = preference.min_area_m2
             settings.max_area_m2 = preference.max_area_m2
         if preference and preference.min_bathrooms in (0, 2):
@@ -479,7 +529,22 @@ async def load_search_preference() -> None:
 
 async def save_search_preference(rooms: int | None, max_price_kzt: int | None = None,
                                  min_area_m2: float | None = None, max_area_m2: float | None = None,
-                                 min_bathrooms: int | None = None, exclude_pledged: bool | None = None) -> None:
+                                 min_bathrooms: int | None = None, exclude_pledged: bool | None = None,
+                                 *, max_area_m2_is_set: bool = False,
+                                 min_price_kzt: int | None = None, min_price_kzt_is_set: bool = False) -> None:
+    update_min_price = min_price_kzt_is_set or min_price_kzt is not None
+    update_price = update_min_price or max_price_kzt is not None
+    min_price = min_price_kzt if update_min_price else settings.min_price_kzt
+    max_price = settings.max_price_kzt if max_price_kzt is None else max_price_kzt
+    if update_price and min_price is not None and min_price > max_price:
+        raise InvalidSearchPrice("Минимальная цена не может превышать максимальную")
+    update_max_area = max_area_m2_is_set or max_area_m2 is not None
+    update_area = min_area_m2 is not None or update_max_area
+    min_area = settings.min_area_m2 if min_area_m2 is None else min_area_m2
+    max_area = max_area_m2 if update_max_area else settings.max_area_m2
+    if update_area and max_area is not None and min_area > max_area:
+        raise InvalidSearchArea("Минимальная площадь не может превышать максимальную")
+
     async with SessionLocal() as session:
         preference = await session.get(SearchPreference, 1)
         if preference is None:
@@ -487,11 +552,12 @@ async def save_search_preference(rooms: int | None, max_price_kzt: int | None = 
             session.add(preference)
         elif rooms is not None:
             preference.rooms = rooms
-        if max_price_kzt is not None:
-            preference.max_price_kzt = max_price_kzt
-        if min_area_m2 is not None and max_area_m2 is not None:
-            preference.min_area_m2 = min_area_m2
-            preference.max_area_m2 = max_area_m2
+        if update_price:
+            preference.min_price_kzt = min_price
+            preference.max_price_kzt = max_price
+        if update_area:
+            preference.min_area_m2 = min_area
+            preference.max_area_m2 = max_area
         if min_bathrooms is not None:
             preference.min_bathrooms = min_bathrooms
         if exclude_pledged is not None:
@@ -499,12 +565,13 @@ async def save_search_preference(rooms: int | None, max_price_kzt: int | None = 
         await session.commit()
     if rooms is not None:
         settings.target_rooms = rooms
-    if max_price_kzt is not None:
-        settings.max_price_kzt = max_price_kzt
+    if update_price:
+        settings.min_price_kzt = min_price
+        settings.max_price_kzt = max_price
     if min_bathrooms is not None:
         settings.min_bathrooms = min_bathrooms
     if exclude_pledged is not None:
         settings.exclude_pledged = exclude_pledged
-    if min_area_m2 is not None and max_area_m2 is not None:
-        settings.min_area_m2 = min_area_m2
-        settings.max_area_m2 = max_area_m2
+    if update_area:
+        settings.min_area_m2 = min_area
+        settings.max_area_m2 = max_area

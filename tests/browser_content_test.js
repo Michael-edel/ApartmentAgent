@@ -5,11 +5,12 @@ const vm = require('node:vm');
 const extractorSource = fs.readFileSync('browser-extension/extractor.js', 'utf8');
 const contentSource = fs.readFileSync('browser-extension/content.js', 'utf8');
 
-function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyAt = 0, failures = 0, respond = true, failureMessage = 'Сервер недоступен', bodySuffix = '', mainHeading = null, captchaForm = null, captchaWidgets = [], extraAt = () => ({}), detailsMode = false, payloadAt = null, matchedId = null, responseDelay = 50, jsonPhotos = true} = {}) {
+function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyAt = 0, failures = 0, respond = true, failureMessage = 'Сервер недоступен', bodySuffix = '', mainHeading = null, captchaForm = null, captchaWidgets = [], extraAt = () => ({}), detailsMode = false, payloadAt = null, matchedId = null, responseDelay = 50, jsonPhotos = true, firstObservationDelay = 1200} = {}) {
   let now = 0;
   let sequence = 0;
   const tasks = [];
   const posted = [];
+  const availability = [];
   const outcomes = [];
   const reasons = [];
   const errors = [];
@@ -17,7 +18,10 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
   const messages = [];
   const notices = [];
   let authorText, authorBlock;
-  const setTimeout = (callback, delay) => tasks.push({at: now + delay, sequence:sequence++, callback});
+  const setTimeout = (callback, delay) => {
+    const actualDelay = sequence === 0 && delay === 1200 ? firstObservationDelay : delay;
+    tasks.push({at:now + actualDelay,sequence:sequence++,callback});
+  };
   const document = {
     title:'4-комнатная квартира 100 м²',
     body:{get innerText() { return (now >= readyAt ? '4-комнатная квартира 100 м² Цена 45 000 000 ₸' : 'Загрузка объявления') + ' ' + bodySuffix + ' ' + notices.filter(node => !node.removed).map(node => node.textContent).join(' '); }, appendChild(node) { messages.push(node.textContent); notices.push(node); }},
@@ -53,11 +57,13 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
   };
   const chrome = {runtime:{sendMessage(message, callback) {
     if (message.type === 'apartment-agent-queue-finished') { outcomes.push(message.outcome); reasons.push(message.reason || ''); errors.push(message.error || ''); events.push({at:now,outcome:message.outcome}); callback?.({ok:true}); return; }
+    if (message.type === 'apartment-agent-availability') { availability.push(message.payload); if (respond) setTimeout(() => callback({ok:true,id:1}), responseDelay); return; }
     const sent = JSON.parse(JSON.stringify(message.payload));
     posted.push(sent);
     if (respond) setTimeout(() => callback(posted.length <= failures
       ? {ok:false, error:failureMessage}
-      : {ok:true, waiting_details:detailsMode && !sent.details_extracted, observing:true, listing:{assessment:{score:95}}}), responseDelay);
+      : {ok:true, waiting_details:detailsMode && !sent.details_extracted, observing:true,
+        listing:{id:1,source_url:'https://krisha.kz/a/show/1001140097',assessment:{score:95}}}), responseDelay);
   }}};
   const context = {
     document, chrome, location:{href:'https://krisha.kz/a/show/fixture'}, URL,
@@ -82,7 +88,7 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
     }
     now = target;
   };
-  return {run, advance, extract, posted, messages, outcomes, reasons, errors, events, document};
+  return {run, advance, extract, posted, availability, messages, outcomes, reasons, errors, events, document};
 }
 
 // Repeated extractor calls read the DOM at call time without reinjecting code.
@@ -97,14 +103,38 @@ stable.advance(14000);
 assert.equal(stable.posted.length, 1, 'one successful POST for an unchanged payload despite polling');
 assert.equal(stable.posted[0].floor, null, 'the rating 95/100 in our own banner must not become floor 95 of 100');
 assert.match(stable.messages.at(-1), /Санузлов: не менее 2/);
+assert.match(stable.messages.at(-1), /сохранено объявление №1001140097 в карточку №1\. Рейтинг 95\/100/);
 assert.deepEqual(stable.outcomes,['imported']);
 assert.equal(stable.events[0].at,12000,'a queue tab remains open for the full observation interval');
+
+const delayedFirstObservation = fixture({firstObservationDelay:17000});
+delayedFirstObservation.run();
+delayedFirstObservation.advance(17500);
+assert.equal(delayedFirstObservation.posted.length,1,'a delayed first timer still imports a readable listing');
+assert.deepEqual(delayedFirstObservation.outcomes,[],'the observation window remains open after a delayed first timer');
+delayedFirstObservation.advance(27800);
+assert.deepEqual(delayedFirstObservation.outcomes,['imported']);
+
+const delayedFinalSave = fixture({firstObservationDelay:17000,readyAt:27800,responseDelay:2500});
+delayedFinalSave.run();
+delayedFinalSave.advance(27800);
+assert.equal(delayedFinalSave.posted.length,1,'the final delayed observation can start a save');
+delayedFinalSave.advance(30299);
+assert.deepEqual(delayedFinalSave.outcomes,[],'allow the save acknowledgement to arrive during the grace window');
+delayedFinalSave.advance(30600);
+assert.deepEqual(delayedFinalSave.outcomes,['imported']);
 
 const fastPayload = {source_url:'https://krisha.kz/a/show/123', price_kzt:45000000, area_m2:100, rooms:4,
   bathrooms_count:2, mortgage_supported:false, seller_type:'Хозяин недвижимости', repair_condition:'хороший ремонт',
   city:'Астана', district:'Алматы район', address:'Кудайбердыулы 36/3',
   description:'Полное описание квартиры с отдельной кухней и тихим двором.', photo_urls:['https://images.example/photo.jpg'],
   krisha_city_price_per_m2:500000, krisha_district_price_per_m2:520000, details_extracted:true};
+const archived = fixture({payloadAt:() => ({...fastPayload, availability_status:'archived'})});
+archived.run(); archived.advance(14000);
+assert.equal(archived.posted.length, 0, 'archived page must not overwrite saved listing');
+assert.equal(archived.availability.length, 1, 'archive observation is sent once');
+assert.match(archived.messages.at(-1), /помечена как архивная/);
+assert.deepEqual(archived.reasons, ['unavailable']);
 const fast = fixture({payloadAt:() => fastPayload, matchedId:'123', detailsMode:true});
 fast.run(); fast.advance(14000);
 assert.equal(fast.posted.length,1);
@@ -329,5 +359,9 @@ for (const title of ['Объявление неактуально', 'Это об
   assert.deepEqual(unavailable.outcomes, ['unknown']);
   assert.deepEqual(unavailable.reasons, ['unavailable']);
 }
+
+const proseMention = fixture({bodySuffix:'Это старое объявление в архиве, но данная квартира доступна.'});
+proseMention.run(); proseMention.advance(14000);
+assert.equal(proseMention.posted.length, 1, 'an archive mention in description is not an availability notice');
 
 console.log('Browser content lifecycle checks passed');

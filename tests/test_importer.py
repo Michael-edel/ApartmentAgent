@@ -3,6 +3,10 @@ import pytest
 
 from app.importer import (
     ListingImportError,
+    ListingArchived,
+    ListingUnavailable,
+    _has_archive_notice,
+    _public_details,
     _address_from_text,
     _coordinates_from_html,
     _embedded_number,
@@ -14,6 +18,76 @@ from app.importer import (
     _json_scripts,
     import_krisha_listing,
 )
+
+
+def test_archive_notice_is_visible_explicit_and_outside_description():
+    banner = 'В архиве. Объявление может быть неактуальным.'
+    assert _has_archive_notice(_public_details(f'<div><b>В архиве</b><p>Объявление может быть неактуальным.</p></div>')[0])
+    for markup in (f'<div hidden>{banner}</div>', f'<div class="offer__description">{banner}</div>',
+                   f'<div class="recommendations"><p>{banner}</p></div>',
+                   '<p>Объявление продано</p>'):
+        assert not _has_archive_notice(_public_details(markup)[0])
+
+
+@pytest.mark.parametrize('status_code, expected', [(404, ListingUnavailable), (410, ListingUnavailable),
+                                                    (403, ListingImportError), (468, ListingImportError)])
+async def test_missing_page_and_access_block_are_distinct(monkeypatch, status_code, expected):
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url): return httpx.Response(status_code, request=httpx.Request('GET', url))
+    monkeypatch.setattr(httpx, 'AsyncClient', FakeClient)
+    with pytest.raises(expected) as caught:
+        await import_krisha_listing('https://krisha.kz/a/show/123')
+    assert isinstance(caught.value, ListingUnavailable) == (status_code in {404, 410})
+    assert not isinstance(caught.value, ListingArchived)
+
+
+@pytest.mark.asyncio
+async def test_archive_precedes_populated_metadata_but_not_browser_challenge(monkeypatch):
+    class FakeClient:
+        html = ''
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url): return httpx.Response(200, text=self.html, request=httpx.Request('GET', url))
+    monkeypatch.setattr(httpx, 'AsyncClient', FakeClient)
+    banner = '<div><b>В архиве</b><p>Объявление может быть неактуальным.</p></div>'
+    FakeClient.html = '<h1>3-комнатная квартира 80 м²</h1><div class="offer__price">45 000 000 ₸</div>' + banner
+    with pytest.raises(ListingArchived):
+        await import_krisha_listing('https://krisha.kz/a/show/123')
+    FakeClient.html = '<h1>Проверка браузера</h1>' + banner
+    with pytest.raises(ListingImportError) as caught:
+        await import_krisha_listing('https://krisha.kz/a/show/123')
+    assert not isinstance(caught.value, ListingArchived)
+
+
+@pytest.mark.asyncio
+async def test_missing_redirected_page_does_not_mark_original_unavailable(monkeypatch):
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url):
+            return httpx.Response(404, request=httpx.Request('GET', 'https://krisha.kz/login'))
+    monkeypatch.setattr(httpx, 'AsyncClient', FakeClient)
+    with pytest.raises(ListingImportError) as caught:
+        await import_krisha_listing('https://krisha.kz/a/show/123')
+    assert not isinstance(caught.value, (ListingArchived, ListingUnavailable))
+
+
+@pytest.mark.asyncio
+async def test_positive_visible_live_offer_can_clear_stale_archive(monkeypatch):
+    html = '''<h1>3-комнатная квартира 80 м²</h1><div class="offer__price">45 000 000 ₸</div>
+      <dl><dt>Город</dt><dd>Астана</dd><dt>Тип дома</dt><dd>кирпичный</dd></dl>'''
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url): return httpx.Response(200, text=html, request=httpx.Request('GET', url))
+    monkeypatch.setattr(httpx, 'AsyncClient', FakeClient)
+    assert (await import_krisha_listing('https://krisha.kz/a/show/123')).availability_status == 'active'
 
 
 @pytest.mark.parametrize("value", ["Астана, р-н Байконур", "Байконур р-н", "район Байконур", "Байконур район"])

@@ -25,7 +25,13 @@ _POSITIVE = re.compile(
 )
 _PAYMENT_OPTION = re.compile(r"^[\s•*✔✅☑️—–-]*ипотека\s*[,;:—–-]\s*документы\s+(?:есть|готовы|в\s+порядке)\s*[.!]?\s*$", re.I)
 _SALE_OPTIONS = re.compile(r"^[\s•*✔✅☑️—–-]*торг\s*,\s*ипотека[.!]?\s*$", re.I)
-_CASH_ONLY = re.compile(r"\bтолько\s+(?:(?:за|с|по)\s+)?наличн(?:ый|ые|ыми|ых|ым|ого)(?:\s+расч[её]т(?:ом|а)?)?\b", re.I)
+_CASH_PAYMENT = r"(?:(?:за|с|по)\s+)?(?:наличн(?:ые|ыми|ых)|наличкой|наличный\s+расч[её]т|наличным\s+расч[её]том)"
+_CASH_ONLY = re.compile(
+    rf"\b(?:только|исключительно)\s+{_CASH_PAYMENT}\b"
+    rf"|\b{_CASH_PAYMENT}\s+(?:только|исключительно)\b(?=[ \t]*(?:[.!;\r\n]|$))",
+    re.I,
+)
+_MORTGAGE_ALTERNATIVE = re.compile(r"^[\s,]*(?:или|либо|/)\s*(?:(?:в|под)\s+)?ипотек(?:а|у)\b", re.I)
 _SERVICE = re.compile(r"\b(?:консультаци\w*|калькулятор\w*|рассчит(?:ать|аем|айте)|сопровождени\w*|услуги\s+(?:по\s+)?(?:оформлени\w*|ипотек\w*))\b", re.I)
 _UNCERTAIN = re.compile(r"\b(?:не\s+уверен[аы]?|под\s+вопросом|нужно\s+уточнить|пока\s+не\s+зна\w*|в\s+будущем|после\s+(?:получения|оформления|сдачи))\b", re.I)
 _NEGATED_PREFIX = re.compile(r"\b(?:не\s+(?:(?:всегда|только)\s+)?|невозможна\s+|запрещена\s+)$", re.I)
@@ -96,7 +102,8 @@ def parse_mortgage_claim(text: str | None, *, title: str | None = None) -> tuple
                 positive.append(line.strip())
     for match in _CASH_ONLY.finditer(text):
         unit, start, end = _unit(text, match.start(), match.end())
-        if _allowed(unit, start, cash=True):
+        if (_allowed(unit, start, cash=True) and not _OTHER_OBJECT.search(unit)
+                and not _QUESTION_OR_APPROVAL.search(unit) and not _MORTGAGE_ALTERNATIVE.match(unit[end:])):
             cash_only.append(_evidence(unit, start, end))
     if positive and cash_only:
         return None

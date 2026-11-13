@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Literal
 from app.mortgage import parse_mortgage_text
 
 _PRICE_PATTERNS = (
@@ -45,10 +45,15 @@ def _parse_price(text: str) -> tuple[int | None, bool]:
     return None, False
 
 
-def analyze_search_result(title: str, snippet: str | None, *, max_price: int, min_area: float, max_area: float, target_rooms: int = 2, mortgage_supported: bool | None = None, is_pledged: bool | None = None) -> dict[str, Any]:
+def is_area_in_range(area: float, min_area: float, max_area: float | None) -> bool:
+    return area >= min_area and (max_area is None or area <= max_area)
+
+
+def analyze_search_result(title: str, snippet: str | None, *, max_price: int, min_area: float, max_area: float | None, target_rooms: int = 2, min_price: int | None = None, mortgage_supported: bool | None = None, is_pledged: bool | None = None, river_bank: Literal['left', 'right', 'unknown'] = 'unknown') -> dict[str, Any]:
     text = f"{title} {snippet or ''}".replace("\u00a0", " ")
     lower = text.lower()
-    mortgage_supported = mortgage_supported if mortgage_supported is not None else parse_mortgage_text(text)
+    if mortgage_supported is None:
+        mortgage_supported = parse_mortgage_text(f"{title}\n{snippet or ''}")
 
     parsed_price, price_is_lower_bound = _parse_price(text)
     price = None if price_is_lower_bound else parsed_price
@@ -69,7 +74,7 @@ def analyze_search_result(title: str, snippet: str | None, *, max_price: int, mi
     score = 40
     reasons: list[str] = []
 
-    if rooms == target_rooms:
+    if rooms is not None and rooms >= target_rooms:
         score += 20
         reasons.append(f"квартира: {rooms} комнат")
     elif rooms is not None:
@@ -77,7 +82,7 @@ def analyze_search_result(title: str, snippet: str | None, *, max_price: int, mi
         reasons.append(f"указано комнат: {rooms}")
 
     if area is not None:
-        if min_area <= area <= max_area:
+        if is_area_in_range(area, min_area, max_area):
             score += 20
             reasons.append("площадь соответствует критериям")
         else:
@@ -85,7 +90,10 @@ def analyze_search_result(title: str, snippet: str | None, *, max_price: int, mi
             reasons.append("площадь вне заданного диапазона")
 
     if price is not None:
-        if price <= max_price:
+        if min_price is not None and price < min_price:
+            score -= 15
+            reasons.append("цена ниже установленного минимума")
+        elif price <= max_price:
             score += 15
             reasons.append("цена в пределах бюджета")
         else:
@@ -115,6 +123,9 @@ def analyze_search_result(title: str, snippet: str | None, *, max_price: int, mi
     if is_pledged is True:
         score -= 25
         reasons.append("В залоге")
+    if river_bank == 'left':
+        score += 5
+        reasons.append('Левый берег по координатам: +5')
     score = max(0, min(100, score))
     if score >= 85:
         verdict = "СРОЧНО ПОСМОТРЕТЬ"
@@ -150,8 +161,9 @@ def is_target_search_result(
     *,
     max_price: int,
     min_area: float,
-    max_area: float,
+    max_area: float | None,
     target_rooms: int = 2,
+    min_price: int | None = None,
 ) -> bool:
     """Пропускает квартиры с указанной комнатностью и площадью в заданном диапазоне."""
     analysis = analyze_search_result(
@@ -161,15 +173,19 @@ def is_target_search_result(
         min_area=min_area,
         max_area=max_area,
         target_rooms=target_rooms,
+        min_price=min_price,
     )
 
     rooms = analysis["rooms"]
-    if rooms != target_rooms:
+    if rooms is None or rooms < target_rooms:
         return False
 
     area = analysis["area_m2"]
-    if area is None or not (min_area <= area <= max_area):
+    if area is None or not is_area_in_range(area, min_area, max_area):
         return False
 
+    if min_price is not None:
+        price = analysis["price_kzt"]
+        return price is not None and min_price <= price <= max_price
     price = analysis["price_kzt"] or analysis["price_lower_bound_kzt"]
     return not (price is not None and price > max_price)

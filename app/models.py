@@ -21,11 +21,18 @@ class Base(DeclarativeBase):
     pass
 
 
+class ListingLike(Base):
+    __tablename__ = "listing_likes"
+
+    url: Mapped[str] = mapped_column(Text, primary_key=True)
+
+
 class SearchPreference(Base):
     __tablename__ = "search_preferences"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     rooms: Mapped[int] = mapped_column(Integer, default=2)
+    min_price_kzt: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     max_price_kzt: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     min_area_m2: Mapped[float | None] = mapped_column(Float, nullable=True)
     max_area_m2: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -90,6 +97,10 @@ class Listing(Base):
     ai_analysis: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     ai_analyzed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_imported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sold_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_unavailable_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_availability_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -138,6 +149,7 @@ class SearchResult(Base):
     query: Mapped[str] = mapped_column(Text)
     title: Mapped[str] = mapped_column(String(500))
     snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
+    seller_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
     mortgage_supported: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     is_pledged: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     bathrooms_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -151,6 +163,9 @@ class SearchResult(Base):
     )
     import_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     imported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_unavailable_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_availability_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class SearchHistory(Base):

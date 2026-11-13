@@ -31,6 +31,7 @@ def test_lower_bound_price_is_not_treated_as_confirmed_price():
 @pytest.mark.asyncio
 async def test_search_results_filters_old_rows_before_limit(monkeypatch):
     from app import main
+    from app.models import ListingLike
 
     now = datetime.now(timezone.utc)
     def row(index, title):
@@ -46,12 +47,17 @@ async def test_search_results_filters_old_rows_before_limit(monkeypatch):
     class Scalars:
         def __init__(self, items): self.items = items
         def all(self): return self.items
+        def __iter__(self): return iter(self.items)
 
+    batches = []
     class Session:
         async def __aenter__(self): return self
         async def __aexit__(self, *args): pass
         async def scalars(self, query):
+            if not hasattr(query, "column_descriptions") or query.column_descriptions[0]["entity"] is ListingLike:
+                return Scalars([])
             offset, limit = query._offset_clause.value, query._limit_clause.value
+            batches.append((offset, limit))
             return Scalars(rows[offset:offset + limit])
 
     monkeypatch.setattr(main, "SessionLocal", Session)
@@ -61,6 +67,7 @@ async def test_search_results_filters_old_rows_before_limit(monkeypatch):
     monkeypatch.setattr(main.settings, "max_price_kzt", 45_000_000)
     result = await main.search_results(limit=1)
     assert [item["id"] for item in result] == [201]
+    assert batches == [(0, 200), (200, 200)]
 
 
 @pytest.mark.asyncio
@@ -69,9 +76,9 @@ async def test_status_counts_only_results_matching_current_criteria(monkeypatch)
 
     now = datetime.now(timezone.utc)
     rows = [
-        SimpleNamespace(title="2-комнатная квартира, 60 м², 25 млн тг", snippet=None,
+        SimpleNamespace(url="https://krisha.kz/a/show/11", title="2-комнатная квартира, 60 м², 25 млн тг", snippet=None,
                         status="new:urgent", import_status="pending", first_seen=now, search_engine="bing"),
-        SimpleNamespace(title="3-комнатная квартира, 80 м², 40 млн тг", snippet=None,
+        SimpleNamespace(url="https://krisha.kz/a/show/12", title="3-комнатная квартира, 80 м², 40 млн тг", snippet=None,
                         status="new:normal", import_status="imported", first_seen=now, search_engine="krisha_direct"),
     ]
 
@@ -89,6 +96,7 @@ async def test_status_counts_only_results_matching_current_criteria(monkeypatch)
         async def __aenter__(self): return self
         async def __aexit__(self, *args): pass
         async def stream_scalars(self, query): return AsyncRows()
+        async def execute(self, query): return Scalars()
         async def scalar(self, query): return None
         async def scalars(self, query): return Scalars()
 

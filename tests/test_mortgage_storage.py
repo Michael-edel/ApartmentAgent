@@ -58,7 +58,7 @@ def mortgage_tuple(row):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("description,expected", [(YES, True), (NO, False)])
+@pytest.mark.parametrize("description,expected", [(YES, True), (NO, False), ("Оплата исключительно наличными.", False)])
 async def test_explicit_prose_is_saved_with_its_exact_evidence(env, description, expected):
     result = await save(payload(description=description))
     assert result.row.mortgage_supported is expected

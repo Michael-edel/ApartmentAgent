@@ -1,7 +1,15 @@
 from typing import Literal
 
 from app.config import Settings
+from app.astana_bank import astana_bank
 from app.schemas import ListingAssessment, ListingCreate
+from app.search_analysis import is_area_in_range
+
+
+def listing_river_bank(city: str | None, latitude: float | None, longitude: float | None) -> Literal['left', 'right', 'unknown']:
+    if (city or '').strip().casefold() not in {'астана', 'astana'}:
+        return 'unknown'
+    return astana_bank(latitude, longitude)
 
 
 def assess_listing(listing: ListingCreate, settings: Settings) -> ListingAssessment:
@@ -20,18 +28,25 @@ def assess_listing(listing: ListingCreate, settings: Settings) -> ListingAssessm
         score -= 40
         reasons.append("Объект находится не в Астане")
 
-    if listing.rooms != settings.target_rooms or (settings.target_rooms == 2 and not listing.is_full_two_room):
+    if listing.rooms < settings.target_rooms or (listing.rooms == 2 and settings.target_rooms == 2 and not listing.is_full_two_room):
         score -= 35
-        reasons.append(f"Не соответствует критерию: {settings.target_rooms} комнат")
+        reasons.append(f"Не соответствует критерию: минимум {settings.target_rooms} комнат")
+
+    if settings.min_price_kzt is not None and listing.price_kzt < settings.min_price_kzt:
+        score -= 15
+        reasons.append("Цена ниже установленного минимума")
 
     if listing.price_kzt > settings.max_price_kzt:
         over_percent = (listing.price_kzt / settings.max_price_kzt - 1) * 100
         score -= min(30, round(over_percent) + 10)
         reasons.append("Цена выше установленного бюджета")
 
-    if not settings.min_area_m2 <= listing.area_m2 <= settings.max_area_m2:
+    if not is_area_in_range(listing.area_m2, settings.min_area_m2, settings.max_area_m2):
         score -= 20
-        reasons.append(f"Площадь вне целевого диапазона {settings.min_area_m2:g}–{settings.max_area_m2:g} м²")
+        if settings.max_area_m2 is None:
+            reasons.append(f"Площадь меньше минимальной: {settings.min_area_m2:g} м²")
+        else:
+            reasons.append(f"Площадь вне целевого диапазона {settings.min_area_m2:g}–{settings.max_area_m2:g} м²")
 
     if listing.floor == 1:
         score -= 15
@@ -90,6 +105,9 @@ def assess_listing(listing: ListingCreate, settings: Settings) -> ListingAssessm
                 f"Оценка ЖК в 2GIS: {listing.twogis_rating:.1f}/5 ({review_count} отзывов)"
             )
 
+    if listing_river_bank(listing.city, listing.latitude, listing.longitude) == 'left':
+        score += 5
+        reasons.append('Левый берег по координатам: +5')
     score = max(0, min(100, score))
     if settings.min_bathrooms and listing.bathrooms_count is None:
         score = min(score, 89)

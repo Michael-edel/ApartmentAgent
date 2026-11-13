@@ -10,7 +10,9 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
   <link rel="apple-touch-icon" href="/static/icon.svg">
-  <link rel="stylesheet" href="/static/styles.css?v=145">
+  <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="/static/styles.css?v=152">
+  <link rel="stylesheet" href="/static/listing-map.css?v=1">
   <style>.bookmarklet-code{width:100%;min-height:96px;resize:vertical;border:1px solid #d8e2ec;border-radius:12px;background:#f8fafc;color:#142033;padding:12px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}</style>
   <title>ApartmentAgent</title>
 </head>
@@ -27,8 +29,8 @@
     <section class="hero card">
       <div>
         <p class="muted">Ваши критерии</p>
-        <h2 id="criteriaRooms">2-комнатная квартира</h2>
-        <p>Астана · <span id="criteriaArea">55–70</span> м² · до <span id="criteriaPrice">30 000 000 ₸</span></p>
+        <h2 id="criteriaRooms">От 2 комнат</h2>
+        <p>Астана · <span id="criteriaArea">55–70</span> м² · <span id="criteriaPrice">до 30 000 000 ₸</span></p>
       </div>
       <div class="score-badge">85+</div>
     </section>
@@ -38,6 +40,7 @@
       <article class="stat card"><span>Сильных</span><strong id="strongCount">0</strong></article>
       <article class="stat card"><span>Новых ссылок</span><strong id="newSearchCount">0</strong></article>
     </section>
+    <button class="panel-action" id="openLikedComparison" type="button" aria-haspopup="dialog">Сравнить понравившиеся</button>
 
     <section class="form-card card" id="searchPanel">
       <p class="eyebrow">Ранее обнаружение</p>
@@ -49,33 +52,49 @@
         <article class="stat"><span>Срочных</span><strong id="urgentCount">0</strong></article>
         <article class="stat"><span>Автоимпорт</span><strong id="importedCount">0</strong></article>
       </div>
-      <label class="search-room-control">Количество комнат
+      <label class="search-room-control">Минимальное количество комнат
         <select id="searchRooms">
-          <option value="2">2 комнаты</option>
-          <option value="3">3 комнаты</option>
-          <option value="4">4 комнаты</option>
+          <option value="2">От 2 комнат</option>
+          <option value="3">От 3 комнат</option>
+          <option value="4">От 4 комнат</option>
         </select>
       </label>
-      <label class="search-price-control">Максимальная цена, ₸
-        <input id="searchMaxPrice" type="number" min="1" max="10000000000" step="1" value="30000000" inputmode="numeric" required>
-      </label>
+      <div class="form-grid search-price-control">
+        <label>Цена от, ₸
+          <input id="searchMinPrice" type="number" min="1" max="10000000000" step="1" inputmode="numeric" placeholder="Без минимума">
+        </label>
+        <label>Цена до, ₸
+          <input id="searchMaxPrice" type="number" min="1" max="10000000000" step="1" value="30000000" inputmode="numeric" required>
+        </label>
+      </div>
       <div class="form-grid search-price-control">
         <label>Минимальная площадь, м²
           <input id="searchMinArea" type="number" min="0.1" max="10000" step="0.1" value="55" inputmode="decimal" required>
         </label>
-        <label>Максимальная площадь, м²
-          <input id="searchMaxArea" type="number" min="0.1" max="10000" step="0.1" value="70" inputmode="decimal" required>
+        <label>Максимальная площадь, м² (необязательно)
+          <input id="searchMaxArea" type="number" min="0.1" max="10000" step="0.1" value="70" inputmode="decimal" placeholder="Без ограничения">
         </label>
       </div>
+      <label class="search-room-control">Тип продавца
+        <select id="searchSellerFilter">
+          <option value="all">Все продавцы</option>
+          <option value="owner">Только собственники</option>
+          <option value="verified_agent">Крыша Агенты</option>
+          <option value="realtor">Риелторы</option>
+          <option value="unknown">Прочие и неизвестные</option>
+        </select>
+      </label>
       <label class="checkbox search-price-control"><input id="searchBathrooms" type="checkbox"> От 2 санузлов</label>
       <label class="checkbox search-price-control"><input id="searchExcludePledged" type="checkbox" checked> Исключать квартиры в залоге</label>
-      <p class="microcopy">Выберите критерии и нажмите «Искать сейчас». Настройки сохраняются для последующих автоматических поисков. При отборе «От 2 санузлов» показываются только подтверждённые варианты; объявления с одним санузлом или без данных о количестве скрыты.</p>
+      <label class="checkbox search-price-control"><input id="searchLeftBankOnly" type="checkbox"> Только левый берег в результатах</label>
+      <p class="microcopy">Берег определяется по координатам объявления. <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap</a></p>
+      <p class="microcopy">Комнаты, цена, площадь, санузлы и условие залога сохраняются для автоматических поисков. При отборе «От 2 санузлов» показываются только объявления с подтверждённым количеством.</p>
       <button id="runSearchButton" type="button">Искать сейчас</button>
       <p id="searchMessage" class="form-message" aria-live="polite"></p>
       <p id="searchMeta" class="microcopy"></p>
       <section id="bathroomCheckPanel" class="bathroom-check-panel" aria-labelledby="bathroomCheckHeading">
         <h3 id="bathroomCheckHeading">Автопроверка объявлений</h3>
-        <p class="microcopy">Для дополнения карточек нужно расширение ApartmentAgent 0.4.1 и открытый браузер. Нажмите «Дополнить карточки», чтобы проверить объявления без сведений о ремонте, ипотеке или авторе. При проверке безопасности работа приостанавливается.</p>
+        <p class="microcopy">Для дополнения карточек нужно расширение ApartmentAgent 0.4.8 и открытый браузер. Нажмите «Дополнить карточки», чтобы получить недостающие сведения о ремонте, ипотеке или типе продавца. При проверке безопасности работа приостанавливается.</p>
         <p id="bathroomCheckMode" class="microcopy" hidden></p>
         <p id="bathroomCheckCriteria" class="microcopy" hidden></p>
         <p id="bathroomCheckCounts" class="microcopy">Загружаю состояние проверки…</p>
@@ -98,8 +117,10 @@
     <section class="section-heading search-results-heading">
       <div><p class="eyebrow">Найденные объявления</p><h2>Ссылки из поиска</h2></div>
       <div class="section-controls">
+        <button class="panel-action" id="openListingsMap" type="button" aria-haspopup="dialog">Карта квартир</button>
         <select id="searchResultsSort" aria-label="Сортировка найденных объявлений">
           <option value="newest">Сначала новые</option>
+          <option value="liked">Сначала понравившиеся</option>
           <option value="score_desc">Сначала высокий рейтинг</option>
           <option value="score_asc">Сначала низкий рейтинг</option>
           <option value="price_asc">Общая цена по возрастанию</option>
@@ -108,6 +129,7 @@
           <option value="price_m2_desc">Цена за м² по убыванию</option>
           <option value="area_asc">Сначала меньшая площадь</option>
           <option value="area_desc">Сначала большая площадь</option>
+          <option value="seller">По типу продавца</option>
         </select>
         <button id="refreshSearchButton" class="icon-button" aria-label="Обновить результаты">↻</button>
       </div>
@@ -145,15 +167,24 @@
       <p id="bookmarkletMessage" class="form-message" aria-live="polite">Сохраните скопированный код как закладку браузера. На странице Krisha откройте эту закладку один раз.</p>
     </section>
 
-    <section class="section-heading">
+    <section class="section-heading saved-listings-heading">
       <div><p class="eyebrow">Мониторинг</p><h2>Квартиры</h2></div>
       <div class="section-controls">
         <select id="listingSort" aria-label="Сортировка квартир">
           <option value="newest">Новые</option>
+          <option value="liked">Сначала понравившиеся</option>
           <option value="score">Рейтинг</option>
           <option value="price_m2">Цена за м²</option>
           <option value="price">Цена</option>
           <option value="pledge">Сначала без залога</option>
+          <option value="seller">По типу продавца</option>
+        </select>
+        <select id="listingSellerFilter" aria-label="Тип продавца в сохранённых квартирах">
+          <option value="all">Все продавцы</option>
+          <option value="owner">Только собственники</option>
+          <option value="verified_agent">Крыша Агенты</option>
+          <option value="realtor">Риелторы</option>
+          <option value="unknown">Прочие и неизвестные</option>
         </select>
         <select id="scoreFilter" aria-label="Минимальный рейтинг">
           <option value="" selected>Все</option>
@@ -163,7 +194,11 @@
       </div>
     </section>
     <label class="checkbox"><input id="listingShowPledged" type="checkbox"> Показать сохранённые квартиры в залоге</label>
+    <label class="checkbox"><input id="listingLeftBankOnly" type="checkbox"> Только левый берег в сохранённых</label>
+    <label class="checkbox"><input id="listingShowInactive" type="checkbox"> Показывать проданные и снятые</label>
     <p id="listingPledgeSummary" class="microcopy" hidden></p>
+    <p id="listingAvailabilitySummary" class="microcopy" hidden></p>
+    <p id="listingAvailabilityMessage" class="microcopy availability-message" role="status"></p>
     <section id="emptyState" class="form-card card">
       <p class="form-message">Сохранённых квартир пока нет.</p>
     </section>
@@ -210,12 +245,25 @@
     </section>
   </main>
 
+  <dialog class="compare-dialog" id="likedComparison" aria-labelledby="likedComparisonTitle">
+    <div class="compare-header">
+      <h2 id="likedComparisonTitle">Сравнить понравившиеся</h2>
+      <form method="dialog"><button type="submit" class="compare-close" aria-label="Закрыть сравнение" autofocus>×</button></form>
+    </div>
+    <p class="compare-status" id="likedComparisonStatus" role="status"></p>
+    <div class="compare-picker" id="likedComparisonPicker" role="group" aria-label="Понравившиеся квартиры" hidden></div>
+    <div class="compare-table-scroll" id="likedComparisonTable" tabindex="0" role="region" aria-label="Таблица сравнения квартир" hidden></div>
+    <div class="compare-actions"><button id="runLikedComparison" type="button" disabled hidden>Сравнить выбранные</button></div>
+  </dialog>
+
   <nav class="bottom-nav" aria-label="Навигация">
     <a href="#top">⌂<span>Обзор</span></a>
     <a href="#searchPanel">⌕<span>Новые</span></a>
     <a href="#listingGrid">★<span>Лучшие</span></a>
   </nav>
 
-  <script src="/static/app.js?v=161" defer></script>
+  <script src="/static/vendor/leaflet/leaflet.js" defer></script>
+  <script src="/static/listing-map.js?v=2" defer></script>
+  <script src="/static/app.js?v=168" defer></script>
 </body>
 </html>

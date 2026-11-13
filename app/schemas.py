@@ -41,6 +41,7 @@ class ListingCreate(BaseModel):
     mortgage_evidence: str | None = Field(default=None, max_length=500)
     property_details: dict[str, str] = Field(default_factory=dict, max_length=60)
     details_extracted: bool = Field(default=False, exclude=True)
+    availability_status: Literal['active', 'archived'] | None = Field(default=None, exclude=True)
     city: str = "Астана"
     district: str | None = None
     residential_complex: str | None = None
@@ -146,6 +147,13 @@ class PriceSnapshotResponse(BaseModel):
 
 class ListingResponse(ListingCreate):
     id: int
+    river_bank: Literal['left', 'right', 'unknown'] = 'unknown'
+    liked: bool = False
+    availability: Literal['active', 'sold', 'archived', 'unavailable'] = 'active'
+    sold_at: datetime | None = None
+    source_archived_at: datetime | None = None
+    source_unavailable_at: datetime | None = None
+    seller_category: Literal['owner', 'verified_agent', 'realtor', 'unknown'] = 'unknown'
     created_at: datetime
     assessment: ListingAssessment
     ai_analysis: dict[str, object] | None = None

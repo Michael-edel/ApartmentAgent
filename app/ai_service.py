@@ -8,6 +8,8 @@ import httpx
 
 from app.config import get_settings
 from app.schemas import ListingAssessment, ListingCreate
+from app.scoring import listing_river_bank
+from app.search_analysis import is_area_in_range
 
 
 def _building_label(value: str | None) -> str:
@@ -25,12 +27,15 @@ def build_local_analysis(listing: ListingCreate, assessment: ListingAssessment) 
         elif listing.bathrooms_count < get_settings().min_bathrooms:
             risks.append("Количество санузлов меньше выбранного минимума")
 
-    if listing.rooms == get_settings().target_rooms and (listing.rooms != 2 or listing.is_full_two_room):
+    if listing.rooms >= get_settings().target_rooms and (listing.rooms != 2 or listing.is_full_two_room):
         strengths.append(f"Количество комнат ({listing.rooms}) соответствует цели поиска")
-    if get_settings().min_area_m2 <= listing.area_m2 <= get_settings().max_area_m2:
+    if is_area_in_range(listing.area_m2, get_settings().min_area_m2, get_settings().max_area_m2):
         strengths.append(f"Площадь {listing.area_m2:g} м² попадает в целевой диапазон")
-    if listing.price_kzt <= get_settings().max_price_kzt:
+    if ((get_settings().min_price_kzt is None or listing.price_kzt >= get_settings().min_price_kzt)
+            and listing.price_kzt <= get_settings().max_price_kzt):
         strengths.append("Цена укладывается в установленный бюджет")
+    if listing_river_bank(listing.city, listing.latitude, listing.longitude) == 'left':
+        strengths.append("Левый берег по координатам объявления")
     if listing.building_type and any(
         word in listing.building_type.lower() for word in ("brick", "кирп", "monolith", "монолит")
     ):
@@ -63,6 +68,8 @@ def build_local_analysis(listing: ListingCreate, assessment: ListingAssessment) 
         risks.append("Последний этаж: проверьте крышу и наличие технического этажа")
     if listing.price_kzt > get_settings().max_price_kzt:
         risks.append("Цена выше бюджета поиска")
+    if get_settings().min_price_kzt is not None and listing.price_kzt < get_settings().min_price_kzt:
+        risks.append("Цена ниже установленного минимума поиска")
     if not listing.district:
         risks.append("Район не определён автоматически")
     if not listing.residential_complex:
@@ -87,6 +94,8 @@ def build_local_analysis(listing: ListingCreate, assessment: ListingAssessment) 
         "provider": "local-rules-ai",
         "target_rooms": get_settings().target_rooms,
         "max_price_kzt": get_settings().max_price_kzt,
+        "min_price_kzt": get_settings().min_price_kzt,
+        "river_bank": listing_river_bank(listing.city, listing.latitude, listing.longitude),
         "min_area_m2": get_settings().min_area_m2,
         "max_area_m2": get_settings().max_area_m2,
         "generated_at": datetime.now(UTC).isoformat(),
@@ -114,6 +123,8 @@ def current_analysis(
         stored.get("provider") == "remote-ai"
         and stored.get("target_rooms") == get_settings().target_rooms
         and stored.get("max_price_kzt") == get_settings().max_price_kzt
+        and stored.get("min_price_kzt") == get_settings().min_price_kzt
+        and stored.get("river_bank") == listing_river_bank(listing.city, listing.latitude, listing.longitude)
         and stored.get("min_area_m2") == get_settings().min_area_m2
         and stored.get("max_area_m2") == get_settings().max_area_m2
         and stored.get("min_bathrooms") == get_settings().min_bathrooms
@@ -211,6 +222,8 @@ async def analyze_listing(listing: ListingCreate, assessment: ListingAssessment)
             remote = _parse_remote_content(response.json())
             if remote is not None:
                 remote.update(target_rooms=settings.target_rooms, max_price_kzt=settings.max_price_kzt,
+                              min_price_kzt=settings.min_price_kzt,
+                              river_bank=listing_river_bank(listing.city, listing.latitude, listing.longitude),
                               min_area_m2=settings.min_area_m2, max_area_m2=settings.max_area_m2, min_bathrooms=settings.min_bathrooms, score=assessment.score,
                               recommendation=assessment.verdict)
             return remote or local

@@ -30,7 +30,8 @@ def test_positive_and_scoped_html():
     assert _mortgage_fields('', [], 'Ипотека жоқ') is False
 
 
-def test_refusal_lowers_both_scores_without_hiding_listing():
+@pytest.mark.parametrize("statement", ["Ипотеки нет", "Только за наличный расчёт", "Оплата исключительно наличными"])
+def test_refusal_lowers_both_scores_without_hiding_listing(statement):
     args = dict(source_url='https://krisha.kz/a/show/123', title='Квартира', price_kzt=25_000_000, area_m2=60, rooms=2)
     ordinary = assess_listing(ListingCreate(**args), Settings())
     refusal = assess_listing(ListingCreate(**args, mortgage_supported=False), Settings())
@@ -38,7 +39,7 @@ def test_refusal_lowers_both_scores_without_hiding_listing():
     assert refusal.verdict == 'СМОТРЕТЬ'
     search = dict(max_price=30_000_000, min_area=55, max_area=70)
     normal = analyze_search_result('2-комнатная квартира 60 м² 25 млн', None, **search)
-    lowered = analyze_search_result('2-комнатная квартира 60 м² 25 млн', 'Ипотеки нет', **search)
+    lowered = analyze_search_result('2-комнатная квартира 60 м² 25 млн', statement, **search)
     stored = analyze_search_result('2-комнатная квартира 60 м² 25 млн', None, mortgage_supported=False, **search)
     assert lowered['score'] == stored['score'] == normal['score'] - 25
     assert lowered['verdict'] == 'ПРОВЕРИТЬ'

@@ -16,11 +16,13 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.availability import set_source_availability, unavailable_urls
 from app.config import get_settings
 from app.database import SessionLocal
 from app.krisha_search import normalize_krisha_import_url, normalize_krisha_listing_url
 from app.models import BathroomCheckControl, BathroomCheckJob, BathroomCheckTask, Listing, SearchResult
 from app.search_analysis import is_target_search_result, parse_bathrooms_count
+from app.seller import seller_category
 
 async def _allow_control_origin(request: Request) -> None:
     if request.method != "POST":
@@ -42,9 +44,9 @@ router = APIRouter(prefix="/api/v1/search/bathroom-check", tags=["bathroom-check
 _queue_lock = asyncio.Lock()
 LEASE_SECONDS = 120
 GAP_SECONDS = 15
-DETAILS_EXTENSION_RELEASE = "0.4.1"
+DETAILS_EXTENSION_RELEASE = "0.4.8"
 # Changing extraction rules can justify one fresh pass over incomplete cards.
-PRIORITY_DETAILS_REVISION = 2
+PRIORITY_DETAILS_REVISION = 3
 _finished = {"confirmed", "rejected", "unknown", "failed", "expired"}
 
 
@@ -58,7 +60,8 @@ def _aware(value: datetime) -> datetime:
 
 def _criteria(mode: str = "bathrooms") -> dict:
     settings = get_settings()
-    result = {"target_rooms": settings.target_rooms, "max_price_kzt": settings.max_price_kzt,
+    result = {"target_rooms": settings.target_rooms, "min_price_kzt": settings.min_price_kzt,
+            "max_price_kzt": settings.max_price_kzt,
             "min_area_m2": settings.min_area_m2, "max_area_m2": settings.max_area_m2,
             "min_bathrooms": settings.min_bathrooms, "exclude_pledged": settings.exclude_pledged, "mode": mode}
     if mode == "details":
@@ -70,7 +73,7 @@ def _missing_priority_details(row) -> tuple[str, ...]:
     return tuple(name for name, present in (
         ("repair", bool((row.repair_condition or "").strip())),
         ("mortgage", row.mortgage_supported is not None),
-        ("author", bool((row.seller_name or "").strip() or (row.seller_type or "").strip())),
+        ("author", seller_category(row.seller_type) != "unknown"),
     ) if not present)
 
 
@@ -96,6 +99,7 @@ async def _tasks(session: AsyncSession, job: BathroomCheckJob) -> list[BathroomC
 
 
 async def _candidates(session: AsyncSession, criteria: dict) -> list[tuple[str, int | None]]:
+    unavailable = await unavailable_urls(session)
     rows = list((await session.scalars(select(SearchResult).order_by(SearchResult.id))).all())
     # Any known count for a canonical URL, including a legacy www/query variant,
     # prevents that same apartment from being queued as unknown.
@@ -142,7 +146,7 @@ async def _candidates(session: AsyncSession, criteria: dict) -> list[tuple[str, 
         )}
 
     def eligible(url):
-        if not url or (criteria.get("exclude_pledged") and url in pledged):
+        if not url or url in unavailable or (criteria.get("exclude_pledged") and url in pledged):
             return False
         if details_mode:
             if url in reviewed or (criteria["min_bathrooms"] == 2 and url in known and known[url] < 2):
@@ -153,7 +157,7 @@ async def _candidates(session: AsyncSession, criteria: dict) -> list[tuple[str, 
 
     def matches(title, snippet):
         return is_target_search_result(title or "", snippet, target_rooms=criteria["target_rooms"],
-                                       max_price=criteria["max_price_kzt"],
+                                       min_price=criteria.get("min_price_kzt"), max_price=criteria["max_price_kzt"],
                                        min_area=criteria["min_area_m2"], max_area=criteria["max_area_m2"])
 
     def saved_title(value):
@@ -366,6 +370,8 @@ async def bathroom_check_claim(request: ClaimRequest) -> dict:
             revision = job.criteria.get("priority_details_revision")
             if revision == 1:
                 release = "0.4.0"
+            elif revision == 2:
+                release = "0.4.1"
             elif revision:
                 release = DETAILS_EXTENSION_RELEASE
             else:
@@ -465,6 +471,8 @@ async def bathroom_check_complete(request: CompleteRequest) -> dict:
             job.status, job.message = "paused", "Проверка приостановлена: " + task.error
         elif request.outcome == "unavailable":
             task.status, task.error = "unknown", request.error or "Объявление снято с публикации."
+            if request.error == "Объявление в архиве Krisha и может быть неактуальным":
+                await set_source_availability(session, task.url, state="archived", observed_at=now)
         else:
             count = await _stored_count(session, task.url)
             if job.criteria.get("mode") == "details" and not await _details_ready(session, task.url, task.claimed_at):
