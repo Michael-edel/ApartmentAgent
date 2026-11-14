@@ -19,6 +19,70 @@ def test_explicit_count_and_krisha_separate_bathroom_option():
     assert parse_bathrooms_count('Санузел раздельный, всего 2 с/у') == 2
 
 
+def test_browser_description_requires_unambiguous_standalone_count():
+    from app.listing_service import _description_bathrooms_count
+    assert _description_bathrooms_count('Описание\n• 2 санузла\nБалкон') == (2, False)
+    assert _description_bathrooms_count('• 2 с/у и более') == (2, True)
+    assert _description_bathrooms_count('Уютная квартира, 2 санузла и балкон') is None
+    assert _description_bathrooms_count('• 2 санузла\n• 1 санузел') is None
+    assert _description_bathrooms_count('• 2 санузла\nСанузел: раздельный') is None
+    assert _description_bathrooms_count('• 2 санузла\nНе 2 санузла') is None
+    assert _description_bathrooms_count('• 2 санузла\nСанузел 3') is None
+    assert _description_bathrooms_count('• 2 санузла\nНет двух санузлов') is None
+    assert _description_bathrooms_count('• 2 санузла\nКвартира с 2 санузлами') is None
+    assert _description_bathrooms_count('Рядом 2 санузла в соседнем здании') is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('saved_count,structured,explicit,expected', [
+    (None, {}, None, 2),
+    (1, {}, None, None),
+    (None, {'Санузел':'раздельный'}, None, None),
+    (None, {}, 3, 3),
+])
+async def test_browser_description_fallback_respects_authoritative_count(monkeypatch, saved_count, structured, explicit, expected):
+    from app import listing_service
+    from app.models import Base, Listing
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    engine = create_async_engine('sqlite+aiosqlite:///:memory:')
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(listing_service, 'SessionLocal', sessions)
+    if saved_count is not None:
+        async with sessions() as session:
+            session.add(Listing(source_url='https://krisha.kz/a/show/123', title='Квартира',
+                                price_kzt=30_000_000, area_m2=80, rooms=3, bathrooms_count=saved_count))
+            await session.commit()
+    payload = ListingCreate(source='browser', source_url='https://krisha.kz/a/show/123', title='Квартира', price_kzt=30_000_000,
+                            area_m2=80, rooms=3, description='Описание\n• 2 санузла\nБалкон',
+                            property_details=structured, bathrooms_count=explicit)
+    result = await listing_service.persist_listing(payload, notify=False, refresh_ai=False)
+    assert result.row.bathrooms_count == (saved_count if saved_count is not None else expected)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_browser_description_does_not_override_search_result_count(monkeypatch):
+    from app import listing_service
+    from app.models import Base, SearchResult
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    engine = create_async_engine('sqlite+aiosqlite:///:memory:')
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(listing_service, 'SessionLocal', sessions)
+    async with sessions() as session:
+        session.add(SearchResult(url='https://krisha.kz/a/show/123', title='Квартира', query='',
+                                 search_engine='test', bathrooms_count=1))
+        await session.commit()
+    payload = ListingCreate(source='browser', source_url='https://krisha.kz/a/show/123', title='Квартира',
+                            price_kzt=30_000_000, area_m2=80, rooms=3, description='• 2 санузла')
+    saved = await listing_service.persist_listing(payload, notify=False, refresh_ai=False)
+    assert saved.row.bathrooms_count is None
+    await engine.dispose()
+
+
 def test_filter_requires_confirmed_bathroom_count(monkeypatch):
     monkeypatch.setattr(search_agent.settings, 'target_rooms', 3)
     monkeypatch.setattr(search_agent.settings, 'min_area_m2', 75)

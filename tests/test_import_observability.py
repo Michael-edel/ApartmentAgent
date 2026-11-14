@@ -65,3 +65,51 @@ async def test_browser_presence_expires_without_polluting_the_import_journal(env
     assert state['last_browser_activity_at'] is None
     clock['value'] += timedelta(minutes=3)
     assert not (await obs.import_observability_status())['browser_connected']
+
+
+@pytest.mark.asyncio
+async def test_server_detail_and_search_backoff_are_independent(environment):
+    calls = []
+    async def success():
+        calls.append('called')
+        return []
+    await obs.record_import('krisha', None, 'check', 'blocked', http_status=468)
+    status = await obs.import_observability_status()
+    assert status['sources']['krisha']['channels']['detail']['in_cooldown']
+    assert not status['sources']['krisha']['channels']['search']['in_cooldown']
+    assert await obs.observed_fetch('krisha', None, 'search', success) == []
+    with pytest.raises(obs.SourceCoolingDown):
+        await obs.observed_fetch('krisha', None, 'check', success)
+    await obs.record_import('krisha', None, 'browser', 'success')
+    assert (await obs.source_cooldown('krisha', 'detail'))['in_cooldown']
+    assert not (await obs.source_cooldown('krisha', 'search'))['in_cooldown']
+    assert calls == ['called']
+
+
+@pytest.mark.asyncio
+async def test_search_block_does_not_prevent_details_or_clear_browser(environment):
+    calls = []
+    async def success():
+        calls.append('detail')
+        return []
+    await obs.record_import('olx', None, 'search', 'blocked', http_status=403)
+    assert await obs.observed_fetch('olx', None, 'manual', success) == []
+    assert (await obs.source_cooldown('olx', 'search'))['in_cooldown']
+    assert not (await obs.source_cooldown('olx', 'detail'))['in_cooldown']
+    with pytest.raises(obs.SourceCoolingDown):
+        await obs.observed_fetch('olx', None, 'search', success)
+    await obs.record_import('olx', None, 'queue', 'success')
+    assert (await obs.source_cooldown('olx', 'search'))['in_cooldown']
+    assert calls == ['detail']
+
+
+@pytest.mark.asyncio
+async def test_many_detail_events_do_not_erase_search_backoff(environment):
+    sessions, clock = environment
+    await obs.record_import('krisha', None, 'search', 'blocked', http_status=468)
+    async with sessions.begin() as session:
+        session.add_all([obs.ImportEvent(source='krisha', url='', method='check', status='success',
+                                         fields=[], observed_at=clock['value']) for _ in range(105)])
+    search = await obs.source_cooldown('krisha', 'search')
+    assert search['in_cooldown'] and search['wait_seconds'] == 60
+    assert not (await obs.source_cooldown('krisha', 'detail'))['in_cooldown']

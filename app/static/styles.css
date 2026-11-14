@@ -70,3 +70,7 @@
 .search-area-map{height:clamp(240px,44vh,360px);border:1px solid var(--line);border-radius:10px}
 .search-area-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .search-area-actions [hidden]{display:none}
+.listing-pagination{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:10px;margin:14px 0 20px}
+.listing-pagination[hidden]{display:none}
+.listing-single-preview{grid-template-columns:1fr}
+.listing-single-preview .listing-photo:first-child{grid-row:auto}

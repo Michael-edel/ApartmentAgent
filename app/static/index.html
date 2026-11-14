@@ -11,7 +11,7 @@
   <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
   <link rel="apple-touch-icon" sizes="180x180" href="/static/icon-180.png">
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="/static/styles.css?v=158">
+  <link rel="stylesheet" href="/static/styles.css?v=159">
   <link rel="stylesheet" href="/static/listing-map.css?v=4">
   <link rel="stylesheet" href="/static/listing-workflow.css?v=1">
   <link rel="stylesheet" href="/static/listing-inspection.css?v=1">
@@ -255,6 +255,11 @@
       <p class="form-message">Сохранённых квартир пока нет.</p>
     </section>
     <section id="listingGrid" class="listing-grid"></section>
+    <nav id="listingPagination" class="listing-pagination" aria-label="Страницы сохранённых квартир" hidden>
+      <button type="button" class="panel-action" data-listing-page="prev">Назад</button>
+      <span data-listing-page-status aria-live="polite"></span>
+      <button type="button" class="panel-action" data-listing-page="next">Дальше</button>
+    </nav>
 
     <section class="form-card card">
       <p class="eyebrow">Ручной ввод</p>
@@ -326,8 +331,8 @@
   <script src="/static/listing-market-index.js?v=2" defer></script>
   <script src="/static/listing-quality.js?v=1" defer></script>
   <script src="/static/search-quality.js?v=4" defer></script>
-  <script src="/static/import-health.js?v=1" defer></script>
+  <script src="/static/import-health.js?v=2" defer></script>
   <script src="/static/search-profiles.js?v=5" defer></script>
-  <script src="/static/app.js?v=181" defer></script>
+  <script src="/static/app.js?v=183" defer></script>
 </body>
 </html>

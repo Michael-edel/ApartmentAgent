@@ -1,4 +1,4 @@
-"""Local import journal and durable, per-source retry state.
+"""Local import journal and durable, per-source and channel retry state.
 
 Only status metadata and field names are stored, never payloads or credentials.
 """
@@ -95,31 +95,44 @@ def _event_error(status: str, http_status: int | None, error: str | None) -> str
     return None
 
 
-async def _cooldown(session, source: Source, now: datetime) -> dict:
+async def _channel_cooldown(session, source: Source, channel: Literal['search', 'detail'], now: datetime) -> dict:
+    channel_filter = (ImportEvent.method == 'search' if channel == 'search'
+                      else ImportEvent.method.not_in(('search', 'browser', 'queue')))
     events = (await session.scalars(select(ImportEvent).where(
-        ImportEvent.source == source, ImportEvent.method.not_in(('browser', 'queue')),
+        ImportEvent.source == source, channel_filter,
     ).order_by(ImportEvent.id.desc()).limit(100))).all()
     blocked = []
-    recovered = set()
     for event in events:
-        channel = 'search' if event.method == 'search' else 'detail'
         if event.status == 'success':
-            recovered.add(channel)
-        elif channel not in recovered and (event.status == 'blocked' or event.http_status in _BLOCK_CODES):
+            break
+        if event.status == 'blocked' or event.http_status in _BLOCK_CODES:
             blocked.append(event)
     last = blocked[0] if blocked else None
     until = (_utc(last.observed_at) + timedelta(seconds=min(_MAX_DELAY_SECONDS,
              _BASE_DELAY_SECONDS * (2 ** min(len(blocked) - 1, 6))))) if last else None
     wait = max(0, math.ceil((until-now).total_seconds())) if until else 0
-    return {'source':source, 'blocked_count':len(blocked), 'retry_at':until if wait else None,
-            'wait_seconds':wait, 'in_cooldown':bool(wait)}
+    return {'source':source, 'channel':channel, 'blocked_count':len(blocked),
+            'retry_at':until if wait else None, 'wait_seconds':wait, 'in_cooldown':bool(wait)}
 
 
-async def source_cooldown(source: Source) -> dict:
+async def _cooldown(session, source: Source, now: datetime, channel: Literal['search', 'detail'] | None = None) -> dict:
+    if channel is not None:
+        if channel not in ('search', 'detail'):
+            raise ValueError('Unknown channel')
+        return await _channel_cooldown(session, source, channel, now)
+    channels = {name: await _channel_cooldown(session, source, name, now) for name in ('search', 'detail')}
+    active = [state for state in channels.values() if state['in_cooldown']]
+    retry_at = max((state['retry_at'] for state in active), default=None)
+    return {'source':source, 'blocked_count':sum(state['blocked_count'] for state in channels.values()),
+            'retry_at':retry_at, 'wait_seconds':max((state['wait_seconds'] for state in active), default=0),
+            'in_cooldown':bool(active), 'channels':channels}
+
+
+async def source_cooldown(source: Source, channel: Literal['search', 'detail'] | None = None) -> dict:
     if source not in ('krisha', 'olx'):
         raise ValueError('Unknown source')
     async with SessionLocal() as session:
-        return await _cooldown(session, source, _now())
+        return await _cooldown(session, source, _now(), channel)
 
 
 async def record_import(source: Source, url: str | None, method: str, status: Status, *,
@@ -181,7 +194,8 @@ async def observed_fetch(source: Source, url: str | None, method: str, fetch, *a
 
 async def _observe_request(source: Source, url: str | None, method: str, fetch, *args, **kwargs):
     try:
-        state = await source_cooldown(source)
+        channel = 'search' if method == 'search' else 'detail'
+        state = await source_cooldown(source, channel)
     except Exception:
         _logger.warning("Could not read the %s import journal", source)
     else:

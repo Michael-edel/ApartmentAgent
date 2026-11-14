@@ -3,11 +3,16 @@ const number = new Intl.NumberFormat('ru-KZ', {maximumFractionDigits:1});
 const dateTime = new Intl.DateTimeFormat('ru-RU', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'});
 
 const grid = document.querySelector('#listingGrid');
+const listingPagination = document.querySelector('#listingPagination');
 const filter = document.querySelector('#scoreFilter');
 const listingSort = document.querySelector('#listingSort');
 const listingSellerFilter = document.querySelector('#listingSellerFilter');
 const listingLeftBankOnly = document.querySelector('#listingLeftBankOnly');
 let listingsRevision = 0;
+const listingsPerPage = 12;
+let listingPage = 0;
+let pinnedSavedListing = null;
+const listingGalleryPhotos = new Map();
 const listingShowPledged = document.querySelector('#listingShowPledged');
 const listingShowInactive = document.querySelector('#listingShowInactive');
 const listingShowHidden = document.querySelector('#listingShowHidden');
@@ -315,11 +320,13 @@ function updateBathroomCheck(state) {
   if (!bathroomCheckBusy && (state.job_id !== bathroomCheckState?.job_id || state.status !== bathroomCheckState?.status)) {
     bathroomCheckFeedback = '';
   }
-  const nextSignature = `${state.job_id || ''}:${state.mode || 'bathrooms'}:${state.status}:${queueCount(state.checked)}`;
+  const nextSignature = `${state.job_id || ''}:${queueCount(state.checked)}`;
   const changed = bathroomCheckSignature !== null && bathroomCheckSignature !== nextSignature;
   bathroomCheckSignature = nextSignature;
   renderBathroomCheck(state);
-  if (changed) void Promise.all([loadListings(), loadSearchResults(), loadSearchStatus()]);
+  if (changed && queueCount(state.checked) > 0 && document.visibilityState !== 'hidden') {
+    void Promise.all([loadListings(), loadSearchResults(), loadSearchStatus()]);
+  }
 }
 
 async function loadBathroomCheckStatus() {
@@ -389,6 +396,10 @@ if (bathroomCheckPanel) {
 function normalizeUrl(value='') {
   try { const u = new URL(value, location.origin); const origin = ['krisha.kz', 'www.krisha.kz'].includes(u.hostname.toLowerCase()) ? 'https://krisha.kz' : u.origin; return `${origin}${u.pathname.replace(/\/$/, '')}`; }
   catch { return String(value).replace(/\/$/, ''); }
+}
+
+function krishaAdvertNumber(url) {
+  return /^https:\/\/krisha\.kz\/a\/show\/(\d+)$/.exec(normalizeUrl(url))?.[1] || null;
 }
 
 function cleanSearchTitle(title='') {
@@ -847,10 +858,17 @@ async function loadDuplicateOffers(details) {
 
 grid?.addEventListener('toggle', event => {
   const details = event.target;
+  if (details.matches('details[data-details-key="price-comparison"]') && details.open) void loadPriceComparison(details);
+  if (details.matches('details[data-gallery-id]') && details.open) openListingGallery(details);
+  if (details.matches('details[data-map-widget]')) updateListingMap(details);
   if (details.matches('details[data-comparables-id]') && details.open) void loadClosestComparables(details);
   if (details.matches('details[data-duplicates-id]') && details.open) void loadDuplicateOffers(details);
 }, true);
 grid?.addEventListener('click', event => {
+  const check = event.target.closest('.check-listing');
+  if (check) void checkListingNow(Number(check.dataset.listingId), check);
+  const retryPrice = event.target.closest('[data-price-comparison-retry]');
+  if (retryPrice) void loadPriceComparison(retryPrice.closest('details[data-details-key="price-comparison"]'));
   const retry = event.target.closest('[data-comparables-retry]');
   if (retry) void loadClosestComparables(retry.closest('details[data-comparables-id]'));
   const retryDuplicates = event.target.closest('[data-duplicates-retry]');
@@ -861,6 +879,13 @@ grid?.addEventListener('click', event => {
   if (hide) void changeHidden(hide);
   const decision = event.target.closest('[data-duplicate-other], [data-duplicate-manual-decision]');
   if (decision) void decideDuplicate(decision);
+});
+listingPagination?.addEventListener('click', event => {
+  const button = event.target.closest('[data-listing-page]');
+  if (!button || button.disabled) return;
+  listingPage += button.dataset.listingPage === 'next' ? 1 : -1;
+  render(allSavedListings, pinnedSavedListing);
+  grid?.scrollIntoView({block:'start'});
 });
 
 async function decideDuplicate(button) {
@@ -887,30 +912,57 @@ async function decideDuplicate(button) {
   finally { button.disabled = false; }
 }
 
-async function loadComparisons(previous = null) {
-  const nodes = [...(grid?.querySelectorAll('.price-comparison-content[data-listing-id]') || [])];
-  await Promise.all(nodes.map(async node => {
-    const cached = previous?.get(node.dataset.listingId);
-    if (cached) {
-      node.replaceWith(cached);
-      return;
-    }
-    try {
-      const response = await fetch(`/api/v1/listings/${encodeURIComponent(node.dataset.listingId)}/comparison`);
-      if (!response.ok) throw new Error('Не удалось загрузить сравнение');
-      const data = await readJson(response);
-      if (node.isConnected) {
-        node.innerHTML = renderComparison(data);
-        node.dataset.loaded = 'true';
-      }
-    } catch {
-      if (node.isConnected) node.textContent = 'Не удалось загрузить сравнение цены.';
-    }
-  }));
+async function loadPriceComparison(details) {
+  const content = details.querySelector('.price-comparison-content');
+  if (!content || ['loading', 'loaded'].includes(content.dataset.state)) return;
+  content.dataset.state = 'loading';
+  content.textContent = 'Загружаю сравнение цены…';
+  try {
+    const id = encodeURIComponent(content.dataset.listingId);
+    const response = await fetch(`/api/v1/listings/${id}/comparison`, {signal:AbortSignal.timeout(10000)});
+    if (!response.ok) throw new Error('Не удалось загрузить сравнение');
+    const data = await readJson(response);
+    if (!content.isConnected) return;
+    content.innerHTML = renderComparison(data);
+    content.dataset.state = 'loaded';
+  } catch {
+    if (!content.isConnected) return;
+    content.dataset.state = 'error';
+    content.innerHTML = '<p role="alert">Не удалось загрузить сравнение цены.</p><button type="button" class="panel-action" data-price-comparison-retry>Повторить</button>';
+  }
 }
 
-function render(listings, pinnedListing = null) {
+function openListingGallery(details) {
+  const gallery = details.querySelector('.listing-gallery');
+  if (!gallery || gallery.firstElementChild) return;
+  const photos = listingGalleryPhotos.get(details.dataset.galleryId) || [];
+  gallery.innerHTML = photos.map((photo, index) => {
+    const label = `Фото квартиры ${index + 1}`;
+    const url = escapeHtml(photo);
+    return `<a href="${url}" target="_blank" rel="noopener noreferrer" aria-label="Открыть ${label.toLowerCase()}"><img src="${url}" alt="${label}" loading="lazy" referrerpolicy="no-referrer"><span>Фото ${index + 1} ↗</span></a>`;
+  }).join('');
+}
+
+function updateListingMap(details) {
+  const map = details.querySelector('.listing-map');
+  if (!map) return;
+  if (!details.open) {
+    map.replaceChildren();
+    return;
+  }
+  if (map.firstElementChild) return;
+  const iframe = document.createElement('iframe');
+  iframe.src = details.dataset.mapWidget;
+  iframe.title = details.dataset.mapTitle;
+  iframe.loading = 'lazy';
+  iframe.allowFullscreen = true;
+  map.append(iframe);
+}
+
+function render(listings, pinnedListing = null, revealId = null) {
   allSavedListings = Array.isArray(listings) ? listings : [];
+  pinnedSavedListing = pinnedListing;
+  listingGalleryPhotos.clear();
   const openDetails = new Set();
   grid?.querySelectorAll('article[id^="listing-"] details[data-details-key][open]').forEach(detail => {
     openDetails.add(`${detail.closest('article').id}:${detail.dataset.detailsKey}`);
@@ -942,6 +994,16 @@ function render(listings, pinnedListing = null) {
   document.querySelector('#totalCount').textContent = listings.length;
   document.querySelector('#strongCount').textContent = strong.length;
   if (!grid) return;
+  const pageCount = Math.max(1, Math.ceil(visible.length / listingsPerPage));
+  const revealIndex = revealId === null ? -1 : visible.findIndex(item => String(item.id) === revealId);
+  if (revealIndex >= 0) listingPage = Math.floor(revealIndex / listingsPerPage);
+  listingPage = Math.max(0, Math.min(listingPage, pageCount - 1));
+  if (listingPagination) {
+    listingPagination.hidden = pageCount < 2;
+    listingPagination.querySelector('[data-listing-page="prev"]').disabled = listingPage === 0;
+    listingPagination.querySelector('[data-listing-page="next"]').disabled = listingPage >= pageCount - 1;
+    listingPagination.querySelector('[data-listing-page-status]').textContent = `Страница ${listingPage + 1} из ${pageCount} · квартир: ${visible.length}`;
+  }
   if (!visible.length) {
     grid.innerHTML = hiddenInactive > 0 && hiddenInactive === listings.length
       ? '<section class="empty card"><strong>Все сохранённые квартиры проданы или сняты с публикации</strong><p>Включите «Показывать проданные и снятые», чтобы увидеть карточки.</p></section>'
@@ -958,8 +1020,9 @@ function render(listings, pinnedListing = null) {
       : '<section class="empty card"><strong>В выбранном городе и типе рынка пока нет сохранённых квартир</strong><p>Добавьте квартиру вручную или импортируйте объявление.</p></section>';
     return;
   }
-  grid.innerHTML = visible.map(item => {
+  grid.innerHTML = visible.slice(listingPage * listingsPerPage, (listingPage + 1) * listingsPerPage).map(item => {
     const sourceUrl = safeExternalUrl(item.source_url);
+    const advertNumber = krishaAdvertNumber(item.source_url);
     const title = item.residential_complex || item.title;
     const location = [item.address, item.district, item.city].filter(Boolean).join(' · ');
     const hasCoordinates = Number.isFinite(item.latitude) && Number.isFinite(item.longitude)
@@ -974,7 +1037,8 @@ function render(listings, pinnedListing = null) {
       : null;
     const scoreClass = item.assessment.score < 85 ? 'medium' : '';
     const photos = [...new Set((Array.isArray(item.photo_urls) ? item.photo_urls : []).map(safeExternalUrl).filter(Boolean))];
-    const previewPhotos = photos.slice(0, 4);
+    if (photos.length) listingGalleryPhotos.set(String(item.id), photos);
+    const previewPhotos = photos.slice(0, 1);
     const ai = item.ai_analysis || {};
     const history = item.price_history || [];
     const latestChange = history[0]?.change_kzt;
@@ -987,11 +1051,12 @@ function render(listings, pinnedListing = null) {
     const twogisLine = item.twogis_name ? `<div class="twogis-review"><b>2GIS</b> ${Number.isFinite(twogisRating) && twogisReviews ? `★ ${twogisRating.toFixed(1)}/5 · ${twogisReviews} отзывов` : 'оценка и отзывы не опубликованы'}${item.twogis_url ? ` · <a href="${escapeHtml(item.twogis_url)}" target="_blank" rel="noopener noreferrer">Открыть в 2GIS →</a>` : ''}</div>` : '';
     return `<article class="listing card ${sourceFrameClass(item.source_url, item.cross_platform)}" id="listing-${item.id}" tabindex="-1" aria-label="Карточка квартиры: ${escapeHtml(title)}">
       ${pinnedListing && item.id === pinnedListing.id ? `<p class="meta" role="note">Карточка вне выбранного города или типа рынка показана по прямой ссылке. Критерии не изменены.</p>` : ''}
-      ${previewPhotos.length ? `<div class="listing-photos">${previewPhotos.map((photo, index) => `<img class="listing-photo ${index ? 'thumbnail' : ''}" src="${escapeHtml(photo)}" alt="Фото квартиры ${index + 1}" loading="lazy" referrerpolicy="no-referrer">`).join('')}</div>` : ''}
-      ${photos.length ? `<details class="listing-all-photos" data-details-key="photos"><summary>Все фотографии (${photos.length})</summary><div class="listing-gallery">${photos.map((photo, index) => `<a href="${escapeHtml(photo)}" target="_blank" rel="noopener noreferrer" aria-label="Открыть фото ${index + 1} в новой вкладке"><img src="${escapeHtml(photo)}" alt="Фото квартиры ${index + 1}" loading="lazy" referrerpolicy="no-referrer"><span>Фото ${index + 1} ↗</span></a>`).join('')}</div></details>` : ''}
+      ${previewPhotos.length ? `<div class="listing-photos listing-single-preview"><img class="listing-photo" src="${escapeHtml(previewPhotos[0])}" alt="Фото квартиры" loading="lazy" decoding="async" referrerpolicy="no-referrer"></div>` : ''}
+      ${photos.length ? `<details class="listing-all-photos" data-details-key="photos" data-gallery-id="${Number(item.id)}"><summary>Все фотографии (${photos.length})</summary><div class="listing-gallery"></div></details>` : ''}
       <div class="listing-top"><div><h3>${escapeHtml(title)}</h3><div class="meta">${escapeHtml(location)}</div></div><div class="rating ${scoreClass}">${item.assessment.score}</div></div>
       <div class="price">${money.format(item.price_kzt)}</div>
       <div class="meta">${item.rooms} комн. · ${number.format(item.area_m2)} м² · ${money.format(item.assessment.price_per_m2)}/м² · этаж ${item.floor || '—'}/${item.floors_total || '—'}</div>
+      ${advertNumber ? `<div class="meta">Объявление Krisha №${advertNumber}</div>` : ''}
       <div class="listing-bank">${olxBadge(item.source_url)}${marketBadge(item)}${riverBankBadge(item)}${availabilityBadge(item)}</div>
       ${likeControl(item, 'listings')}
       ${hiddenControls(item, 'listing')}
@@ -1001,10 +1066,10 @@ function render(listings, pinnedListing = null) {
       ${window.ApartmentAgentQuality?.render(item) || ''}
       ${window.ApartmentAgentTracking?.render(item) || ''}
       ${item.matches_search_conditions === false ? '<p class="meta" role="note">Не проходит обязательные условия</p>' : ''}
-      <details class="price-comparison listing-comparables" data-details-key="price-comparison"><summary>Сравнение цены за м²</summary><div class="price-comparison-content" data-listing-id="${Number(item.id)}">Загружаю сравнение цены…</div></details>
+      <details class="price-comparison listing-comparables" data-details-key="price-comparison"><summary>Сравнение цены за м²</summary><div class="price-comparison-content" data-listing-id="${Number(item.id)}"></div></details>
       <details class="listing-comparables" data-details-key="closest-comparables" data-comparables-id="${Number(item.id)}"><summary>Ближайшие аналоги</summary><div data-comparables-content></div></details>
       <details class="listing-comparables" data-details-key="duplicate-offers" data-duplicates-id="${Number(item.id)}"><summary>Вероятные дубли</summary><div data-duplicates-content></div></details>
-      ${mapWidgetUrl ? `<div class="listing-map"><iframe src="${escapeHtml(mapWidgetUrl)}" title="Расположение квартиры: ${escapeHtml(title)}" loading="lazy" allowfullscreen></iframe></div>` : ''}
+      ${mapWidgetUrl ? `<details class="listing-comparables" data-details-key="map" data-map-widget="${escapeHtml(mapWidgetUrl)}" data-map-title="Расположение квартиры: ${escapeHtml(title)}"><summary>Показать на карте</summary><div class="listing-map"></div></details>` : ''}
       ${mapUrl ? `<a class="location-link" href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener noreferrer">${hasCoordinates ? 'Открыть большую карту' : 'Найти адрес на карте'} →</a>${hasCoordinates ? '<p class="meta map-fallback">Если карта не загрузилась, воспользуйтесь ссылкой выше.</p>' : '<p class="meta">Координаты не получены. Карта найдёт дом по указанному адресу.</p>'}` : ''}
       ${locationMissing ? '<div class="meta location-missing">Адрес и координаты не указаны</div>' : ''}
       <div class="listing-details"><div>${bathroomBadge(item)}</div>${repairDetails(item)}${mortgageDetails(item)}<div><b>Залог:</b> ${pledgeBadge(item)}</div><div class="listing-author"><b>Продавец</b>${sellerBadge(item)}${item.seller_name ? `<span>${escapeHtml(item.seller_name)}</span>` : ''}</div></div>
@@ -1096,7 +1161,7 @@ async function changeSaleStatus(button) {
   }
 }
 
-async function loadListings({reuseComparisons = false} = {}) {
+async function loadListings({reuseComparisons = false, revealId = null} = {}) {
   const revision = ++listingsRevision;
   if (refreshButton) refreshButton.disabled = true;
   try {
@@ -1115,13 +1180,13 @@ async function loadListings({reuseComparisons = false} = {}) {
       if (pinnedResponse.ok) pinnedListing = await readJson(pinnedResponse);
     }
     if (revision !== listingsRevision || requestCity !== activeSearchCity || requestMarketType !== activeMarketType) return false;
-    const loaded = reuseComparisons ? [...(grid?.querySelectorAll('.price-comparison-content[data-loaded]') || [])] : [];
+    const loaded = reuseComparisons ? [...(grid?.querySelectorAll('.price-comparison-content[data-state="loaded"]') || [])] : [];
     const previous = new Map(loaded.map(node => [node.dataset.listingId, node]));
-    render(listings, pinnedListing);
-    grid?.querySelectorAll('.check-listing').forEach(button => {
-      button.addEventListener('click', () => checkListingNow(Number(button.dataset.listingId), button));
+    render(listings, pinnedListing, revealId);
+    if (previous.size) grid?.querySelectorAll('.price-comparison-content[data-listing-id]').forEach(node => {
+      const cached = previous.get(node.dataset.listingId);
+      if (cached) node.replaceWith(cached);
     });
-    await loadComparisons(previous);
     return true;
   } catch (error) {
     if (revision === listingsRevision && message) message.textContent = error.message;
@@ -1138,7 +1203,7 @@ async function openSavedListingFromHash() {
   if (filter) filter.value = '';
   if (listingSellerFilter) listingSellerFilter.value = 'all';
   if (listingLeftBankOnly) listingLeftBankOnly.checked = false;
-  if (!await loadListings()) return;
+  if (!await loadListings({revealId:match[1]})) return;
   const card = document.getElementById(`listing-${match[1]}`);
   if (!card) {
     if (searchMessage) searchMessage.textContent = 'Сохранённая карточка не найдена. Обновите результаты поиска.';
@@ -1228,6 +1293,7 @@ async function loadSearchResults() {
     }
     searchResults.innerHTML = items.map(item => {
       const sourceUrl = safeExternalUrl(item.url);
+      const advertNumber = krishaAdvertNumber(item.url);
       const a = item.analysis || {};
       const facts = [
         a.price_is_lower_bound ? `от ${money.format(a.price_lower_bound_kzt)} · точная цена не подтверждена` : a.price_kzt ? money.format(a.price_kzt) : 'Цена не подтверждена',
@@ -1254,7 +1320,7 @@ async function loadSearchResults() {
         ${hiddenControls(item, 'search')}
         ${reasons ? `<ul class="reason-list">${reasons}</ul>` : `<p class="meta">${escapeHtml(item.snippet || 'Откройте объявление для проверки параметров.')}</p>`}
         ${window.ApartmentAgentSearchQuality?.renderEvidence(item.quality_match) || ''}
-        <div class="meta source-meta">Источник: ${escapeHtml(item.search_engine)} · обнаружено ${dateTime.format(new Date(item.first_seen))}</div>
+        <div class="meta source-meta">${advertNumber ? `Krisha №${advertNumber} · ` : `Источник: ${escapeHtml(item.search_engine)} · `}обнаружено ${dateTime.format(new Date(item.first_seen))}</div>
         <div class="card-actions">
           ${imported && hasSavedCard ? `<a class="open-saved-card secondary-action" href="#listing-${savedId}">Открыть карточку →</a>` : `<button class="enrich-result primary secondary-action ${imported ? 'saved' : ''}" data-url="${escapeHtml(item.url)}" type="button" ${imported ? 'disabled' : ''}>${importLabel}</button>`}
           ${sourceUrl ? `<a class="search-open" data-result-id="${item.id}" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">Открыть и мониторить →</a>` : ''}

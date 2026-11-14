@@ -7,6 +7,8 @@
   const methods = {search:'Выдача', auto:'Автоимпорт', browser:'Расширение', manual:'По ссылке', check:'Мониторинг', queue:'Очередь'};
   const sites = {krisha:'Krisha', olx:'OLX'};
   const time = value => value ? new Date(value).toLocaleString('ru-RU') : '—';
+  const channelLabels = {search:'Поиск', detail:'Загрузка карточек'};
+  const channelStatus = channel => channel.in_cooldown ? `пауза до ${time(channel.retry_at)}` : 'паузы нет';
 
   function paragraph(message) {
     const node = document.createElement('p');
@@ -28,7 +30,8 @@
       const [status, journal] = await Promise.all([request(''), request('/events?limit=12')]);
       const rows = Object.entries(status.sources).map(([source, state]) => {
         const counts = state.counts;
-        const current = state.in_cooldown ? `Пауза до ${time(state.retry_at)}` : labels[state.last_status] || 'Ожидает проверки';
+        const current = Object.entries(channelLabels)
+          .map(([key, name]) => `${name} — ${channelStatus(state.channels[key])}`).join(' · ');
         return paragraph(`${sites[source]} · ${current}. Успешных: ${counts.success || 0}. Ограничений: ${counts.blocked || 0}, из них проверок браузера: ${state.browser_verifications || 0}. Ошибок: ${counts.error || 0}.`);
       });
       rows.push(paragraph(status.browser_connected ? `Расширение подключено · ${status.browser_version}` :

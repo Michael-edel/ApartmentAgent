@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -29,6 +30,26 @@ from app.telegram import notify_listing
 from app.twogis import lookup_twogis
 
 _olx_write_lock = asyncio.Lock()
+
+
+def _description_bathrooms_count(description: str | None) -> tuple[int, bool] | None:
+    """Only accept a standalone, unambiguous count from the ad description."""
+    if not description:
+        return None
+    label = r'(?:сануз(?:ел|ла|лов|лы)|с\s*/\s*у)'
+    pattern = re.compile(rf'^\s*[•●▪◦\-*]?\s*(\d{{1,2}})\s*{label}\s*(и\s+более|и\s+больше|\+)?\s*[.,;]?\s*$', re.I)
+    mention = re.compile(r'сануз\w*|(?<!\w)с\s*/\s*у(?!\w)', re.I)
+    selected = []
+    for line in description.splitlines():
+        if not mention.search(line):
+            continue
+        match = pattern.fullmatch(line)
+        # Any other statement mentioning bathrooms can contradict or qualify
+        # the bullet; the description alone is then insufficient evidence.
+        if not match or int(match.group(1)) > 20:
+            return None
+        selected.append((int(match.group(1)), bool(match.group(2))))
+    return selected[0] if selected and len(set(selected)) == 1 else None
 
 
 class ListingAlreadyExists(ValueError):
@@ -438,6 +459,17 @@ async def persist_listing(
     write_lock = _olx_write_lock if olx_advert_id(str(values["source_url"])) else nullcontext()
     async with listing_write_lock, write_lock, SessionLocal() as session:
         row = await _find_listing(session, str(values["source_url"]), lock=True)
+        if (payload.source == 'browser' and payload.bathrooms_count is None
+                and (row is None or row.bathrooms_count is None)
+                and not any(re.fullmatch(r'\s*(?:санузел|санузлы|с\s*/\s*у)\s*', str(label), re.I)
+                            for label in (*payload.property_details, *((row.property_details or {}) if row else {})))):
+            observed = _description_bathrooms_count(payload.description)
+            if observed is not None:
+                results = await _matching_search_results(session, str(values['source_url']))
+                if not any(result.bathrooms_count is not None for result in results):
+                    payload = payload.model_copy(update={'bathrooms_count': observed[0],
+                        'bathrooms_count_is_lower_bound': observed[1]})
+                    values['bathrooms_count'], values['bathrooms_count_is_lower_bound'] = observed
         corrected_fields = set()
         protected_values = {}
         if row is not None:
