@@ -1,4 +1,6 @@
 """Saved search profiles; activation applies criteria as one locked update."""
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
@@ -15,6 +17,7 @@ router = APIRouter(prefix='/api/v1/search/profiles', tags=['search-profiles'])
 class ProfileCriteria(BaseModel):
     city: SearchCity = 'astana'
     market_type: MarketFilter = 'all'
+    seller: Literal['all', 'owner'] = 'all'
     rooms: int = Field(default=2, ge=2, le=4)
     min_price_kzt: int | None = Field(default=None, gt=0)
     max_price_kzt: int = Field(gt=0)
@@ -114,5 +117,5 @@ async def activate_profile(profile_id: int):
             criteria.max_area_m2, criteria.min_bathrooms, criteria.exclude_pledged,
             max_area_m2_is_set=True, min_price_kzt=criteria.min_price_kzt, min_price_kzt_is_set=True,
             city=criteria.city, conditions=criteria.conditions.model_dump(), active_profile_id=profile_id,
-            market_type=criteria.market_type)
+            market_type=criteria.market_type, seller=criteria.seller)
         return {'active_profile_id': profile_id}

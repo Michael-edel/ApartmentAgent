@@ -1,11 +1,16 @@
-const CACHE = 'apartment-agent-v73';
+const CACHE = 'apartment-agent-v77';
 const ASSETS = [
-  '/', '/static/styles.css?v=157', '/static/app.js?v=179', '/static/icon.svg', '/manifest.webmanifest',
+  '/', '/static/styles.css?v=158', '/static/app.js?v=181', '/static/icon.svg', '/manifest.webmanifest',
+  '/static/icon-180.png', '/static/icon-192.png', '/static/icon-512.png',
   '/static/vendor/leaflet/leaflet.css', '/static/vendor/leaflet/leaflet.js',
   '/static/listing-map.css?v=4', '/static/listing-map.js?v=7',
   '/static/listing-workflow.css?v=1', '/static/listing-workflow.js?v=1',
   '/static/listing-tracking.js?v=1',
-  '/static/search-profiles.js?v=3',
+  '/static/listing-inspection.css?v=1', '/static/listing-inspection.js?v=1',
+  '/static/listing-market-index.css?v=2', '/static/listing-market-index.js?v=2',
+  '/static/listing-quality.css?v=1', '/static/listing-quality.js?v=1',
+  '/static/search-quality.js?v=4', '/static/import-health.js?v=1',
+  '/static/search-profiles.js?v=5',
 ];
 
 self.addEventListener('install', event => {

@@ -2,7 +2,7 @@
 import re
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Mode = Literal['off', 'hard', 'preference']
 
@@ -29,7 +29,52 @@ class KitchenCondition(BaseModel):
         return self
 
 
+class RadiusCondition(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    latitude: float = Field(ge=-90, le=90, allow_inf_nan=False)
+    longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
+    max_m: float = Field(gt=0, le=100000, allow_inf_nan=False)
+
+
+class QualityConditions(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    districts: list[str] = Field(default_factory=list, max_length=20)
+    polygon: list[tuple[float, float]] | None = Field(default=None, min_length=3, max_length=200)
+    radius: RadiusCondition | None = None
+    features: list[Literal['kitchen_living', 'closet', 'balcony']] = Field(default_factory=list, max_length=3)
+    layout: Literal['all', 'separate', 'adjoining', 'studio', 'cross_ventilated'] = 'all'
+    phrase: str = Field(default='', max_length=200)
+    exclude_pledged: bool = False
+    exclude_lower_bound: bool = False
+    exclude_cash_only: bool = False
+    require_confirmed: bool = False
+
+    @field_validator('districts')
+    @classmethod
+    def valid_districts(cls, value):
+        cleaned = [item.strip() for item in value]
+        if any(not item or len(item) > 100 for item in cleaned):
+            raise ValueError('Некорректный район')
+        return list(dict.fromkeys(cleaned))
+
+    @field_validator('phrase')
+    @classmethod
+    def clean_phrase(cls, value):
+        return value.strip()
+
+    @field_validator('polygon')
+    @classmethod
+    def valid_polygon(cls, value):
+        if value is not None:
+            from app.search_quality import point_in_polygon
+            point_in_polygon(0, 0, value)
+            if len(set(value)) < 3:
+                raise ValueError('Для области нужны хотя бы три разные точки')
+        return value
+
+
 class SearchConditions(BaseModel):
+    quality: QualityConditions = Field(default_factory=QualityConditions)
     first_floor: Mode = 'off'
     last_floor: Mode = 'off'
     min_build_year: YearCondition = Field(default_factory=YearCondition)

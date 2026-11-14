@@ -67,3 +67,6 @@
 .price-comparison-content{margin-top:8px;color:#46576b;font-size:13px;line-height:1.4}
 .price-comparison-content>b{color:#17365d}
 .price-comparison-content>small{display:block;margin-top:9px;color:var(--muted)}
+.search-area-map{height:clamp(240px,44vh,360px);border:1px solid var(--line);border-radius:10px}
+.search-area-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.search-area-actions [hidden]{display:none}

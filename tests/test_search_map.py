@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app import main, search_agent
@@ -108,7 +109,8 @@ async def test_map_marks_olx_and_krisha_and_counts_missing_coordinates(monkeypat
     monkeypatch.setattr(main, 'SessionLocal', sessions)
     for key, value in {'search_city':'astana', 'target_rooms':2, 'min_area_m2':50,
                        'max_area_m2':None, 'min_price_kzt':None, 'max_price_kzt':50_000_000,
-                       'min_bathrooms':0, 'exclude_pledged':False, 'market_type':'all'}.items():
+                       'min_bathrooms':0, 'exclude_pledged':False, 'market_type':'all',
+                       'search_conditions':{}}.items():
         monkeypatch.setattr(main.settings, key, value)
     async with sessions() as session:
         for listing_id, source_url, latitude, longitude, approximate in [
@@ -117,6 +119,7 @@ async def test_map_marks_olx_and_krisha_and_counts_missing_coordinates(monkeypat
             (3, 'https://www.olx.kz/d/obyavlenie/other-IDrfHFL.html', None, None, (51.17, 71.45)),
             (4, 'https://www.olx.kz/d/obyavlenie/approximate-IDrfHFM.html', None, None, (51.19, 71.45)),
             (5, 'https://www.olx.kz/d/obyavlenie/missing-IDrfHFN.html', None, None, None),
+            (6, 'https://krisha.kz/a/show/6', 51.18, 71.47, None),
         ]:
             approximate_latitude, approximate_longitude = approximate or (None, None)
             session.add(Listing(id=listing_id, source='manual', source_url=source_url, title='Квартира', city='Астана',
@@ -124,6 +127,10 @@ async def test_map_marks_olx_and_krisha_and_counts_missing_coordinates(monkeypat
                                 latitude=latitude, longitude=longitude,
                                 approximate_latitude=approximate_latitude, approximate_longitude=approximate_longitude))
         await session.flush()
+        for listing in await session.scalars(select(Listing)):
+            session.add(SearchResult(url=listing.source_url, title='3-комнатная квартира 80 м² 40000000 ₸',
+                                     query='test', search_engine='test', city='astana',
+                                     imported_listing_id=listing.id))
         session.add(DuplicateDecision(first_id=1, second_id=3, decision='same'))
         await session.commit()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url='http://test') as client:
@@ -131,10 +138,10 @@ async def test_map_marks_olx_and_krisha_and_counts_missing_coordinates(monkeypat
         assert response.status_code == 200
         data = response.json()
         assert {(item['platform'], item['cross_platform']) for item in data['items']} == {
-            ('olx', False), ('krisha', True),
+            ('olx', False), ('krisha', True), ('krisha', False),
         }
         items = {item['listing_id']: item for item in data['items']}
-        assert set(items) == {1, 2, 4}
+        assert set(items) == {1, 2, 4, 6}
         assert items[2]['latitude'] == 51.14 and not items[2].get('approximate_location')
         assert (items[4]['latitude'], items[4]['longitude']) == (51.19, 71.45)
         assert items[4]['approximate_location'] and items[4]['river_bank'] == 'unknown'
@@ -146,4 +153,14 @@ async def test_map_marks_olx_and_krisha_and_counts_missing_coordinates(monkeypat
         assert 'latitude' not in missing[0] and 'longitude' not in missing[0]
         left_bank = (await client.get('/api/v1/search/map', params={'bank': 'left'})).json()
         assert not any(item.get('approximate_location') for item in left_bank['items'])
+        # Approximate OLX ad #3 is inside the polygon, but has no exact point.
+        main.settings.search_conditions = {'quality': {
+            'polygon': [[51.10, 71.40], [51.175, 71.40], [51.175, 71.46], [51.10, 71.46]],
+            'require_confirmed': False,
+        }}
+        selected = (await client.get('/api/v1/search/map')).json()
+        assert {item['listing_id'] for item in selected['items']} == {1, 2}
+        assert selected['without_coordinates_items'] == []
+        results = (await client.get('/api/v1/search/results')).json()
+        assert {item['imported_listing_id'] for item in results} == {1, 2}
     await engine.dispose()

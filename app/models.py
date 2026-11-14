@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
@@ -6,6 +6,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -70,6 +71,7 @@ class SearchPreference(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     city: Mapped[str | None] = mapped_column(String(30), nullable=True)
     market_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    seller: Mapped[str | None] = mapped_column(String(20), nullable=True)
     rooms: Mapped[int] = mapped_column(Integer, default=2)
     min_price_kzt: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     max_price_kzt: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -299,3 +301,21 @@ class BathroomCheckControl(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     current_job_id: Mapped[int | None] = mapped_column(ForeignKey("bathroom_check_jobs.id", ondelete="SET NULL"), nullable=True)
+
+
+class MarketIndexSnapshot(Base):
+    __tablename__ = "market_index_snapshots"
+
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    city: Mapped[str] = mapped_column(String(20), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(16), primary_key=True)
+    location: Mapped[str] = mapped_column(String(200), primary_key=True)
+    building_type: Mapped[str] = mapped_column(String(20), primary_key=True)
+    rooms: Mapped[int] = mapped_column(Integer, primary_key=True)
+    area_band: Mapped[str] = mapped_column(String(24), primary_key=True)
+    location_label: Mapped[str] = mapped_column(String(200))
+    sample_size: Mapped[int] = mapped_column(Integer)
+    median: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    p25: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    p75: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

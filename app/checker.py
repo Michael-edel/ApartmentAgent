@@ -8,6 +8,7 @@ from app.availability import set_source_availability
 from app.cities import SEARCH_CITIES, SearchCity, city_slug
 from app.config import get_settings
 from app.database import SessionLocal
+from app.import_observability import SourceCoolingDown, observed_fetch
 from app.importer import ListingArchived, ListingImportError, ListingUnavailable, import_krisha_listing
 from app.listing_service import persist_listing
 from app.listing_tracking import evaluate_target_alerts
@@ -56,15 +57,16 @@ async def check_listing(listing_id: int) -> ListingCheckResult:
         if saved_city not in SEARCH_CITIES:
             raise ListingImportError("Поддерживаются Астана и Экибастуз.")
         if olx_advert_id(source_url):
-            fresh = await import_olx_listing(source_url, expected_city=saved_city)
+            fresh = await observed_fetch("olx", source_url, "check", import_olx_listing,
+                                         source_url, expected_city=saved_city)
             fresh = fresh.model_copy(update={"availability_status": "active"})
         else:
-            fresh = await import_krisha_listing(source_url)
+            fresh = await observed_fetch("krisha", source_url, "check", import_krisha_listing, source_url)
         observed = city_slug(fresh.city)
         if (fresh.city_observed or observed != "astana") and observed != saved_city:
             raise ListingImportError("Город объявления отличается от сохранённого города.")
         fresh = fresh.model_copy(update={"city": row.city, "city_observed": True})
-    except ListingImportError as exc:
+    except (ListingImportError, SourceCoolingDown) as exc:
         text = str(exc)
         if isinstance(exc, ListingArchived):
             status = "archived"

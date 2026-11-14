@@ -83,6 +83,12 @@ def _repair_snapshot(condition, source_kind, description, details, source):
     return (found[0], "description", found[1]) if found else (None, None, None)
 
 
+async def _corrected_listing_ids(session: AsyncSession, field: str) -> set[int]:
+    from app.listing_quality import ListingCorrection
+    return set((await session.scalars(select(ListingCorrection.listing_id)
+                .where(ListingCorrection.field == field))).all())
+
+
 async def backfill_repair_descriptions() -> int:
     """Re-read only locally stored descriptions; never contact a source site."""
     changed = 0
@@ -90,7 +96,10 @@ async def backfill_repair_descriptions() -> int:
         rows = (await session.scalars(select(Listing).where(or_(
             Listing.repair_condition.is_(None), Listing.repair_source_kind == "description"
         )))).all()
+        corrected = await _corrected_listing_ids(session, 'repair_condition')
         for row in rows:
+            if row.id in corrected:
+                continue
             snapshot = _repair_snapshot(row.repair_condition, row.repair_source_kind,
                                         row.description, row.property_details, row.source)
             if snapshot != tuple(getattr(row, key) for key in _REPAIR_FIELDS):
@@ -122,8 +131,9 @@ async def backfill_mortgage_and_addresses() -> dict[str, int]:
     """Enrich stored facts only; no source requests and no price observations."""
     counts = {"mortgage": 0, "address": 0}
     async with SessionLocal() as session:
+        corrected = await _corrected_listing_ids(session, 'mortgage_supported')
         for row in (await session.scalars(select(Listing))).all():
-            if row.mortgage_supported is None or row.mortgage_source_kind in _TEXT_MORTGAGE_SOURCES:
+            if row.id not in corrected and (row.mortgage_supported is None or row.mortgage_source_kind in _TEXT_MORTGAGE_SOURCES):
                 snapshot = _mortgage_snapshot(row.mortgage_supported, row.mortgage_source_kind,
                                               row.description, row.title, row.property_details, row.source)
                 if snapshot != tuple(getattr(row, key) for key in _MORTGAGE_FIELDS):
@@ -140,23 +150,25 @@ async def backfill_mortgage_and_addresses() -> dict[str, int]:
     return counts
 
 
-async def _find_listing(session: AsyncSession, source_url: str) -> Listing | None:
+async def _find_listing(session: AsyncSession, source_url: str, *, lock: bool = False) -> Listing | None:
     canonical = normalize_krisha_listing_url(source_url)
     olx_url = normalize_olx_listing_url(source_url)
-    exact = await session.scalar(select(Listing).where(Listing.source_url == (canonical or olx_url or source_url)))
+    def for_update(query):
+        return query.with_for_update() if lock else query
+    exact = await session.scalar(for_update(select(Listing).where(Listing.source_url == (canonical or olx_url or source_url))))
     if exact is not None:
         return exact
     if olx_url:
         advert_id = olx_advert_id(olx_url)
-        candidates = await session.scalars(select(Listing).where(
+        candidates = await session.scalars(for_update(select(Listing).where(
             Listing.source_url.contains(f"{advert_id}.html", autoescape=True)
-        ).order_by(Listing.id))
+        ).order_by(Listing.id)))
         return next((row for row in candidates if olx_advert_id(row.source_url) == advert_id), None)
     if canonical is None:
         return None
     path = canonical.removeprefix("https://krisha.kz")
     candidates = (await session.scalars(
-        select(Listing).where(Listing.source_url.contains(path, autoescape=True))
+        for_update(select(Listing).where(Listing.source_url.contains(path, autoescape=True)))
     )).all()
     return next((row for row in candidates if normalize_krisha_listing_url(row.source_url) == canonical), None)
 
@@ -251,9 +263,12 @@ async def _resolve_import_location(session: AsyncSession, payload: ListingCreate
 
 async def fill_seller_from_krisha_search(session: AsyncSession, url: str, role: str) -> None:
     """Fill a missing seller role from the matching public Krisha search card."""
+    from app.listing_quality import ListingCorrection
     await session.execute(
         update(Listing).where(
             Listing.source_url == url,
+            ~select(ListingCorrection.id).where(ListingCorrection.listing_id == Listing.id,
+                                                ListingCorrection.field == 'seller_type').exists(),
             or_(Listing.seller_type.is_(None), Listing.seller_type.in_(("", OWNER_FROM_DESCRIPTION))),
         ).values(seller_type=role, updated_at=Listing.updated_at)
     )
@@ -263,7 +278,10 @@ async def backfill_pledge_status() -> int:
     """Apply saved pledge facts without changing other import data."""
     changed = 0
     async with SessionLocal() as session:
+        corrected = await _corrected_listing_ids(session, 'is_pledged')
         for listing in (await session.scalars(select(Listing))).all():
+            if listing.id in corrected:
+                continue
             if listing.is_pledged is None:
                 status = pledge_field(listing.property_details or {})
                 if status is None:
@@ -284,7 +302,10 @@ async def backfill_author_types() -> int:
     changed = 0
     async with SessionLocal() as session:
         listings = (await session.scalars(select(Listing).where(Listing.seller_type.is_(None)))).all()
+        corrected = await _corrected_listing_ids(session, 'seller_type')
         for listing in listings:
+            if listing.id in corrected:
+                continue
             seller_type = owner_type_from_description(listing.description)
             if seller_type is not None:
                 listing.seller_type = seller_type
@@ -413,9 +434,23 @@ async def persist_listing(
 
     # An OLX advert can change its slug. Serialize all writers through the
     # ID lookup and commit so concurrent imports keep one saved listing.
+    from app.listing_quality import ListingCorrection, listing_write_lock
     write_lock = _olx_write_lock if olx_advert_id(str(values["source_url"])) else nullcontext()
-    async with write_lock, SessionLocal() as session:
-        row = await _find_listing(session, str(values["source_url"]))
+    async with listing_write_lock, write_lock, SessionLocal() as session:
+        row = await _find_listing(session, str(values["source_url"]), lock=True)
+        corrected_fields = set()
+        protected_values = {}
+        if row is not None:
+            corrected_fields = set((await session.scalars(select(ListingCorrection.field)
+                                   .where(ListingCorrection.listing_id == row.id))).all())
+            protected_names = set(corrected_fields)
+            if 'repair_condition' in corrected_fields:
+                protected_names.update(_REPAIR_FIELDS)
+            if 'mortgage_supported' in corrected_fields:
+                protected_names.update(_MORTGAGE_FIELDS)
+            if 'bathrooms_count' in corrected_fields:
+                protected_names.add('bathrooms_count_is_lower_bound')
+            protected_values = {key:getattr(row, key) for key in protected_names if hasattr(row, key)}
         if (not explicit_seller_type and payload.source in {"krisha-import", "browser"}
                 and (row is None or row.seller_type in {None, "", OWNER_FROM_DESCRIPTION})):
             observed = await _discovered_seller(session, str(values["source_url"]))
@@ -513,6 +548,8 @@ async def persist_listing(
                 row.photo_urls = payload.photo_urls
             if payload.source in {"browser", "krisha-import"} and not is_city_coordinate_pair(row.city, row.latitude, row.longitude):
                 row.latitude = row.longitude = None
+            for key, protected in protected_values.items():
+                setattr(row, key, protected)
             row.last_imported_at = now
             if old_price != payload.price_kzt:
                 price_change = (old_price, payload.price_kzt)
@@ -520,7 +557,13 @@ async def persist_listing(
             changes = changed_fields(before_observation, row)
             if changes:
                 session.add(ListingObservation(listing_id=row.id, observed_at=now, changes=changes))
-        await _sync_search_results(session, row, now, clear_unknown_mortgage=mortgage_cleared)
+        await _sync_search_results(session, row, now, clear_unknown_mortgage=mortgage_cleared or 'mortgage_supported' in corrected_fields)
+        if corrected_fields:
+            for result in await _matching_search_results(session, row.source_url):
+                for key in ('bathrooms_count', 'bathrooms_count_is_lower_bound', 'is_pledged', 'seller_type'):
+                    relevant = 'bathrooms_count' if key == 'bathrooms_count_is_lower_bound' else key
+                    if relevant in corrected_fields:
+                        setattr(result, key, getattr(row, key))
         if payload.source in {"krisha-import", "browser", "olx-import"} and payload.availability_status is not None:
             await set_source_availability(session, row.source_url, state=payload.availability_status, observed_at=now)
         await session.commit()

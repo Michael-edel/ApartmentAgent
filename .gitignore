@@ -9,5 +9,7 @@ __pycache__/
 .vscode/
 .DS_Store
 postgres_data/
+*.dump
+*.dump.meta.json
 *.egg-info/
 build/

@@ -31,22 +31,28 @@ async def test_profile_activation_and_isolated_monitor(monkeypatch, tmp_path):
     monkeypatch.setattr(search_agent, '_search_lock', asyncio.Lock())
     monkeypatch.setattr(search_agent.settings, 'search_city', 'astana')
     monkeypatch.setattr(search_agent.settings, 'search_conditions', {})
+    monkeypatch.setattr(search_agent.settings, 'search_seller', 'all')
     for name in ('target_rooms', 'min_price_kzt', 'max_price_kzt', 'min_area_m2', 'max_area_m2', 'min_bathrooms', 'exclude_pledged'):
         monkeypatch.setattr(search_agent.settings, name, getattr(search_agent.settings, name))
     body = search_profiles.ProfileBody(name='Астана', enabled=True, criteria={
-        'city': 'astana', 'rooms': 3, 'max_price_kzt': 40000000, 'min_area_m2': 80,
+        'city': 'astana', 'rooms': 3, 'max_price_kzt': 40000000, 'min_area_m2': 80, 'seller': 'owner',
         'conditions': {'first_floor': 'hard'}})
     row = await search_profiles.create_profile(body)
     visited = []
     async def fake_run():
-        visited.append((search_agent.settings.search_city, search_settings_override.get() is not None))
+        visited.append((search_agent.settings.search_city, search_agent.settings.search_seller,
+                        search_settings_override.get() is not None))
     monkeypatch.setattr(search_agent, '_run_search', fake_run)
     await search_agent.run_monitored_profiles()
-    assert visited == [('astana', True)]
+    assert visited == [('astana', 'owner', True)]
     assert search_agent.settings.search_city == 'astana'
     await search_profiles.activate_profile(row['id'])
     assert search_agent.settings.search_city == 'astana'
     assert search_agent.settings.search_conditions['first_floor'] == 'hard'
+    assert search_agent.settings.search_seller == 'owner'
+    search_agent.settings.search_seller = 'all'
+    await search_agent.load_search_preference()
+    assert search_agent.settings.search_seller == 'owner'
     assert (await search_profiles.list_profiles())['active_profile_id'] == row['id']
     await engine.dispose()
 

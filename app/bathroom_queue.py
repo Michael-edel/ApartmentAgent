@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -20,10 +20,11 @@ from app.availability import set_source_availability, unavailable_urls
 from app.cities import SEARCH_CITIES, city_matches, city_slug
 from app.config import get_settings
 from app.database import SessionLocal
+from app.import_observability import observe, observe_browser_presence
 from app.krisha_search import normalize_krisha_import_url, normalize_krisha_listing_url
 from app.market_type import matches_market_type
-from app.models import BathroomCheckControl, BathroomCheckJob, BathroomCheckTask, Listing, SearchResult
-from app.search_analysis import is_target_search_result, parse_bathrooms_count
+from app.models import BathroomCheckControl, BathroomCheckJob, BathroomCheckTask, Listing, ListingTargetPrice, SearchResult
+from app.search_analysis import analyze_search_result, is_target_search_result, parse_bathrooms_count
 from app.search_agent import conditions_for_listing, conditions_for_result
 from app.seller import seller_category
 
@@ -121,7 +122,9 @@ async def _candidates(session: AsyncSession, criteria: dict) -> list[tuple[str, 
     listing_values = (await session.execute(select(Listing.source_url, Listing.bathrooms_count,
         Listing.details_imported_at, Listing.rooms, Listing.area_m2, Listing.price_kzt,
         Listing.is_pledged, Listing.city, Listing.floor, Listing.floors_total, Listing.building_year,
-        Listing.property_details, Listing.market_type, *_priority_columns))).all()
+        Listing.property_details, Listing.market_type, Listing.title, Listing.district,
+        Listing.description, Listing.latitude, Listing.longitude, ListingTargetPrice.target_price_kzt,
+        *_priority_columns).outerjoin(ListingTargetPrice, ListingTargetPrice.listing_id == Listing.id))).all()
     saved = {}
     for value in listing_values:
         url = normalize_krisha_listing_url(value.source_url)
@@ -169,6 +172,25 @@ async def _candidates(session: AsyncSession, criteria: dict) -> list[tuple[str, 
     def saved_title(value):
         return f"{value.rooms}-комнатная квартира, {value.area_m2:g} м², {value.price_kzt} ₸"
 
+    ranks = {}
+
+    def rank(url, title, snippet, listing, discovery, conditions):
+        analysis = analyze_search_result(
+            title, snippet, target_rooms=criteria["target_rooms"], min_price=criteria.get("min_price_kzt"),
+            max_price=criteria["max_price_kzt"], min_area=criteria["min_area_m2"],
+            max_area=criteria["max_area_m2"],
+            mortgage_supported=getattr(listing or discovery, "mortgage_supported", None),
+            is_pledged=getattr(listing or discovery, "is_pledged", None),
+        )
+        score = max(0, min(100, analysis["score"] + conditions["score_adjustment"]))
+        target = listing.target_price_kzt if listing else None
+        price = listing.price_kzt if listing else analysis["price_kzt"]
+        distance = max(0, (price - target) / target) if price and target else float("inf")
+        missing = len(_missing_priority_details(listing)) if listing else 3
+        # High-rated listings near a personal target lead, with missing
+        # details and discovery order breaking ties.
+        ranks[url] = (not (score >= 85 and distance <= .10), -score, distance, -missing)
+
     for row in rows:
         url = normalize_krisha_listing_url(row.url)
         linked = saved.get(url)
@@ -176,7 +198,8 @@ async def _candidates(session: AsyncSession, criteria: dict) -> list[tuple[str, 
             continue
         if not matches_market_type(market_type, (linked.market_type if linked else None) or row.market_type):
             continue
-        if conditions_for_result(row, linked, criteria.get('conditions', {}))['failed_hard']:
+        conditions = conditions_for_result(row, linked, criteria.get('conditions', {}))
+        if conditions['failed_hard']:
             continue
         if not eligible(url) or url in seen:
             continue
@@ -185,14 +208,18 @@ async def _candidates(session: AsyncSession, criteria: dict) -> list[tuple[str, 
             continue
         seen.add(url)
         result.append((url, row.id))
+        rank(url, title, snippet, linked, row, conditions)
     if details_mode:
         for url, value in saved.items():
+            conditions = conditions_for_listing(value, criteria.get('conditions', {}))
             if (city_matches(criteria.get("city", "astana"), None, value.city)
                     and matches_market_type(market_type, value.market_type)
-                    and not conditions_for_listing(value, criteria.get('conditions', {}))['failed_hard']
+                    and not conditions['failed_hard']
                     and eligible(url) and url not in seen and matches(saved_title(value), None)):
                 seen.add(url)
                 result.append((url, None))
+                rank(url, saved_title(value), None, value, None, conditions)
+    result.sort(key=lambda item: ranks[item[0]])
     return result
 
 
@@ -242,7 +269,11 @@ async def _status(session: AsyncSession, job: BathroomCheckJob | None) -> dict:
 
 @router.get("")
 @router.get("/status", include_in_schema=False)
-async def bathroom_check_status() -> dict:
+async def bathroom_check_status(background_tasks: BackgroundTasks = None,
+                               extension_version: str | None = Header(default=None, max_length=32,
+                                                                       alias='X-ApartmentAgent-Extension')) -> dict:
+    if background_tasks is not None and isinstance(extension_version, str):
+        background_tasks.add_task(observe_browser_presence, extension_version)
     async with _queue_lock, SessionLocal() as session, session.begin():
         control = await _control(session)
         job = await _job(session, control)
@@ -501,7 +532,7 @@ async def _details_ready(session: AsyncSession, url: str, since: datetime | None
 
 
 @router.post("/complete")
-async def bathroom_check_complete(request: CompleteRequest) -> dict:
+async def bathroom_check_complete(request: CompleteRequest, background_tasks: BackgroundTasks = None) -> dict:
     async with _queue_lock, SessionLocal() as session, session.begin():
         control = await _control(session)
         job = await _job(session, control)
@@ -539,4 +570,10 @@ async def bathroom_check_complete(request: CompleteRequest) -> dict:
         tasks = await _tasks(session, job)
         if job.status == "running" and not any(task.status in {"pending", "leased"} for task in tasks):
             job.status, job.message = "completed", "Проверка завершена."
+        if background_tasks is not None and request.outcome in {"blocked", "error", "unavailable"}:
+            journal_status = {"blocked": "blocked", "error": "error", "unavailable": "skipped"}[request.outcome]
+            verification = any(term in (request.error or "").casefold() for term in
+                               ("проверку браузера", "проверку безопасности", "captcha"))
+            background_tasks.add_task(observe, "krisha", task.url, "queue", journal_status,
+                                      error="verification" if verification else None)
         return await _status(session, job)

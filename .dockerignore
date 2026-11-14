@@ -1,0 +1,8 @@
+**
+!app/
+!app/**
+!Dockerfile
+!pyproject.toml
+!README.md
+**/__pycache__/
+**/*.pyc

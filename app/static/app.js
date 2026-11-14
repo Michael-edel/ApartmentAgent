@@ -996,6 +996,9 @@ function render(listings, pinnedListing = null) {
       ${likeControl(item, 'listings')}
       ${hiddenControls(item, 'listing')}
       ${window.ApartmentAgentWorkflow?.render(item) || ''}
+      ${window.ApartmentAgentInspection?.render(item) || ''}
+      ${window.ApartmentAgentMarketIndex?.render(item) || ''}
+      ${window.ApartmentAgentQuality?.render(item) || ''}
       ${window.ApartmentAgentTracking?.render(item) || ''}
       ${item.matches_search_conditions === false ? '<p class="meta" role="note">Не проходит обязательные условия</p>' : ''}
       <details class="price-comparison listing-comparables" data-details-key="price-comparison"><summary>Сравнение цены за м²</summary><div class="price-comparison-content" data-listing-id="${Number(item.id)}">Загружаю сравнение цены…</div></details>
@@ -1250,6 +1253,7 @@ async function loadSearchResults() {
         ${likeControl(item, 'search/results')}
         ${hiddenControls(item, 'search')}
         ${reasons ? `<ul class="reason-list">${reasons}</ul>` : `<p class="meta">${escapeHtml(item.snippet || 'Откройте объявление для проверки параметров.')}</p>`}
+        ${window.ApartmentAgentSearchQuality?.renderEvidence(item.quality_match) || ''}
         <div class="meta source-meta">Источник: ${escapeHtml(item.search_engine)} · обнаружено ${dateTime.format(new Date(item.first_seen))}</div>
         <div class="card-actions">
           ${imported && hasSavedCard ? `<a class="open-saved-card secondary-action" href="#listing-${savedId}">Открыть карточку →</a>` : `<button class="enrich-result primary secondary-action ${imported ? 'saved' : ''}" data-url="${escapeHtml(item.url)}" type="button" ${imported ? 'disabled' : ''}>${importLabel}</button>`}
@@ -1299,6 +1303,7 @@ async function loadSearchStatus() {
     if (!response.ok) throw new Error('Не удалось получить статус поиска');
     const status = await readJson(response);
     window.ApartmentAgentProfiles?.apply(status.conditions);
+    window.ApartmentAgentProfiles?.applySeller(status.seller);
     if (!cityNames.has(status.city)) throw new Error('Не удалось определить выбранный город');
     if (!marketNames.has(status.market_type)) { activeMarketType = null; throw new Error('Не удалось определить тип рынка'); }
     const previousCity = activeSearchCity;
@@ -1404,7 +1409,7 @@ runSearchButton?.addEventListener('click', async () => {
   try {
     const response = await fetch('/api/v1/search/run', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({city:searchCity?.value || 'astana', market_type:searchMarketType?.value || 'all', rooms:Number(searchRooms?.value || 2), min_price_kzt:minimumPrice, max_price_kzt:maximumPrice, min_area_m2:Number(searchMinArea.value), max_area_m2:maximumArea, min_bathrooms:searchBathrooms?.checked ? 2 : 0, exclude_pledged:searchExcludePledged?.checked ?? true, ...(conditions ? {conditions} : {}), ...(ownerOnly ? {seller:'owner'} : {})})
+      body:JSON.stringify({city:searchCity?.value || 'astana', market_type:searchMarketType?.value || 'all', rooms:Number(searchRooms?.value || 2), min_price_kzt:minimumPrice, max_price_kzt:maximumPrice, min_area_m2:Number(searchMinArea.value), max_area_m2:maximumArea, min_bathrooms:searchBathrooms?.checked ? 2 : 0, exclude_pledged:searchExcludePledged?.checked ?? true, ...(conditions ? {conditions} : {}), seller:ownerOnly ? 'owner' : 'all'})
     });
     const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось выполнить поиск');
@@ -1553,6 +1558,8 @@ listingShowPledged?.addEventListener('change', loadListings);
 listingShowInactive?.addEventListener('change', () => { void loadListings({reuseComparisons:true}); });
 listingShowHidden?.addEventListener('change', () => { void loadListings({reuseComparisons:true}); });
 setupLikedComparison();
+window.ApartmentAgentMarketIndex?.bind();
+window.ApartmentAgentQuality?.bind({onSaved: () => Promise.all([loadListings(), loadSearchResults()])});
 document.querySelector('#openListingsMap')?.addEventListener('click', () => {
   if (!window.ApartmentAgentMap) {
     if (searchMessage) searchMessage.textContent = 'Не удалось загрузить карту. Обновите страницу и попробуйте ещё раз.';

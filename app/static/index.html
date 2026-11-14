@@ -9,11 +9,14 @@
   <meta name="apple-mobile-web-app-title" content="Квартиры">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
-  <link rel="apple-touch-icon" href="/static/icon.svg">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/icon-180.png">
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="/static/styles.css?v=157">
+  <link rel="stylesheet" href="/static/styles.css?v=158">
   <link rel="stylesheet" href="/static/listing-map.css?v=4">
   <link rel="stylesheet" href="/static/listing-workflow.css?v=1">
+  <link rel="stylesheet" href="/static/listing-inspection.css?v=1">
+  <link rel="stylesheet" href="/static/listing-market-index.css?v=2">
+  <link rel="stylesheet" href="/static/listing-quality.css?v=1">
   <style>.bookmarklet-code{width:100%;min-height:96px;resize:vertical;border:1px solid #d8e2ec;border-radius:12px;background:#f8fafc;color:#142033;padding:12px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}</style>
   <title>ApartmentAgent</title>
 </head>
@@ -141,6 +144,11 @@
           <button id="cancelBathroomCheck" class="secondary-action" type="button" hidden>Остановить</button>
         </div>
       </section>
+      <details id="importHealth" class="listing-comparables">
+        <summary>Состояние источников и журнал импорта</summary>
+        <div data-import-health-body aria-live="polite"></div>
+        <button type="button" class="secondary-action" data-import-health-refresh>Обновить журнал</button>
+      </details>
       <p id="telegramStatus" class="microcopy"></p>
       <p id="twogisStatus" class="microcopy"></p>
     </section>
@@ -237,6 +245,12 @@
     <p id="listingPledgeSummary" class="microcopy" hidden></p>
     <p id="listingAvailabilitySummary" class="microcopy" hidden></p>
     <p id="listingAvailabilityMessage" class="microcopy availability-message" role="status"></p>
+    <details class="listing-comparables">
+      <summary>Экспорт сохранённых квартир</summary>
+      <p class="microcopy">Все сохранённые квартиры, включая скрытые и неактивные.</p>
+      <a href="/api/v1/listings/export?format=csv">Скачать CSV для Excel</a> ·
+      <a href="/api/v1/listings/export?format=json">Скачать JSON</a>
+    </details>
     <section id="emptyState" class="form-card card">
       <p class="form-message">Сохранённых квартир пока нет.</p>
     </section>
@@ -308,7 +322,12 @@
   <script src="/static/listing-map.js?v=7" defer></script>
   <script src="/static/listing-workflow.js?v=1" defer></script>
   <script src="/static/listing-tracking.js?v=1" defer></script>
-  <script src="/static/search-profiles.js?v=3" defer></script>
-  <script src="/static/app.js?v=179" defer></script>
+  <script src="/static/listing-inspection.js?v=1" defer></script>
+  <script src="/static/listing-market-index.js?v=2" defer></script>
+  <script src="/static/listing-quality.js?v=1" defer></script>
+  <script src="/static/search-quality.js?v=4" defer></script>
+  <script src="/static/import-health.js?v=1" defer></script>
+  <script src="/static/search-profiles.js?v=5" defer></script>
+  <script src="/static/app.js?v=181" defer></script>
 </body>
 </html>

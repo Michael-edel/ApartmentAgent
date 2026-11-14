@@ -1,0 +1,6 @@
+.inspection form,.inspection [data-inspection-files]{display:grid;gap:9px;margin-top:12px}
+.inspection fieldset{border:1px solid #d8e2ec;border-radius:10px;display:grid;gap:6px}
+.inspection legend{font-weight:700}.inspection label:not(.inspection-check){display:grid;gap:4px}
+.inspection-check{display:flex;gap:7px;align-items:center}.inspection-check input{width:auto}
+.inspection h4{margin:6px 0 0}.inspection-file-row{display:flex;align-items:center;justify-content:space-between;gap:8px;border-top:1px solid #d8e2ec;padding:6px 0;overflow-wrap:anywhere}
+.inspection .inspection-file-row a{margin:0;min-width:0}.inspection-file-row button{flex:none}

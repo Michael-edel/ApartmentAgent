@@ -16,6 +16,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import selectinload
 
 from app import __version__
+from app.access import require_basic_auth
 from app.author import OWNER_FROM_DESCRIPTION
 from app.availability import listing_availability, set_listing_sold, set_source_availability, unavailable_urls
 from app.bathroom_queue import router as bathroom_check_router
@@ -24,9 +25,15 @@ from app.checker import ListingNotFound, check_all_listings, check_listing, peri
 from app.cities import CITY_NAMES, SEARCH_CITIES, SearchCity, city_matches, city_slug, is_city_coordinate_pair, result_city_slug
 from app.config import get_settings
 from app.database import SessionLocal, engine, initialize_database
+from app.digest import periodic_digest
+from app.import_observability import SourceCoolingDown, observe, observed_fetch, router as import_observability_router
 from app.importer import ListingArchived, ListingImportError, ListingUnavailable, _address_from_text, _is_krisha_host, import_krisha_listing
+from app.inspection import router as inspection_router
+from app.listing_export import router as listing_export_router
+from app.listing_quality import router as listing_quality_router
 from app.listing_service import ListingAlreadyExists, _find_listing, _matching_search_results, persist_listing
 from app.market_comparison import LOOKBACK_DAYS, compare_saved_listings
+from app.market_index import periodic_market_index, router as market_index_router
 from app.market_type import MarketFilter, matches_market_type
 from app.olx import normalize_olx_listing_url, olx_advert_id
 from app import olx
@@ -63,9 +70,11 @@ async def lifespan(_: FastAPI):
     stop_event = asyncio.Event()
     checker_task = asyncio.create_task(periodic_checker(stop_event))
     search_task = asyncio.create_task(periodic_search(stop_event))
+    market_task = asyncio.create_task(periodic_market_index(stop_event))
+    digest_task = asyncio.create_task(periodic_digest(stop_event))
     yield
     stop_event.set()
-    await asyncio.gather(checker_task, search_task, return_exceptions=True)
+    await asyncio.gather(checker_task, search_task, market_task, digest_task, return_exceptions=True)
     await engine.dispose()
 
 
@@ -73,12 +82,19 @@ app = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
 app.include_router(bathroom_check_router)
 app.include_router(search_profiles_router)
 app.include_router(workflow_router)
+app.include_router(inspection_router)
+app.include_router(listing_quality_router)
+app.include_router(listing_export_router)
+app.include_router(market_index_router)
+app.include_router(import_observability_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https://([a-z0-9-]+\.)*krisha\.kz$",
     allow_methods=["POST"],
     allow_headers=["content-type"],
 )
+if settings.app_auth_enabled:
+    require_basic_auth(app, settings.app_auth_username, settings.app_auth_password)
 _static_dir = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
@@ -185,7 +201,7 @@ def _price_history(row: Listing) -> list[PriceSnapshotResponse]:
 
 def _is_blocked_import_error(message: str) -> bool:
     lowered = message.lower()
-    return any(token in lowered for token in ("огранич", "провер", "captcha", "403", "429"))
+    return any(token in lowered for token in ("огранич", "провер", "captcha", "403", "429", "468"))
 
 
 async def _finish_search_result_monitor(result_id: int, source_url: str) -> None:
@@ -198,8 +214,9 @@ async def _finish_search_result_monitor(result_id: int, source_url: str) -> None
             expected_city = result_city_slug(result.city) if result is not None else None
         if expected_city not in SEARCH_CITIES:
             raise ListingImportError("Город объявления не входит в выбранные города поиска.")
-        payload = (await olx.import_olx_listing(source_url, expected_city=expected_city)
-                   if olx_advert_id(source_url) else await import_krisha_listing(source_url))
+        payload = (await observed_fetch("olx", source_url, "manual", olx.import_olx_listing, source_url,
+                                        expected_city=expected_city) if olx_advert_id(source_url)
+                   else await observed_fetch("krisha", source_url, "manual", import_krisha_listing, source_url))
         observed = city_slug(payload.city)
         if (payload.city_observed or observed != "astana") and observed != expected_city:
             raise ListingImportError("Город объявления отличается от города в выдаче.")
@@ -210,7 +227,7 @@ async def _finish_search_result_monitor(result_id: int, source_url: str) -> None
     except (ListingArchived, ListingUnavailable) as exc:
         import_error = str(exc)
         import_status = "archived" if isinstance(exc, ListingArchived) else "unavailable"
-    except ListingImportError as exc:
+    except (ListingImportError, SourceCoolingDown) as exc:
         import_error = str(exc)
         import_status = "blocked" if _is_blocked_import_error(import_error) else "error"
     except Exception as exc:  # noqa: BLE001
@@ -343,14 +360,17 @@ async def import_olx_listing(payload: ListingCreate) -> ListingResponse:
 async def import_listing(payload: ListingImportRequest) -> ListingResponse:
     source_url = str(payload.source_url)
     try:
-        listing_data = (await olx.import_olx_listing(source_url) if olx_advert_id(source_url)
-                        else await import_krisha_listing(source_url))
+        listing_data = (await observed_fetch("olx", source_url, "manual", olx.import_olx_listing, source_url)
+                        if olx_advert_id(source_url) else
+                        await observed_fetch("krisha", source_url, "manual", import_krisha_listing, source_url))
     except (ListingArchived, ListingUnavailable) as exc:
         source_state = "archived" if isinstance(exc, ListingArchived) else "unavailable"
         async with SessionLocal() as session:
             await set_source_availability(session, str(payload.source_url), state=source_state)
             await session.commit()
         raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
+    except SourceCoolingDown as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
     except ListingImportError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     if city_slug(listing_data.city) not in SEARCH_CITIES:
@@ -393,7 +413,10 @@ async def import_listing_from_browser(payload: ListingCreate) -> ListingResponse
             and not payload.property_details.get("Адрес")
             and payload.title.lstrip()[:1].isdigit()):
         browser_payload = browser_payload.model_copy(update={"address": own_address})
-    return await _save_listing(browser_payload, allow_existing=True)
+    saved = await _save_listing(browser_payload, allow_existing=True)
+    await observe("krisha", canonical_url, "browser", "success",
+                  fields=browser_payload.model_dump(exclude_none=True))
+    return saved
 
 
 async def _browser_import_city(payload: ListingCreate, url: str) -> SearchCity:
@@ -512,7 +535,7 @@ class SearchRunRequest(BaseModel):
     max_area_m2: float | None = Field(default=None, strict=True, ge=0.1, le=10000, allow_inf_nan=False)
     min_bathrooms: Literal[0, 2] | None = None
     exclude_pledged: bool | None = None
-    seller: Literal["owner"] | None = None
+    seller: Literal["all", "owner"] | None = None
 
     @model_validator(mode="after")
     def validate_area(self) -> "SearchRunRequest":
@@ -654,10 +677,11 @@ async def comparison_liked(city: SearchCity | None = None,
 
 @app.get("/api/v1/search/map")
 async def search_map(
-    seller: Literal['all', 'owner', 'verified_agent', 'realtor', 'unknown'] = 'all',
+    seller: Literal['all', 'owner', 'verified_agent', 'realtor', 'unknown'] | None = None,
     bank: Literal['all', 'left'] = 'all',
 ) -> dict[str, object]:
     """Map current matches with actual saved pins; count other matches separately."""
+    seller = seller or settings.search_seller
     selected_city = settings.search_city
     selected_market = settings.market_type
     async with SessionLocal() as session:
@@ -741,6 +765,8 @@ async def search_map(
         elif result is not None:
             if not city_matches(selected_city, result.city) or not _row_matches_target(result):
                 continue
+            if not conditions_for_result(result)['matches_hard']:
+                continue
             if not matches_market_type(selected_market, result.market_type):
                 continue
             if seller != 'all' and seller_category(result.seller_type) != seller:
@@ -767,9 +793,10 @@ async def search_results(
     sort: Literal["newest", "score_desc", "score_asc", "price_asc", "price_desc",
                   "price_m2_asc", "price_m2_desc", "area_asc", "area_desc", "seller", "liked",
                   "building_year_asc", "building_year_desc"] = "newest",
-    seller: Literal["all", "owner", "verified_agent", "realtor", "unknown"] = "all",
+    seller: Literal["all", "owner", "verified_agent", "realtor", "unknown"] | None = None,
     bank: Literal["all", "left"] = "all",
 ) -> list[dict[str, object]]:
+    seller = seller or settings.search_seller
     safe_limit = min(max(limit, 1), 200)
     selected_city = settings.search_city
     selected_market = settings.market_type
@@ -790,7 +817,8 @@ async def search_results(
                 values = await session.execute(
                     select(Listing.id, Listing.seller_type, Listing.city, Listing.latitude, Listing.longitude,
                            Listing.floor, Listing.floors_total, Listing.building_year, Listing.property_details,
-                           Listing.market_type)
+                           Listing.market_type, Listing.district, Listing.description, Listing.title,
+                           Listing.price_kzt, Listing.is_pledged)
                     .where(Listing.id.in_(listing_ids[start:start + 500]))
                 )
                 listing_facts.update((item.id, item) for item in values.all())
@@ -904,6 +932,7 @@ async def search_results(
                 "first_seen": row.first_seen,
                 "last_seen": row.last_seen,
                 "analysis": analysis,
+                "quality_match": condition.get("quality"),
             }
         )
     if sort == "liked":

@@ -1,6 +1,6 @@
 from functools import lru_cache
 from contextvars import ContextVar
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -15,16 +15,24 @@ class Settings(BaseSettings):
     app_env: str = "development"
     app_host: str = "0.0.0.0"
     app_port: int = 8000
+    app_auth_enabled: bool = False
+    app_auth_username: str = "apartment"
+    app_auth_password: str = ""
     database_url: str = "postgresql+asyncpg://apartment:apartment@db:5432/apartment"
 
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     telegram_enabled: bool = True
     telegram_notify_min_score: int = 85
+    telegram_parser_alerts_enabled: bool = False
+    telegram_daily_digest_enabled: bool = False
+    telegram_digest_hour: int = Field(default=9, ge=0, le=23)
+    telegram_digest_timezone: str = "Asia/Almaty"
     check_interval_minutes: int = 120
 
     search_enabled: bool = True
     search_city: SearchCity = 'astana'
+    search_seller: Literal['all', 'owner'] = 'all'
     market_type: MarketFilter = 'all'
     search_conditions: dict = Field(default_factory=dict)
     target_rooms: int = 2

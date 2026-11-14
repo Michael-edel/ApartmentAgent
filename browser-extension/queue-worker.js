@@ -36,7 +36,7 @@
     const origin = await settings();
     const response = await fetch(`${origin}${PREFIX}${path}`, {
       method: body === undefined ? 'GET' : 'POST',
-      headers:{'Content-Type':'application/json'},
+      headers:{'Content-Type':'application/json', ...(body === undefined ? {'X-ApartmentAgent-Extension':chrome.runtime.getManifest().version} : {})},
       ...(body === undefined ? {} : {body:JSON.stringify(body)}),
       ...(typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? {signal:AbortSignal.timeout(10000)} : {}),
     });

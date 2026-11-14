@@ -3,6 +3,15 @@
   const el = id => document.getElementById(id);
   const modes = new Set(['off','hard','preference']);
   let dirty = false, items = [], active = null;
+  let sellerInitialized = false, sellerChanged = false;
+  el('searchSellerFilter')?.addEventListener('change', () => { sellerChanged = true; });
+  function applySeller(seller) {
+    if (sellerInitialized || sellerChanged || !['all', 'owner'].includes(seller)) return;
+    const control = el('searchSellerFilter');
+    if (!control) return;
+    control.value = seller;
+    sellerInitialized = true;
+  }
   const fieldIds = ['conditionFirstFloor','conditionLastFloor','conditionMinYear','conditionMinYearMode','conditionMaxYear','conditionMaxYearMode','conditionKitchen','conditionKitchenMode'];
   for (const id of fieldIds) el(id)?.addEventListener('input', () => { dirty = true; });
   for (const id of fieldIds) el(id)?.addEventListener('change', () => { dirty = true; });
@@ -16,9 +25,11 @@
     const min = pair('conditionMinYear','conditionMinYearMode','Год постройки от');
     const max = pair('conditionMaxYear','conditionMaxYearMode','Год постройки до');
     if (min.mode !== 'off' && max.mode !== 'off' && min.value > max.value) throw Error('Год постройки «от» не может быть больше года «до».');
-    return {first_floor:el('conditionFirstFloor')?.value || 'off', last_floor:el('conditionLastFloor')?.value || 'off', min_build_year:min, max_build_year:max, min_kitchen_m2:pair('conditionKitchen','conditionKitchenMode','Площадь кухни')};
+    const quality = window.ApartmentAgentSearchQuality?.read();
+    return {first_floor:el('conditionFirstFloor')?.value || 'off', last_floor:el('conditionLastFloor')?.value || 'off', min_build_year:min, max_build_year:max, min_kitchen_m2:pair('conditionKitchen','conditionKitchenMode','Площадь кухни'), ...(quality ? {quality} : {})};
   }
   function apply(conditions, force = false) {
+    window.ApartmentAgentSearchQuality?.apply(conditions?.quality, force);
     if (!conditions || (dirty && !force)) return;
     for (const [id, value] of [['conditionFirstFloor',conditions.first_floor],['conditionLastFloor',conditions.last_floor]]) if (el(id) && modes.has(value)) el(id).value=value;
     for (const [id, modeId, value] of [['conditionMinYear','conditionMinYearMode',conditions.min_build_year],['conditionMaxYear','conditionMaxYearMode',conditions.max_build_year],['conditionKitchen','conditionKitchenMode',conditions.min_kitchen_m2]]) {
@@ -32,7 +43,7 @@
     if (![price,minPrice,minArea,maxArea].every(input => input?.checkValidity())) throw Error('Проверьте цену и площадь в критериях поиска.');
     if (minPrice.value && Number(minPrice.value) > Number(price.value)) throw Error('Минимальная цена больше максимальной.');
     if (maxArea.value && Number(minArea.value) > Number(maxArea.value)) throw Error('Минимальная площадь больше максимальной.');
-    return {city:el('searchCity')?.value || 'astana', market_type:el('searchMarketType')?.value || 'all', rooms, min_price_kzt:minPrice.value ? Number(minPrice.value) : null, max_price_kzt:Number(price.value), min_area_m2:Number(minArea.value), max_area_m2:maxArea.value ? Number(maxArea.value) : null, min_bathrooms:el('searchBathrooms')?.checked ? 2 : 0, exclude_pledged:!!el('searchExcludePledged')?.checked, conditions:read()};
+    return {seller:el('searchSellerFilter')?.value === 'owner' ? 'owner' : 'all', city:el('searchCity')?.value || 'astana', market_type:el('searchMarketType')?.value || 'all', rooms, min_price_kzt:minPrice.value ? Number(minPrice.value) : null, max_price_kzt:Number(price.value), min_area_m2:Number(minArea.value), max_area_m2:maxArea.value ? Number(maxArea.value) : null, min_bathrooms:el('searchBathrooms')?.checked ? 2 : 0, exclude_pledged:!!el('searchExcludePledged')?.checked, conditions:read()};
   }
   const select=el('profileSelect'), name=el('profileName'), enabled=el('profileEnabled'), message=el('profileMessage');
   const selected = () => items.find(item => String(item.id) === select?.value);
@@ -90,5 +101,5 @@
   for (const [id, action] of [['profileCreate','create'],['profileUpdate','update'],['profileUpdateCriteria','updateCriteria'],['profileActivate','activate'],['profileDelete','delete']]) el(id)?.addEventListener('click', () => void act(action));
   updateSelected();
   refresh().catch(() => { if (message) message.textContent='Не удалось загрузить профили.'; });
-  window.ApartmentAgentProfiles={read,apply,refresh};
+  window.ApartmentAgentProfiles={read,apply,applySeller,refresh};
 })();

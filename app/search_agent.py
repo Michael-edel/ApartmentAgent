@@ -9,8 +9,9 @@ from sqlalchemy import func, select, update
 
 from app.availability import availability_key, set_source_availability, unavailable_urls
 from app.config import get_settings, SearchSettingsProxy, search_settings_override
-from app.cities import CITY_NAMES, SEARCH_CITIES, KnownCity, SearchCity, city_matches, city_slug
+from app.cities import CITY_NAMES, SEARCH_CITIES, KnownCity, SearchCity, city_matches, city_slug, is_city_coordinate_pair
 from app.database import SessionLocal
+from app.import_observability import SourceCoolingDown, observed_fetch
 from app.importer import ListingArchived, ListingImportError, ListingUnavailable, import_krisha_listing
 from app.krisha_search import KrishaSearchBlocked, normalize_krisha_listing_url
 from app.listing_service import fill_seller_from_krisha_search, persist_listing, sync_search_result_facts
@@ -102,10 +103,46 @@ def bathrooms_for_row(row: SearchResult) -> int | None:
     return count if count is not None else parse_bathrooms_count(f"{row.title or ''} {row.snippet or ''}")
 
 
+def _with_quality_conditions(result, conditions, listing=None, row=None):
+    from app.search_quality import evaluate_search_quality
+    spec = conditions if isinstance(conditions, SearchConditions) else SearchConditions.model_validate(conditions or {})
+    def observed(name, default=None):
+        value = getattr(listing, name, None) if listing is not None else None
+        if value is None and row is not None:
+            value = getattr(row, name, None)
+        return default if value is None else value
+    item = {name: observed(name) for name in ('district', 'latitude', 'longitude', 'property_details',
+            'title', 'description', 'is_pledged', 'price_is_lower_bound', 'cash_only')}
+    if spec.quality.polygon is not None and not is_city_coordinate_pair(
+        observed('city'), item['latitude'], item['longitude'],
+    ):
+        item['latitude'] = item['longitude'] = None
+    if not item['description'] and row is not None:
+        item['description'] = getattr(row, 'snippet', None)
+    if item['price_is_lower_bound'] is None and row is not None:
+        from app.search_analysis import _parse_price
+        parsed_price, lower_bound = _parse_price(f"{getattr(row, 'title', '') or ''} {getattr(row, 'snippet', '') or ''}")
+        if parsed_price is not None:
+            item['price_is_lower_bound'] = lower_bound
+    if item['cash_only'] is None:
+        from app.mortgage import _CASH_ONLY, parse_mortgage_claim
+        claim = parse_mortgage_claim(item['description'], title=item['title'])
+        if claim and claim[0] is False and _CASH_ONLY.search(claim[1]):
+            item['cash_only'] = True
+    quality = evaluate_search_quality(item, spec.quality.model_dump())
+    result['quality'] = quality
+    result['matches_hard'] = result['matches_hard'] and quality['matches']
+    result['unknown'].extend('Поиск: ' + value for value in quality['unknown'])
+    result['failed_hard'].extend('Поиск: ' + entry['criterion'] for entry in quality['reasons'] if not entry['passed'])
+    return result
+
+
 def conditions_for_listing(listing, conditions=None):
-    return evaluate_conditions(settings.search_conditions if conditions is None else conditions, floor=getattr(listing, 'floor', None),
+    effective = settings.search_conditions if conditions is None else conditions
+    result = evaluate_conditions(effective, floor=getattr(listing, 'floor', None),
         floors_total=getattr(listing, 'floors_total', None), building_year=getattr(listing, 'building_year', None),
         kitchen_m2=kitchen_area(getattr(listing, 'property_details', None)))
+    return _with_quality_conditions(result, effective, listing=listing)
 
 
 def conditions_for_result(row, listing=None, conditions=None):
@@ -116,11 +153,13 @@ def conditions_for_result(row, listing=None, conditions=None):
     total = getattr(listing, 'floors_total', None) if listing else None
     year = getattr(listing, 'building_year', None) if listing else None
     kitchen = kitchen_area(getattr(listing, 'property_details', None)) if listing else None
-    return evaluate_conditions(settings.search_conditions if conditions is None else conditions,
+    effective = settings.search_conditions if conditions is None else conditions
+    result = evaluate_conditions(effective,
         floor=floor if floor is not None else int(floor_match.group('floor')) if floor_match else None,
         floors_total=total if total is not None else int(floor_match.group('total')) if floor_match else None,
         building_year=year if year is not None else int(year_match.group('value') or year_match.group('year_suffix')) if year_match else None,
         kitchen_m2=kitchen if kitchen is not None else kitchen_area(text=text))
+    return _with_quality_conditions(result, effective, listing=listing, row=row)
 
 
 def _row_matches_target(row: SearchResult) -> bool:
@@ -271,6 +310,13 @@ async def _save_items(
                            if existing.imported_listing_id is not None else None)
                 if listing is not None:
                     sync_search_result_facts(existing, listing)
+                    if seller_type:
+                        from app.listing_quality import ListingCorrection
+                        locked_role = await session.scalar(select(ListingCorrection.id).where(
+                            ListingCorrection.listing_id == listing.id, ListingCorrection.field == 'seller_type',
+                        ).limit(1))
+                        if locked_role:
+                            existing.seller_type = listing.seller_type
                 else:
                     existing.title = item.title or existing.title
                     existing.snippet = item.snippet or existing.snippet
@@ -381,10 +427,12 @@ async def _auto_import(candidates: list[SearchImportCandidate]) -> tuple[int, in
             if is_olx:
                 payload = candidate.payload
                 if payload is None or not payload.details_extracted:
-                    payload = await olx.import_olx_listing(candidate.url, expected_city=candidate.city)
+                    payload = await observed_fetch(source, candidate.url, "auto", olx.import_olx_listing,
+                                                   candidate.url, expected_city=candidate.city)
             else:
-                payload = (await import_krisha_listing(candidate.url) if candidate.city == "astana" else
-                           await import_krisha_listing(candidate.url, expected_city=candidate.city))
+                city_options = {} if candidate.city == "astana" else {"expected_city": candidate.city}
+                payload = await observed_fetch(source, candidate.url, "auto", import_krisha_listing,
+                                               candidate.url, **city_options)
             if city_slug(payload.city) != candidate.city:
                 raise ValueError("Город объявления не совпадает с выбранным городом поиска")
             if is_olx and settings.exclude_pledged and payload.is_pledged is True:
@@ -415,9 +463,9 @@ async def _auto_import(candidates: list[SearchImportCandidate]) -> tuple[int, in
         except (ListingArchived, ListingUnavailable) as exc:
             state = "archived" if isinstance(exc, ListingArchived) else "unavailable"
             await _mark_import_result(candidate, import_status=state, error=str(exc))
-        except ListingImportError as exc:
+        except (ListingImportError, SourceCoolingDown) as exc:
             message = str(exc)
-            is_blocked = any(word in message.lower() for word in ("огранич", "провер", "captcha", "403", "429"))
+            is_blocked = any(word in message.lower() for word in ("огранич", "провер", "captcha", "403", "429", "468"))
             if is_blocked:
                 blocked_sources[source] = message
                 blocked += 1
@@ -460,10 +508,19 @@ async def _fetch_one(
 ) -> tuple[str, str, list[SearchItem] | None, Exception | None]:
     try:
         timeout = 75.0 if provider_name in QUERYLESS_PROVIDERS else 25.0
-        items = await asyncio.wait_for(PROVIDERS[provider_name](query), timeout=timeout)
+        provider = PROVIDERS[provider_name]
+        if provider_name in QUERYLESS_PROVIDERS:
+            source = "olx" if provider_name == "olx_direct" else "krisha"
+            items = await observed_fetch(source, None, "search", _timed_provider, provider, query, timeout)
+        else:
+            items = await _timed_provider(provider, query, timeout)
         return provider_name, query, items, None
     except Exception as exc:  # noqa: BLE001
         return provider_name, query, None, exc
+
+
+async def _timed_provider(provider, query: str, timeout: float):
+    return await asyncio.wait_for(provider(query), timeout=timeout)
 
 
 async def run_search(rooms: int | None = None, max_price_kzt: int | None = None,
@@ -474,10 +531,11 @@ async def run_search(rooms: int | None = None, max_price_kzt: int | None = None,
                      city: SearchCity | None = None, conditions: dict | None = None,
                      market_type: MarketFilter | None = None) -> SearchSummary:
     async with _search_lock:
-        if max_area_m2_is_set or min_price_kzt_is_set or any(value is not None for value in (rooms, min_price_kzt, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms, exclude_pledged, city, conditions, market_type)):
+        if max_area_m2_is_set or min_price_kzt_is_set or any(value is not None for value in (rooms, min_price_kzt, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms, exclude_pledged, city, conditions, market_type, seller)):
             await save_search_preference(rooms, max_price_kzt, min_area_m2, max_area_m2, min_bathrooms, exclude_pledged,
                                          max_area_m2_is_set=max_area_m2_is_set, min_price_kzt=min_price_kzt,
-                                         min_price_kzt_is_set=min_price_kzt_is_set, city=city, conditions=conditions, market_type=market_type)
+                                         min_price_kzt_is_set=min_price_kzt_is_set, city=city, conditions=conditions,
+                                         market_type=market_type, seller=seller, preserve_active=True)
         return await _run_search(seller=seller)
 
 
@@ -487,7 +545,7 @@ async def _run_search(*, seller: str | None = None) -> SearchSummary:
         return summary
 
     queries = _rotated_queries()
-    owner_search = seller == 'owner'
+    owner_search = (seller or settings.search_seller) == 'owner'
     krisha_owner_search = owner_search or settings.market_type == 'secondary'
     direct_providers = ["krisha_direct"] + (["olx_direct"] if "olx_direct" in settings.search_providers else [])
     enabled_providers = (direct_providers if krisha_owner_search else
@@ -515,7 +573,7 @@ async def _run_search(*, seller: str | None = None) -> SearchSummary:
     for provider_name, query, items, error in results:
         stats = summary.providers[provider_name]
         if error is not None:
-            if isinstance(error, (KrishaSearchBlocked, olx.OlxSearchBlocked)):
+            if isinstance(error, (KrishaSearchBlocked, olx.OlxSearchBlocked, SourceCoolingDown)):
                 summary.blocked += 1
                 stats["blocked"] += 1
                 await _save_provider_status(provider_name, query, "blocked", str(error))
@@ -603,6 +661,7 @@ async def run_monitored_profiles() -> None:
                 'min_bathrooms': criteria.min_bathrooms, 'exclude_pledged': criteria.exclude_pledged,
                 'search_conditions': criteria.conditions.model_dump(),
                 'market_type': criteria.market_type,
+                'search_seller': criteria.seller,
                 # Import/notifications use active UI criteria; defer import until
                 # the profile is active rather than mixing two configurations.
                 'auto_import_enabled': False,
@@ -694,6 +753,7 @@ async def get_search_status() -> dict[str, object]:
     return {
         "city": settings.search_city,
         "market_type": settings.market_type,
+        "seller": settings.search_seller,
         "conditions": settings.search_conditions,
         "rooms": settings.target_rooms,
         "min_price_kzt": settings.min_price_kzt,
@@ -727,6 +787,7 @@ async def load_search_preference() -> None:
     async with SessionLocal() as session:
         preference = await session.get(SearchPreference, 1)
         settings.market_type = preference.market_type if preference and preference.market_type in ('all', 'new', 'secondary') else 'all'
+        settings.search_seller = 'owner' if preference and preference.seller == 'owner' else 'all'
         if preference and preference.conditions is not None:
             settings.search_conditions = SearchConditions.model_validate(preference.conditions).model_dump()
         selected = city_slug(preference.city) if preference else None
@@ -753,7 +814,8 @@ async def save_search_preference(rooms: int | None, max_price_kzt: int | None = 
                                  *, max_area_m2_is_set: bool = False,
                                  min_price_kzt: int | None = None, min_price_kzt_is_set: bool = False,
                                  city: SearchCity | None = None, conditions: dict | None = None,
-                                 active_profile_id: int | None = None, market_type: MarketFilter | None = None) -> None:
+                                 active_profile_id: int | None = None, market_type: MarketFilter | None = None,
+                                 seller: str | None = None, preserve_active: bool = False) -> None:
     if market_type is not None and market_type not in ('all', 'new', 'secondary'):
         raise ValueError('Неизвестный тип рынка')
     validated_conditions = SearchConditions.model_validate(conditions).model_dump() if conditions is not None else None
@@ -795,12 +857,35 @@ async def save_search_preference(rooms: int | None, max_price_kzt: int | None = 
             preference.conditions = validated_conditions
         if market_type is not None:
             preference.market_type = market_type
+        if seller is not None:
+            preference.seller = seller
+        if preserve_active and preference.active_profile_id is not None:
+            from app.search_profiles import ProfileCriteria
+            profile = await session.get(SearchProfile, preference.active_profile_id)
+            if profile is not None:
+                current = ProfileCriteria(
+                    city=preference.city or settings.search_city,
+                    market_type=preference.market_type or settings.market_type,
+                    seller=preference.seller or settings.search_seller,
+                    rooms=preference.rooms,
+                    min_price_kzt=preference.min_price_kzt,
+                    max_price_kzt=preference.max_price_kzt or settings.max_price_kzt,
+                    min_area_m2=preference.min_area_m2 or settings.min_area_m2,
+                    max_area_m2=preference.max_area_m2,
+                    min_bathrooms=preference.min_bathrooms or 0,
+                    exclude_pledged=preference.exclude_pledged if preference.exclude_pledged is not None else settings.exclude_pledged,
+                    conditions=preference.conditions or settings.search_conditions,
+                )
+                if current == ProfileCriteria.model_validate(profile.criteria):
+                    active_profile_id = profile.id
         preference.active_profile_id = active_profile_id
         await session.commit()
     if city is not None:
         settings.search_city = city
     if market_type is not None:
         settings.market_type = market_type
+    if seller is not None:
+        settings.search_seller = seller
     if validated_conditions is not None:
         settings.search_conditions = validated_conditions
     if rooms is not None:
