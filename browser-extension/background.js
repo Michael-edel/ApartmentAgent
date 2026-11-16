@@ -92,7 +92,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return;
     }
     if (message.type === 'apartment-agent-availability') {
-      if (message.payload?.availability_status !== 'archived' || importSource(sender.url) !== sourceUrl) {
+      const observedStatus = message.payload?.availability_status;
+      if (!['archived', 'unavailable'].includes(observedStatus) || importSource(sender.url) !== sourceUrl) {
         sendResponse({ok:false, error:'Статус не соответствует открытой странице объявления.'});
         return;
       }
@@ -100,14 +101,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try {
         const response = await fetch(availabilityEndpoint, {
           method:'POST', headers:{'Content-Type':'application/json'}, redirect:'manual',
-          body:JSON.stringify({source_url:sourceUrl, availability_status:'archived'}),
+          body:JSON.stringify({source_url:sourceUrl, availability_status:observedStatus}),
         });
         if (response.redirected || response.type === 'opaqueredirect' || (response.url && response.url !== availabilityEndpoint)
           || response.status !== 200 || !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '')) {
           throw new Error('Сервер не подтвердил статус объявления.');
         }
         const body = await response.json();
-        if (importSource(body?.source_url) !== sourceUrl || body?.availability_status !== 'archived'
+        if (importSource(body?.source_url) !== sourceUrl || body?.availability_status !== observedStatus
           || !(body.id === null || Number.isSafeInteger(body.id) && body.id > 0)) {
           throw new Error('Сервер не подтвердил статус этого объявления.');
         }
@@ -127,8 +128,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         throw new Error('Не удалось связаться с ApartmentAgent. Проверьте, что приложение запущено и адрес в настройках расширения верный.');
       });
       const body = await readImportConfirmation(response, endpoint, sourceUrl);
-      const queue = await ApartmentAgentBathroomQueue.imported(sender, message.payload);
-      sendResponse({ok: true, listing: body, waiting_details:queue?.waiting_details === true, observing:queue?.observing === true});
+      // Queue bookkeeping is serialized and can be delayed by another task.
+      // Enqueue it before acknowledging the validated save, but never make the
+      // UI's confirmation depend on that unrelated bookkeeping completing.
+      const persisted = {...message.payload, bathrooms_count:body.bathrooms_count ?? null};
+      try { void Promise.resolve(ApartmentAgentBathroomQueue.imported(sender, persisted)).catch(() => {}); }
+      catch (_) { /* A queue error cannot revoke a confirmed server save. */ }
+      sendResponse({ok: true, listing: body});
     } catch (error) {
       sendResponse({ok: false, error: error instanceof Error ? error.message : 'Ошибка импорта'});
     }

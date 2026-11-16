@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from fastapi import BackgroundTasks
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -410,12 +411,22 @@ async def _enrich_twogis(
     return payload, True, complex_changed
 
 
+async def _notify_saved_listing(
+    payload: ListingCreate, listing_id: int, *, active: bool, created: bool,
+    price_change: tuple[int, int] | None,
+) -> None:
+    if active:
+        await notify_listing(payload, listing_id, created=created, price_change=price_change)
+    await evaluate_target_alerts(city=city_slug(payload.city))
+
+
 async def persist_listing(
     payload: ListingCreate,
     *,
     allow_existing: bool = True,
     notify: bool = True,
     refresh_ai: bool = True,
+    background_tasks: BackgroundTasks | None = None,
 ) -> PersistedListing:
     now = datetime.now(UTC)
     payload, twogis_checked, replace_twogis = await _enrich_twogis(payload, now=now)
@@ -616,18 +627,17 @@ async def persist_listing(
                 await session.refresh(current)
                 row = current
 
-    if notify and listing_availability(row.sold_at, row.source_archived_at, row.source_unavailable_at) == "active":
+    if notify:
         # A partial re-import can omit coordinates kept on the stored card.
         # Score the notification with that same location as the displayed card.
         notification_payload = payload.model_copy(update={
             "city": row.city, "latitude": row.latitude, "longitude": row.longitude,
         })
-        await notify_listing(
-            notification_payload,
-            row.id,
-            created=created,
-            price_change=price_change,
-        )
-    if notify:
-        await evaluate_target_alerts(city=city_slug(row.city))
+        active = listing_availability(row.sold_at, row.source_archived_at, row.source_unavailable_at) == "active"
+        if background_tasks is None:
+            await _notify_saved_listing(notification_payload, row.id, active=active, created=created,
+                                        price_change=price_change)
+        else:
+            background_tasks.add_task(_notify_saved_listing, notification_payload, row.id, active=active,
+                                      created=created, price_change=price_change)
     return PersistedListing(row=row, created=created, price_change=price_change)

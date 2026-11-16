@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const extractorSource = fs.readFileSync('browser-extension/extractor.js', 'utf8');
 const contentSource = fs.readFileSync('browser-extension/content.js', 'utf8');
 
-function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyAt = 0, failures = 0, respond = true, failureMessage = 'Сервер недоступен', bodySuffix = '', mainHeading = null, captchaForm = null, captchaWidgets = [], extraAt = () => ({}), detailsMode = false, payloadAt = null, matchedId = null, responseDelay = 50, jsonPhotos = true, firstObservationDelay = 1200} = {}) {
+function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyAt = 0, failures = 0, respond = true, failureMessage = 'Сервер недоступен', bodySuffix = '', mainHeading = null, captchaForm = null, captchaWidgets = [], extraAt = () => ({}), detailsMode = false, payloadAt = null, matchedId = null, responseDelay = 50, jsonPhotos = true, firstObservationDelay = 1200, persistedBathrooms = undefined, availabilityResponse = {ok:true,id:1}} = {}) {
   let now = 0;
   let sequence = 0;
   const tasks = [];
@@ -33,7 +33,7 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
         authorBlock = authorText ? {textContent:authorText} : null;
       }
       if (selector.startsWith('[data-apartment-agent-extension-message]')) return notices.filter(node => !node.removed);
-      if (selector === 'h1, [role="heading"][aria-level="1"]') return mainHeading ? [typeof mainHeading === 'string' ? {textContent:mainHeading} : mainHeading] : [];
+      if (selector === 'h1, [role="heading"][aria-level="1"]' || selector === 'h1, h2, h3, [role="heading"]') return mainHeading ? [typeof mainHeading === 'string' ? {textContent:mainHeading} : mainHeading] : [];
       if (selector.startsWith('form[action*="captcha"')) return [captchaForm, ...captchaWidgets].filter(Boolean).filter(node => {
         const tag = String(node.tagName || '').toUpperCase();
         const attribute = name => node.getAttribute?.(name) || node[name] || '';
@@ -57,13 +57,13 @@ function fixture({fieldAt = () => 'Санузел 2 с/у и более', readyA
   };
   const chrome = {runtime:{sendMessage(message, callback) {
     if (message.type === 'apartment-agent-queue-finished') { outcomes.push(message.outcome); reasons.push(message.reason || ''); errors.push(message.error || ''); events.push({at:now,outcome:message.outcome}); callback?.({ok:true}); return; }
-    if (message.type === 'apartment-agent-availability') { availability.push(message.payload); if (respond) setTimeout(() => callback({ok:true,id:1}), responseDelay); return; }
+    if (message.type === 'apartment-agent-availability') { availability.push(message.payload); if (respond) setTimeout(() => callback(availabilityResponse), responseDelay); return; }
     const sent = JSON.parse(JSON.stringify(message.payload));
     posted.push(sent);
     if (respond) setTimeout(() => callback(posted.length <= failures
       ? {ok:false, error:failureMessage}
       : {ok:true, waiting_details:detailsMode && !sent.details_extracted, observing:true,
-        listing:{id:1,source_url:'https://krisha.kz/a/show/1001140097',assessment:{score:95}}}), responseDelay);
+        listing:{id:1,source_url:'https://krisha.kz/a/show/1001140097',assessment:{score:95}, ...(persistedBathrooms !== undefined ? {bathrooms_count:persistedBathrooms,bathrooms_count_is_lower_bound:false} : {})}}), responseDelay);
   }}};
   const context = {
     document, chrome, location:{href:'https://krisha.kz/a/show/fixture'}, URL,
@@ -121,7 +121,7 @@ delayedFinalSave.advance(27800);
 assert.equal(delayedFinalSave.posted.length,1,'the final delayed observation can start a save');
 delayedFinalSave.advance(30299);
 assert.deepEqual(delayedFinalSave.outcomes,[],'allow the save acknowledgement to arrive during the grace window');
-delayedFinalSave.advance(30600);
+delayedFinalSave.advance(31500);
 assert.deepEqual(delayedFinalSave.outcomes,['imported']);
 
 const fastPayload = {source_url:'https://krisha.kz/a/show/123', price_kzt:45000000, area_m2:100, rooms:4,
@@ -332,13 +332,114 @@ assert.deepEqual(missing.reasons, ['unreadable']);
 assert.match(missing.errors[0], /Не удалось прочитать: price_kzt/);
 assert.match(missing.errors[0], /Заголовок: 4-комнатная квартира 100 м²/);
 
+for (const title of ['Крыша', 'Krisha.kz']) {
+  const lateShell = fixture({readyAt:20000});
+  lateShell.document.title = title;
+  lateShell.run();
+  lateShell.advance(14000);
+  assert.deepEqual(lateShell.outcomes, [], `${title}: generic shell stays pending after 12 seconds`);
+  assert.equal(lateShell.posted.length, 0);
+  lateShell.advance(26000);
+  assert.equal(lateShell.posted.length, 1, `${title}: late core fields trigger one import`);
+  assert.deepEqual(lateShell.outcomes, ['imported']);
+}
+const lateShellSlowSave = fixture({readyAt:30000,responseDelay:4000});
+lateShellSlowSave.document.title = 'Крыша';
+lateShellSlowSave.run();
+lateShellSlowSave.advance(33000);
+assert.equal(lateShellSlowSave.posted.length, 1);
+assert.deepEqual(lateShellSlowSave.outcomes, [], 'wait for delayed save confirmation after late hydration');
+lateShellSlowSave.advance(37000);
+assert.deepEqual(lateShellSlowSave.outcomes, ['imported']);
+assert.equal(lateShellSlowSave.posted.length, 1, 'do not duplicate the late save');
+
+const emptyShell = fixture({readyAt:50000});
+emptyShell.document.title = 'Крыша';
+emptyShell.run();
+emptyShell.advance(31000);
+assert.deepEqual(emptyShell.outcomes, [], 'empty generic shell remains pending inside the bounded window');
+emptyShell.advance(34000);
+assert.equal(emptyShell.posted.length, 0);
+assert.deepEqual(emptyShell.outcomes, ['unknown'], 'an empty shell becomes unknown, not unavailable');
+assert.deepEqual(emptyShell.reasons, ['unreadable']);
+const shellChallenge = fixture({readyAt:50000, mainHeading:'Проверка безопасности'});
+shellChallenge.document.title = 'Крыша';
+shellChallenge.run();
+shellChallenge.advance(2000);
+assert.deepEqual(shellChallenge.outcomes, ['blocked'], 'a real challenge takes priority over shell waiting');
+assert.equal(shellChallenge.posted.length, 0);
+
+const persistedCount = fixture({persistedBathrooms:1});
+persistedCount.run();
+persistedCount.advance(14000);
+assert.match(persistedCount.messages.at(-1), /Санузлов: 1/, 'status displays the server-persisted bathroom count');
+
+const lateConfirmed = fixture({responseDelay:25000});
+lateConfirmed.run();
+lateConfirmed.advance(20000);
+assert.deepEqual(lateConfirmed.outcomes, [], 'a late in-flight response is not reported as failure');
+assert.doesNotMatch(lateConfirmed.messages.at(-1), /подтверждение сохранения не получено/);
+lateConfirmed.advance(28000);
+assert.deepEqual(lateConfirmed.outcomes, ['imported'], 'verified 201 received within the bound is acknowledged');
+assert.equal(lateConfirmed.posted.length, 1, 'delayed confirmation does not cause another request');
+assert.match(lateConfirmed.messages.at(-1), /сохранено объявление/);
+
 const noResponse = fixture({respond:false});
 noResponse.run();
 noResponse.advance(14000);
 assert.equal(noResponse.outcomes.length, 0, 'late acknowledgements get a short bounded wait');
-noResponse.advance(15200);
+noResponse.advance(44000);
+assert.deepEqual(noResponse.outcomes, [], 'wait within the bounded 45-second acknowledgement window');
+noResponse.advance(46000);
 assert.equal(noResponse.posted.length, 1, 'an in-flight request is not duplicated');
 assert.match(noResponse.messages.at(-1), /подтверждение сохранения не получено/);
+
+// A user can complete the verification without navigating to a new document.
+const transientChallenge = fixture();
+transientChallenge.document.title = 'Проверка безопасности';
+transientChallenge.run();
+transientChallenge.advance(10000);
+assert.deepEqual(transientChallenge.outcomes, ['blocked'], 'report the check once');
+assert.equal(transientChallenge.posted.length, 0, 'do not retry an import while the check is present');
+transientChallenge.document.title = '4-комнатная квартира 100 м²';
+transientChallenge.advance(20000);
+assert.equal(transientChallenge.posted.length, 1, 'a readable listing after manual verification is imported');
+assert.match(transientChallenge.messages.at(-1), /сохранено объявление/);
+assert.deepEqual(transientChallenge.outcomes, ['blocked'], 'server reconciliation owns continuation; do not repeat the old lease result');
+
+// A check lasting longer than the former 45-second deadline must start a
+// fresh observation window instead of finishing with the stale deadline.
+const recoveredAfterTwoMinutes = fixture();
+recoveredAfterTwoMinutes.document.title = 'Проверка безопасности';
+recoveredAfterTwoMinutes.run();
+recoveredAfterTwoMinutes.advance(120000);
+assert.deepEqual(recoveredAfterTwoMinutes.outcomes, ['blocked']);
+assert.equal(recoveredAfterTwoMinutes.posted.length, 0);
+recoveredAfterTwoMinutes.document.title = '4-комнатная квартира 100 м²';
+recoveredAfterTwoMinutes.advance(127000);
+assert.equal(recoveredAfterTwoMinutes.posted.length, 1, 'import resumes after a long check on the same document');
+assert.match(recoveredAfterTwoMinutes.messages.at(-1), /сохранено объявление/);
+assert.deepEqual(recoveredAfterTwoMinutes.outcomes, ['blocked'], 'the original blocked lease is not completed twice');
+
+const longChallenge = fixture();
+longChallenge.document.title = 'Проверка безопасности';
+longChallenge.run();
+longChallenge.advance(910000);
+assert.deepEqual(longChallenge.outcomes, ['blocked']);
+assert.equal(longChallenge.posted.length, 0, 'the extension must not post during a long user check');
+assert.match(longChallenge.messages.at(-1), /после завершения проверки обновите страницу/);
+
+// An old successful snapshot must not suppress a fresh post after a check.
+const challengeAfterSave = fixture();
+challengeAfterSave.run();
+challengeAfterSave.advance(1800);
+assert.equal(challengeAfterSave.posted.length, 1);
+challengeAfterSave.document.title = 'Проверка безопасности';
+challengeAfterSave.advance(3000);
+assert.deepEqual(challengeAfterSave.outcomes, ['blocked']);
+challengeAfterSave.document.title = '4-комнатная квартира 100 м²';
+challengeAfterSave.advance(11000);
+assert.equal(challengeAfterSave.posted.length, 2, 'fresh verification must produce a new server save even if fields are unchanged');
 
 for (const title of ['Проверка безопасности', 'Captcha', 'Are you a robot?', '403 Forbidden', 'HTTP 429 Too Many Requests', '468', 'Access denied']) {
   const challenge = fixture();
@@ -359,6 +460,58 @@ for (const title of ['Объявление неактуально', 'Это об
   assert.deepEqual(unavailable.outcomes, ['unknown']);
   assert.deepEqual(unavailable.reasons, ['unavailable']);
 }
+
+const notFoundHeading = () => ({textContent:'Страница не найдена',
+  parentElement:{querySelectorAll:() => [{textContent:'Ссылка не существует или объявление удалено. Можете посмотреть другие интересные предложения:'}]}});
+const confirmedNotFound = fixture({mainHeading:notFoundHeading()});
+confirmedNotFound.run(); confirmedNotFound.advance(5000);
+assert.equal(confirmedNotFound.posted.length, 0, 'recommendation or metadata must never be imported from a confirmed not-found page');
+assert.equal(confirmedNotFound.availability.length, 1);
+assert.equal(confirmedNotFound.availability[0].availability_status, 'unavailable');
+assert.deepEqual(confirmedNotFound.outcomes, ['unknown']);
+assert.deepEqual(confirmedNotFound.reasons, ['unavailable']);
+
+const directHeading = {tagName:'H1',textContent:'Страница не найдена'};
+const directBodyNotFound = fixture({mainHeading:directHeading});
+directHeading.parentElement = directBodyNotFound.document.body;
+directBodyNotFound.document.body.children = [directHeading, {tagName:'P',textContent:'Ссылка не существует или объявление удалено.'}];
+directBodyNotFound.run(); directBodyNotFound.advance(5000);
+assert.equal(directBodyNotFound.availability[0].availability_status, 'unavailable', 'direct body heading and paragraph are recognized');
+assert.deepEqual(directBodyNotFound.reasons, ['unavailable']);
+
+const wrappedForeignHeading = {tagName:'H1',textContent:'Страница не найдена'};
+const wrappedForeign = fixture({mainHeading:wrappedForeignHeading});
+wrappedForeignHeading.parentElement = wrappedForeign.document.body;
+wrappedForeign.document.body.children = [wrappedForeignHeading, {tagName:'DIV',textContent:'Ссылка не существует или объявление удалено.'}];
+wrappedForeign.run(); wrappedForeign.advance(14000);
+assert.equal(wrappedForeign.availability.length, 0, 'do not scan body descendants for messages from unrelated DOM');
+
+const rejectedNotFound = fixture({mainHeading:notFoundHeading(), availabilityResponse:{ok:false,error:'Сервер недоступен'}});
+rejectedNotFound.run(); rejectedNotFound.advance(5000);
+assert.deepEqual(rejectedNotFound.outcomes, ['error'], 'do not report unavailable without server confirmation');
+assert.deepEqual(rejectedNotFound.reasons, ['']);
+
+const unconfirmedNotFound = fixture({mainHeading:notFoundHeading(), respond:false});
+unconfirmedNotFound.run(); unconfirmedNotFound.advance(7000);
+assert.deepEqual(unconfirmedNotFound.outcomes, [], 'never report unavailable while acknowledgement is outstanding');
+unconfirmedNotFound.advance(8000);
+assert.deepEqual(unconfirmedNotFound.outcomes, ['error'], 'a missing server acknowledgement is an error');
+assert.deepEqual(unconfirmedNotFound.reasons, ['']);
+
+const descriptionNotFound = fixture({mainHeading:{...notFoundHeading(),closest:() => ({})}});
+descriptionNotFound.run(); descriptionNotFound.advance(14000);
+assert.equal(descriptionNotFound.availability.length, 0, 'a heading inside a foreign/description context is not a page-level unavailable notice');
+assert.equal(descriptionNotFound.posted.length, 1);
+
+const foreignMessage = fixture({mainHeading:{textContent:'Страница не найдена', parentElement:{querySelectorAll:() => [
+  {textContent:'Ссылка не существует или объявление удалено.',closest:() => ({})}
+]}}});
+foreignMessage.run(); foreignMessage.advance(14000);
+assert.equal(foreignMessage.availability.length, 0, 'a phrase inside recommendation or description is not page evidence');
+
+const onlyHeading = fixture({mainHeading:{textContent:'Страница не найдена'}});
+onlyHeading.run(); onlyHeading.advance(14000);
+assert.equal(onlyHeading.availability.length, 0, 'heading alone does not prove a deleted advert');
 
 const proseMention = fixture({bodySuffix:'Это старое объявление в архиве, но данная квартира доступна.'});
 proseMention.run(); proseMention.advance(14000);

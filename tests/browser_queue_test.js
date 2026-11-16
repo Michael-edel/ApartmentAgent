@@ -53,7 +53,7 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
     const body = options.body ? JSON.parse(options.body) : null;
     env.requests.push({path,body});
     let result = {job_id:env.jobId,status:env.status,current_url:env.lease?.url || null,mode:env.mode || 'bathrooms'};
-    if (env.resumeGeneration !== undefined) result.criteria = {resume_generation:env.resumeGeneration};
+    if (env.resumeGeneration !== undefined || env.verificationResumedUrl) result.criteria = {resume_generation:env.resumeGeneration ?? 0, ...(env.verificationResumedUrl ? {verification_resumed_url:env.verificationResumedUrl} : {})};
     if (path === '/claim') {
       if (!env.lease && env.status === 'running' && env.now >= (env.nextClaimAt || 0)) env.lease = env.tasks.shift() || null;
       result = {...result,task:env.lease,wait_seconds:15};
@@ -239,6 +239,34 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   assert.equal(unknown.tabs.has(unknownId), false, 'an unknown result closes its own tab when the server keeps running');
   assert.ok(unknown.alarms.has('apartment-agent-bathroom-wake'));
 
+  // The server can reconcile a stale missing-ack error with a confirmed save.
+  const reconciled = environment();
+  reconciled.completeStatus = 'running';
+  const reconciledWorker = reconciled.worker();
+  await reconciledWorker.start();
+  const reconciledId = reconciled.state().task.tab_id;
+  await reconciledWorker.finished({tab:{id:reconciledId}}, 'error', 'Подтверждение сохранения не получено');
+  assert.deepEqual(reconciled.outcomes, ['error']);
+  assert.equal(reconciled.state().halted, false, 'server running status overrides stale content error');
+  assert.equal(reconciled.state().message, '', 'do not retain stale timeout when server reconciles save');
+  assert.equal(reconciled.tabs.has(reconciledId), false);
+  assert.ok(reconciled.alarms.has('apartment-agent-bathroom-wake'));
+  reconciled.now += 30000;
+  await reconciledWorker.start();
+  assert.equal(reconciled.created.length, 2, 'reconciled job proceeds to next listing');
+
+  for (const status of ['completed', 'cancelled']) {
+    const terminal = environment();
+    terminal.completeStatus = status;
+    const terminalWorker = terminal.worker();
+    await terminalWorker.start();
+    const terminalId = terminal.state().task.tab_id;
+    await terminalWorker.finished({tab:{id:terminalId}}, 'error', 'Устаревшая ошибка');
+    assert.equal(terminal.state().halted, false);
+    assert.equal(terminal.tabs.has(terminalId), false);
+    assert.equal(terminal.alarms.has('apartment-agent-bathroom-wake'), false, `${status} must not schedule another task`);
+  }
+
   // A missing full details snapshot pauses on the server, even for outcome
   // "unknown". Preserve that page and require an explicit user continuation.
   for (const userNavigated of [false, true]) {
@@ -271,6 +299,81 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
     assert.equal(serverPaused.state().job_id, 2);
     assert.equal(serverPaused.created.length, 2);
     assert.ok(serverPaused.tabs.has(id), 'a new job must not close the preserved/user-navigated page');
+  }
+
+  // A verified 201 on the retained challenge tab wakes the next task only
+  // after the server records matching verification provenance.
+  for (const finalStatus of ['running','completed']) {
+    const verified = environment();
+    const worker = verified.worker();
+    await worker.start();
+    const originalId = verified.state().task.tab_id;
+    const originalUrl = verified.state().task.url;
+    await worker.finished({tab:{id:originalId}}, 'blocked', 'Сайт запросил проверку браузера');
+    assert.equal(verified.state().kept_tab_id, originalId);
+    verified.status = finalStatus;
+    verified.resumeGeneration = 1;
+    verified.verificationResumedUrl = originalUrl;
+    await worker.imported({tab:{id:originalId}}, {source_url:originalUrl, bathrooms_count:2});
+    assert.equal(verified.tabs.has(originalId), false, 'close only confirmed unchanged extension-owned verification tab');
+    if (finalStatus === 'running') {
+      assert.equal(verified.state().halted, false);
+      assert.equal(verified.created.length, 2, 'verified wake continues the next pending task');
+    } else assert.equal(verified.created.length, 1);
+  }
+
+  for (const finalStatus of ['running', 'completed']) {
+    const heartbeatFirst = environment();
+    const worker = heartbeatFirst.worker();
+    await worker.start();
+    const id = heartbeatFirst.state().task.tab_id, url = heartbeatFirst.state().task.url;
+    await worker.finished({tab:{id}}, 'blocked', 'Сайт запросил проверку браузера');
+    heartbeatFirst.status = finalStatus;
+    heartbeatFirst.resumeGeneration = 1;
+    heartbeatFirst.verificationResumedUrl = url;
+    await heartbeatFirst.heartbeat();
+    assert.equal(heartbeatFirst.tabs.has(id), false, 'heartbeat must clean the confirmed retained tab even before 201 hook');
+    const created = heartbeatFirst.created.length;
+    await worker.imported({tab:{id}}, {source_url:url,bathrooms_count:2});
+    assert.equal(heartbeatFirst.created.length, created, 'late verified hook cannot repeat the task');
+  }
+
+  const heartbeatNavigated = environment();
+  const heartbeatNavigatedWorker = heartbeatNavigated.worker();
+  await heartbeatNavigatedWorker.start();
+  const navigatedId = heartbeatNavigated.state().task.tab_id, navigatedUrl = heartbeatNavigated.state().task.url;
+  await heartbeatNavigatedWorker.finished({tab:{id:navigatedId}}, 'blocked', 'Сайт запросил проверку браузера');
+  heartbeatNavigated.tabs.get(navigatedId).url = 'https://example.com/user-page';
+  heartbeatNavigated.status = 'running'; heartbeatNavigated.resumeGeneration = 1;
+  heartbeatNavigated.verificationResumedUrl = navigatedUrl;
+  await heartbeatNavigated.heartbeat();
+  assert.ok(heartbeatNavigated.tabs.has(navigatedId), 'heartbeat must not close a tab navigated by user');
+
+  const sameUrlResume = environment();
+  const sameUrlWorker = sameUrlResume.worker();
+  await sameUrlWorker.start();
+  const retainedId = sameUrlResume.state().task.tab_id, retainedUrl = sameUrlResume.state().task.url;
+  await sameUrlWorker.finished({tab:{id:retainedId}}, 'blocked', 'Сайт запросил проверку браузера');
+  sameUrlResume.status = 'running'; sameUrlResume.resumeGeneration = 1;
+  sameUrlResume.verificationResumedUrl = retainedUrl;
+  sameUrlResume.tasks = [{id:10,url:retainedUrl,lease_token:'same-url-new-lease'}];
+  await sameUrlWorker.imported({tab:{id:retainedId}}, {source_url:retainedUrl,bathrooms_count:2});
+  assert.equal(sameUrlResume.state().task.tab_id, retainedId, 'keep existing same-URL resumed lease behavior');
+  assert.ok(sameUrlResume.tabs.has(retainedId));
+
+  for (const scenario of ['different-marker', 'different-tab', 'user-navigated', 'no-generation']) {
+    const guarded = environment();
+    const worker = guarded.worker();
+    await worker.start();
+    const id = guarded.state().task.tab_id, url = guarded.state().task.url;
+    await worker.finished({tab:{id}}, 'blocked', 'Сайт запросил проверку браузера');
+    guarded.status = 'running'; guarded.resumeGeneration = scenario === 'no-generation' ? 0 : 1;
+    guarded.verificationResumedUrl = scenario === 'different-marker' ? 'https://krisha.kz/a/show/999' : url;
+    if (scenario === 'user-navigated') guarded.tabs.get(id).url = 'https://example.com/user-page';
+    await worker.imported({tab:{id:scenario === 'different-tab' ? 999 : id}}, {source_url:url,bathrooms_count:2});
+    assert.equal(guarded.created.length, 1, scenario);
+    assert.ok(guarded.tabs.has(id), `${scenario}: retained tab must not be closed`);
+    assert.equal(guarded.state().halted, true, scenario);
   }
 
   // CAPTCHA/redirect is a human handoff. No automatic continuation or tab close.
@@ -516,6 +619,8 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   let apiOrigin = 'http://localhost:8000';
   let importRequests = 0;
   let availabilityRequests = 0;
+  const availabilityPayloads = [];
+  let queueNeverCompletes = false;
   const importHooks = [];
   const payload = {source_url:'https://www.krisha.kz/a/show/123/?from=search',bathrooms_count:2};
   const listing = {id:7,source:'browser',source_url:'https://krisha.kz/a/show/123',bathrooms_count:2,assessment:{score:95}};
@@ -524,7 +629,9 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   vm.runInNewContext(fs.readFileSync('browser-extension/background.js', 'utf8'), {
     importScripts() {}, URL,
     ApartmentAgentBathroomQueue:{canonical:invalidWorker.canonical,async imported(sender,data) {
-      importHooks.push({sender,payload:data}); return {waiting_details:true,observing:true};
+      importHooks.push({sender,payload:data});
+      if (queueNeverCompletes) return await new Promise(() => {});
+      return {waiting_details:true,observing:true};
     },async kick(){},async finished(){}},
     chrome:{
       runtime:{onInstalled:{addListener(){}},onMessage:{addListener(handler){backgroundListener = handler;}}},
@@ -533,7 +640,7 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
     },
     async fetch(url, options) {
       if (url.endsWith('/api/v1/listings/availability')) {
-        assert.equal(JSON.parse(options.body).availability_status, 'archived');
+        availabilityPayloads.push(JSON.parse(options.body));
         assert.equal(options.redirect,'manual');
         availabilityRequests += 1;
         if (serverReply instanceof Error) throw serverReply;
@@ -552,9 +659,8 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   assert.equal(ordinaryResponse.ok, true);
   assert.equal(ordinaryResponse.listing.id, 7);
   assert.equal(importHooks[0].sender.tab.id, 77);
-  assert.equal(importHooks[0].payload,payload,'queue observes only the successfully posted extraction');
-  assert.equal(ordinaryResponse.waiting_details,true);
-  assert.equal(ordinaryResponse.observing,true);
+  assert.equal(importHooks[0].payload.source_url,payload.source_url,'queue observes only the successfully posted extraction');
+  assert.equal(importHooks[0].payload.bathrooms_count,listing.bathrooms_count, 'queue sees the persisted bathroom count');
   serverReply = jsonResponse({...listing,assessment:{score:0}});
   const duplicateUpdate = await importListing();
   assert.equal(duplicateUpdate.listing.id,7,'duplicate updates return the existing local card');
@@ -596,12 +702,34 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   assert.equal((await reportArchive()).ok,false,'an archive response for a different advert is rejected');
   assert.equal((await reportArchive('https://krisha.kz/a/show/456')).ok,false,'archive observation must match the sender tab');
   assert.equal(availabilityRequests,3);
+  const unavailablePayload = {source_url:'https://krisha.kz/a/show/123?x=1',availability_status:'unavailable'};
+  serverReply = jsonResponse({id:7,source_url:'https://krisha.kz/a/show/123',availability_status:'unavailable'},200);
+  assert.equal((await reportArchive('https://krisha.kz/a/show/123',unavailablePayload)).ok,true);
+  assert.equal(availabilityPayloads.at(-1).availability_status,'unavailable');
+  serverReply = jsonResponse({id:null,source_url:'https://krisha.kz/a/show/123',availability_status:'unavailable'},200);
+  assert.equal((await reportArchive('https://krisha.kz/a/show/123',unavailablePayload)).ok,true);
+  serverReply = jsonResponse({id:7,source_url:'https://krisha.kz/a/show/123',availability_status:'archived'},200);
+  assert.equal((await reportArchive('https://krisha.kz/a/show/123',unavailablePayload)).ok,false, 'wrong availability status must not be acknowledged');
+  serverReply = jsonResponse({id:7,source_url:'https://krisha.kz/a/show/456',availability_status:'unavailable'},200);
+  assert.equal((await reportArchive('https://krisha.kz/a/show/123',unavailablePayload)).ok,false, 'wrong advert must not be acknowledged');
+  assert.equal((await reportArchive('https://krisha.kz/a/show/456',unavailablePayload)).ok,false, 'sender tab must match the advert');
+  serverReply = new Response('<html>error</html>', {status:200,headers:{'Content-Type':'text/html'}});
+  assert.equal((await reportArchive('https://krisha.kz/a/show/123',unavailablePayload)).ok,false, 'an HTML error page is not a confirmation');
   const requestsBeforeInvalidInput = importRequests;
   assert.match((await importListing({...payload,source_url:'https://example.com/a/show/123'})).error,/номер открытого объявления/);
   apiOrigin = 'http://localhost:8000/?wrong';
   assert.match((await importListing()).error,/Укажите адрес ApartmentAgent/);
   assert.equal(importRequests,requestsBeforeInvalidInput);
   assert.equal(importHooks.length,3,'invalid confirmations cannot notify the queue about a save');
+  apiOrigin = 'http://localhost:8000';
+  serverReply = jsonResponse({...listing,bathrooms_count:3});
+  queueNeverCompletes = true;
+  const immediate = await Promise.race([importListing(), new Promise((_, reject) => setTimeout(() => reject(Error('Queue blocked save acknowledgement')), 200))]);
+  assert.equal(immediate.ok, true, 'a valid 201 acknowledges independently of delayed queue bookkeeping');
+  assert.equal(immediate.listing.id, 7);
+  assert.equal(importHooks.at(-1).payload.bathrooms_count, 3, 'queue uses server-persisted count');
+  queueNeverCompletes = false;
+
 
   const details = environment();
   details.mode = 'details';
@@ -617,6 +745,16 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   await detailsWorker.finished({tab:{id:detailId}},'imported');
   assert.deepEqual(details.outcomes,['imported']);
   assert.equal(details.tabs.has(detailId),false);
+
+  const incompleteDetails = environment();
+  incompleteDetails.mode = 'details';
+  const incompleteDetailsWorker = incompleteDetails.worker();
+  await incompleteDetailsWorker.start();
+  const incompleteDetailsId = incompleteDetails.state().task.tab_id;
+  await incompleteDetailsWorker.imported({tab:{id:incompleteDetailsId}}, {bathrooms_count:null,details_extracted:false});
+  await incompleteDetailsWorker.finished({tab:{id:incompleteDetailsId}}, 'unknown');
+  assert.deepEqual(incompleteDetails.outcomes, ['unknown']);
+  assert.equal(incompleteDetails.state().unreadable_streak, 1, 'details mode detects incomplete saved data without a queue-mode acknowledgement');
 
   const detailsUnknownBath = environment();
   detailsUnknownBath.mode = 'details';

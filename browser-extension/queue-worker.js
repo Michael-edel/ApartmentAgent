@@ -114,9 +114,12 @@
     const task = state.task;
     if (!task) return;
     const result = await api('/complete', {worker_id:state.worker_id, task_id:task.id, lease_token:task.lease_token, outcome, ...(error ? {error} : {})});
+    if (!['running', 'paused', 'completed', 'cancelled'].includes(result.status) || result.job_id !== state.job_id) {
+      throw new Error('Сервер вернул неподходящий статус завершения очереди');
+    }
     state.task = null;
-    state.message = result.message || error;
-    if (result.status === 'paused' || outcome === 'blocked' || outcome === 'error') {
+    state.message = result.message || (result.status === 'paused' ? error : '');
+    if (result.status === 'paused') {
       // The server can also pause an unknown details result. Keep its page for
       // the user instead of closing the evidence and scheduling the next task.
       state.halted = true;
@@ -127,9 +130,12 @@
       await chrome.alarms.clear(WAKE);
       return;
     }
+    state.halted = false;
+    state.next_wake = 0;
     await save(); // Clear ownership before tabs.onRemoved can run.
     await closeOwned(task);
-    await schedule(30000);
+    if (result.status === 'running') await schedule(30000);
+    else await chrome.alarms.clear(WAKE);
   };
   const openTask = async () => {
     const task = state.task;
@@ -155,12 +161,13 @@
     }
     await scheduleAt(task.started_at + TIMEOUT);
   };
-  const poll = async () => {
+  const poll = async (confirmedStatus = null) => {
     // A failed read confirms neither a state change nor an operator resume.
     // Leave the durable state untouched and retry on the next heartbeat.
-    const status = await api().catch(() => null);
+    const status = confirmedStatus || await api().catch(() => null);
     if (!status) return;
     const sameJob = status.job_id === state.job_id;
+    try {
     const reportedGeneration = status.criteria?.resume_generation;
     const resumeGeneration = Number.isSafeInteger(reportedGeneration) && reportedGeneration >= 0 ? reportedGeneration : 0;
     const seenGeneration = sameJob ? state.resume_generation ?? 0 : 0;
@@ -254,6 +261,20 @@
     await save();
     if (reuseAfterExplicitResume) await chrome.tabs.reload(kept.id);
     await openTask();
+    } finally {
+      // A heartbeat may observe the verified resume before the 201 callback.
+      // Clean up on either path, only after a same-job server marker and only
+      // if the retained tab was not reused by a current lease.
+      const id = state.kept_tab_id, url = state.kept_tab_url;
+      const marker = canonical(status.criteria?.verification_resumed_url);
+      if (sameJob && id && url && marker === url && ['running', 'completed'].includes(status.status)
+          && (status.status === 'completed' || !state.halted) && state.task?.tab_id !== id) {
+        state.kept_tab_id = null;
+        state.kept_tab_url = null;
+        await save();
+        await closeOwned({tab_id:id, url});
+      }
+    }
   };
   const senderIsTask = sender => state.task && sender?.tab?.id === state.task.tab_id;
   const apiForBridge = sender => {
@@ -268,7 +289,20 @@
       await poll();
     }),
     imported: (sender, payload) => run(async () => {
-      if (!senderIsTask(sender)) return;
+      if (!senderIsTask(sender)) {
+        // A challenge completed in our retained tab. Only a verified 201 can
+        // reach this hook; the server, not the page, decides if it may resume.
+        const id = sender?.tab?.id, url = canonical(payload?.source_url);
+        if (!id || id !== state.kept_tab_id || !url || url !== state.kept_tab_url) return;
+        const tab = await getTab(id);
+        if (!tab || canonical(effectiveURL(tab)) !== url) return;
+        const status = await api().catch(() => null);
+        const marker = canonical(status?.criteria?.verification_resumed_url);
+        if (!status || status.job_id !== state.job_id || marker !== url
+          || !['running', 'completed'].includes(status.status)) return;
+        await poll(status);
+        return;
+      }
       const tab = await getTab(state.task.tab_id);
       if (!tab || canonical(effectiveURL(tab)) !== state.task.url) { await complete('blocked', 'Адрес вкладки изменился во время импорта'); return; }
       state.task.last_imported = {
@@ -293,6 +327,12 @@
         }
       }
       if (outcome === 'unknown') {
+        // A confirmed save can be acknowledged before serialized queue state
+        // is ready; the lease's actual mode remains authoritative here.
+        if (state.task.mode === 'details' && state.task.last_imported && !state.task.last_imported.details_extracted && reason !== 'unavailable') {
+          reason = 'unreadable';
+          error = 'Не удалось прочитать полный блок характеристик, описания или автора объявления';
+        }
         state.unreadable_streak = reason === 'unreadable' ? (state.unreadable_streak || 0) + 1 : 0;
         await save();
         if (state.unreadable_streak >= 3) {

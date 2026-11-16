@@ -1,9 +1,9 @@
-const CACHE = 'apartment-agent-v80';
+const CACHE = 'apartment-agent-v81';
 const ASSETS = [
-  '/', '/static/styles.css?v=159', '/static/app.js?v=183', '/static/icon.svg', '/manifest.webmanifest',
+  '/', '/static/styles.css?v=159', '/static/app.js?v=185', '/static/icon.svg', '/manifest.webmanifest',
   '/static/icon-180.png', '/static/icon-192.png', '/static/icon-512.png',
   '/static/vendor/leaflet/leaflet.css', '/static/vendor/leaflet/leaflet.js',
-  '/static/listing-map.css?v=4', '/static/listing-map.js?v=7',
+  '/static/listing-map.css?v=4', '/static/listing-map.js?v=8',
   '/static/listing-workflow.css?v=1', '/static/listing-workflow.js?v=1',
   '/static/listing-tracking.js?v=1',
   '/static/listing-inspection.css?v=1', '/static/listing-inspection.js?v=1',

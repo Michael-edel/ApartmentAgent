@@ -290,15 +290,17 @@ function renderBathroomCheck(state) {
   }
   const phase = running && checked === 0 && !state.current_url ? 'Ожидается подключение расширения' : running && detailsMode ? 'Идёт дополнение карточек' : labels[state.status];
   if (bathroomCheckMessage) {
-    const statusText = `${phase || 'Состояние проверки неизвестно'}.${state.message ? ` ${state.message}` : ''}`;
+    const statusText = state.verification_url
+      ? 'Krisha запросила проверку браузера. Очередь продолжится после сохранения этой карточки.'
+      : `${phase || 'Состояние проверки неизвестно'}.${state.message ? ` ${state.message}` : ''}`;
     bathroomCheckMessage.textContent = bathroomCheckBusy && bathroomCheckFeedback
       ? bathroomCheckFeedback : [statusText, bathroomCheckFeedback].filter(Boolean).join(' ');
   }
   if (bathroomCheckCurrent) {
-    const currentUrl = safeExternalUrl(state.current_url);
+    const currentUrl = safeExternalUrl(state.current_url || state.verification_url);
     bathroomCheckCurrent.hidden = !currentUrl;
     bathroomCheckCurrent.innerHTML = currentUrl
-      ? `Текущее объявление: <a href="${escapeHtml(currentUrl)}" target="_blank" rel="noopener noreferrer">Открыть в новой вкладке →</a>` : '';
+      ? `${state.verification_url ? 'Объявление на проверке' : 'Текущее объявление'}: <a href="${escapeHtml(currentUrl)}" target="_blank" rel="noopener noreferrer">Открыть в новой вкладке →</a>` : '';
   }
   if (bathroomCheckButtons.start) {
     bathroomCheckButtons.start.hidden = active;
@@ -320,9 +322,10 @@ function updateBathroomCheck(state) {
   if (!bathroomCheckBusy && (state.job_id !== bathroomCheckState?.job_id || state.status !== bathroomCheckState?.status)) {
     bathroomCheckFeedback = '';
   }
-  const nextSignature = `${state.job_id || ''}:${queueCount(state.checked)}`;
+  const nextSignature = `${state.job_id || ''}:${queueCount(state.checked)}:${queueCount(state.enriched)}:${queueCount(state.unavailable)}`;
   const changed = bathroomCheckSignature !== null && bathroomCheckSignature !== nextSignature;
   bathroomCheckSignature = nextSignature;
+  window.ApartmentAgentMap?.setUnavailableUrls?.(state.unavailable_urls);
   renderBathroomCheck(state);
   if (changed && queueCount(state.checked) > 0 && document.visibilityState !== 'hidden') {
     void Promise.all([loadListings(), loadSearchResults(), loadSearchStatus()]);

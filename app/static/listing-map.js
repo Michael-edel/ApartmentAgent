@@ -2,6 +2,7 @@
   'use strict';
   const cityCenters = {astana:[51.128,71.43], ekibastuz:[51.718,75.322]};
   let active = null;
+  let unavailableUrls = new Set();
   const fmt = new Intl.NumberFormat('ru-RU');
   const node = (tag, text, className) => {
     const element = document.createElement(tag);
@@ -27,6 +28,25 @@
     && item.latitude >= -90 && item.latitude <= 90 && item.longitude >= -180 && item.longitude <= 180;
   const matchesSource = (item, source) => source === 'all' || item.cross_platform === true
     || (source !== 'cross' && item.platform === source);
+  const urlKey = raw => {
+    try {
+      const url = new URL(raw);
+      const host = url.hostname.toLowerCase();
+      if (host === 'krisha.kz' || host === 'www.krisha.kz') return `https://krisha.kz${url.pathname.replace(/\/$/, '')}`;
+      if (host === 'olx.kz' || host === 'www.olx.kz') return `https://www.olx.kz${url.pathname.replace(/^\/kk\//, '/').replace(/\/$/, '')}`;
+      return `${url.origin}${url.pathname.replace(/\/$/, '')}`;
+    } catch (_) { return String(raw || '').trim(); }
+  };
+
+  function setUnavailableUrls(urls) {
+    if (!Array.isArray(urls)) return;
+    unavailableUrls = new Set(urls.map(urlKey));
+    if (!active) return;
+    const changed = active.unavailable.size !== unavailableUrls.size
+      || [...unavailableUrls].some(url => !active.unavailable.has(url));
+    active.unavailable = new Set(unavailableUrls);
+    if (changed) active.refreshUnavailable?.();
+  }
 
   function open(options = {}) {
     if (active) active.dialog.close();
@@ -75,7 +95,7 @@
     }
     content.append(status, alert, controls, legend, canvas, list, missingList); shell.append(header, content); dialog.append(shell); document.body.append(dialog);
     const controller = new AbortController();
-    const state = {dialog, map: null, controller}; active = state;
+    const state = {dialog, map: null, controller, unavailable:new Set(unavailableUrls)}; active = state;
     let timedOut = false;
     const timeout = window.setTimeout(() => { timedOut = true; controller.abort(); }, 10000);
     dialog.addEventListener('close', () => {
@@ -120,8 +140,8 @@
         const cityCenter = cityCenters[data.city] || cityCenters[options.city] || cityCenters.astana;
         const filterItems = () => {
           const source = sourceSelect.value;
-          items = allItems.filter(item => matchesSource(item, source));
-          const filteredMissing = allMissing.filter(item => matchesSource(item, source));
+          items = allItems.filter(item => !state.unavailable.has(urlKey(item.source_url)) && matchesSource(item, source));
+          const filteredMissing = allMissing.filter(item => !state.unavailable.has(urlKey(item.source_url)) && matchesSource(item, source));
           missing = filteredMissing.length;
           missingList.hidden = !missing;
           missingLabel.textContent = `Объявления без координат: ${fmt.format(missing)}`;
@@ -138,6 +158,7 @@
           canvas.hidden = true; list.open = true;
           showAlert('Не удалось загрузить модуль карты. Квартиры с координатами доступны в списке.');
           const applyFilter = () => { filterItems(); updateList(items); };
+          state.refreshUnavailable = applyFilter;
           sourceSelect.addEventListener('change', applyFilter);
           applyFilter();
           return;
@@ -193,6 +214,7 @@
           fitAll();
           update();
         };
+        state.refreshUnavailable = () => { filterItems(); renderMarkers(); update(); };
         sourceSelect.addEventListener('change', applyFilter);
         map.on('moveend', update);
         applyFilter();
@@ -206,5 +228,5 @@
       })
       .finally(() => window.clearTimeout(timeout));
   }
-  window.ApartmentAgentMap = {open};
+  window.ApartmentAgentMap = {open, setUnavailableUrls};
 })();

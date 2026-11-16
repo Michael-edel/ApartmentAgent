@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import re
 import secrets
@@ -46,12 +47,21 @@ async def _allow_control_origin(request: Request) -> None:
 router = APIRouter(prefix="/api/v1/search/bathroom-check", tags=["bathroom-check"],
                    dependencies=[Depends(_allow_control_origin)])
 _queue_lock = asyncio.Lock()
+_logger = logging.getLogger(__name__)
 LEASE_SECONDS = 120
 GAP_SECONDS = 15
 DETAILS_EXTENSION_RELEASE = "0.4.8"
 # Changing extraction rules can justify one fresh pass over incomplete cards.
 PRIORITY_DETAILS_REVISION = 3
 _finished = {"confirmed", "rejected", "unknown", "failed", "expired"}
+_browser_verification = "Сайт запросил проверку браузера"
+_manual_pause = "Проверка приостановлена пользователем."
+_krisha_archived = "Объявление в архиве Krisha и может быть неактуальным"
+_krisha_unavailable = "Объявление Krisha недоступно или не найдено"
+_save_timeout_messages = {
+    ("error", "Подтверждение сохранения не получено"),
+    ("blocked", "Страница не подтвердила импорт за 60 секунд. Проверьте вкладку вручную."),
+}
 
 
 def _now() -> datetime:
@@ -101,6 +111,22 @@ async def _job(session: AsyncSession, control: BathroomCheckControl) -> Bathroom
 
 async def _tasks(session: AsyncSession, job: BathroomCheckJob) -> list[BathroomCheckTask]:
     return list((await session.scalars(select(BathroomCheckTask).where(BathroomCheckTask.job_id == job.id).order_by(BathroomCheckTask.id))).all())
+
+
+def _clear_browser_verification(job: BathroomCheckJob) -> None:
+    job.criteria = {key: value for key, value in job.criteria.items()
+                    if key not in {"verification_task_id", "verification_resumed_url"}}
+
+
+def _wake_browser_worker(job: BathroomCheckJob) -> None:
+    job.criteria = {**job.criteria, "resume_generation": job.criteria.get("resume_generation", 0) + 1}
+
+
+def _record_saved_task(task: BathroomCheckTask, count: int | None) -> None:
+    task.status = "unknown" if count is None else "confirmed" if count >= 2 else "rejected"
+    task.error = None
+    task.last_outcome = "imported"
+
 
 
 async def _candidates(session: AsyncSession, criteria: dict) -> list[tuple[str, int | None]]:
@@ -243,6 +269,7 @@ async def _status(session: AsyncSession, job: BathroomCheckJob | None) -> dict:
     tasks = await _tasks(session, job) if job else []
     counts = {key: sum(task.status == key for task in tasks) for key in _finished}
     leased = next((task for task in tasks if task.status == "leased"), None)
+    verification = next((task for task in tasks if task.id == criteria.get("verification_task_id")), None)
     saved = {}
     for row in (await session.execute(select(Listing.source_url, Listing.details_imported_at, *_priority_columns)
                                       .where(Listing.details_imported_at.is_not(None)))).all():
@@ -256,15 +283,19 @@ async def _status(session: AsyncSession, job: BathroomCheckJob | None) -> dict:
     detail_fields = {"complete": sum(not missing for missing in snapshots),
                      **{f"missing_{name}": sum(name in missing for missing in snapshots)
                         for name in ("repair", "mortgage", "author")}}
+    unavailable_tasks = [task.url for task in tasks if task.last_outcome == "unavailable"]
+    confirmed_unavailable = await unavailable_urls(session) if unavailable_tasks else set()
     return {"job_id": job.id if job else None, "status": job.status if job else "idle",
             "total": len(tasks), "pending": sum(task.status in {"pending", "leased"} for task in tasks),
             "checked": sum(counts.values()), "confirmed": counts["confirmed"],
             "rejected": counts["rejected"], "unknown": counts["unknown"],
             "failed": counts["failed"] + counts["expired"], "current_url": leased.url if leased else None,
+            "verification_url": verification.url if job and job.status == "paused" and verification else None,
             "message": job.message if job else None, "criteria": criteria, "candidate_count": candidates,
             "mode": mode, "details_candidate_count": details_candidates, "enriched": len(snapshots),
             "detail_fields": detail_fields,
-            "unavailable": sum(task.last_outcome == "unavailable" for task in tasks)}
+            "unavailable": len(unavailable_tasks),
+            "unavailable_urls": [url for url in unavailable_tasks if url in confirmed_unavailable]}
 
 
 @router.get("")
@@ -277,7 +308,9 @@ async def bathroom_check_status(background_tasks: BackgroundTasks = None,
     async with _queue_lock, SessionLocal() as session, session.begin():
         control = await _control(session)
         job = await _job(session, control)
-        await _expire(session, job, _now())
+        now = _now()
+        await _expire(session, job, now)
+        await _reconcile_browser_verification(session, job, now)
         await session.flush()
         return await _status(session, job)
 
@@ -337,18 +370,26 @@ async def _change(action: str) -> dict:
         await _expire(session, job, _now())
         if job and job.status in {"running", "paused"}:
             if action == "pause":
-                job.status, job.message = "paused", "Проверка приостановлена пользователем."
+                _clear_browser_verification(job)
+                job.status, job.message = "paused", _manual_pause
             elif action == "resume" and job.status == "paused":
+                _clear_browser_verification(job)
                 tasks = await _tasks(session, job)
                 retry = next((task for task in reversed(tasks)
-                              if task.status == "expired" or (task.status == "failed" and task.last_outcome == "blocked")), None)
+                              if task.status == "expired" or (task.status == "failed" and (
+                                  task.last_outcome == "blocked" or
+                                  (task.last_outcome, task.error) in _save_timeout_messages))), None)
                 if retry is not None:
-                    count = await _stored_count(session, retry.url)
+                    ack_failure = (retry.last_outcome, retry.error) in _save_timeout_messages
+                    evidence = await _fresh_browser_save(session, retry, job) if ack_failure else None
+                    count = evidence[0] if evidence is not None else await _stored_count(session, retry.url)
                     details_ready = await _details_ready(session, retry.url, retry.claimed_at) if job.criteria.get("mode") == "details" else True
-                    if details_ready and (count is not None or job.criteria.get("mode") == "details"):
+                    if (ack_failure and evidence is not None) or (not ack_failure and details_ready and (count is not None or job.criteria.get("mode") == "details")):
                         retry.status = "unknown" if count is None else "confirmed" if count >= 2 else "rejected"
                         retry.error = None
-                    elif retry.attempts < 2:
+                        if ack_failure:
+                            retry.last_outcome = 'imported'
+                    elif retry.last_outcome != "error" and retry.attempts < 2:
                         # Only an explicit user resume permits one retry; a
                         # browser poll or restarted service cannot do this.
                         retry.status = "pending"
@@ -356,12 +397,10 @@ async def _change(action: str) -> dict:
                         retry.completed_at = retry.error = None
                 job.status = "running" if any(task.status in {"pending", "leased"} for task in tasks) else "completed"
                 if job.status == "running":
-                    # A browser can miss the one-time notification from the dashboard.
-                    # Record the explicit resume for its next status poll.
-                    generation = job.criteria.get("resume_generation", 0)
-                    job.criteria = {**job.criteria, "resume_generation": generation + 1}
+                    _wake_browser_worker(job)
                 job.message = None
             elif action == "cancel":
+                _clear_browser_verification(job)
                 job.status, job.message = "cancelled", "Проверка остановлена пользователем."
                 for task in await _tasks(session, job):
                     if task.status == "leased":
@@ -531,6 +570,110 @@ async def _details_ready(session: AsyncSession, url: str, since: datetime | None
                and (not require_priority_fields or not _missing_priority_details(row)) for row in rows)
 
 
+async def _fresh_browser_save(session: AsyncSession, task: BathroomCheckTask,
+                              job: BathroomCheckJob, *, since: datetime | None = None) -> tuple[int | None] | None:
+    """Evidence from the same saved card after this lease, never a discovery snippet."""
+    since = since or task.claimed_at
+    if since is None:
+        return None
+    canonical = normalize_krisha_listing_url(task.url)
+    if not canonical:
+        return None
+    rows = (await session.execute(select(Listing.source_url, Listing.source, Listing.last_imported_at,
+                Listing.details_imported_at, Listing.bathrooms_count)
+            .where(Listing.source_url.contains(canonical.removeprefix('https://krisha.kz'), autoescape=True)))).all()
+    fresh = [row for row in rows if normalize_krisha_listing_url(row.source_url) == canonical
+             and row.source == 'browser' and row.last_imported_at is not None
+             and _aware(row.last_imported_at) >= _aware(since)
+             and (job.criteria.get('mode') != 'details' or row.details_imported_at is not None
+                  and _aware(row.details_imported_at) >= _aware(since))]
+    if not fresh:
+        return None
+    latest = max(fresh, key=lambda row: _aware(row.last_imported_at))
+    return (latest.bathrooms_count,)
+
+
+async def _confirmed_unavailability_after(session: AsyncSession, url: str, since: datetime,
+                                          observed_at: datetime | None = None,
+                                          observed_state: str | None = None) -> str | None:
+    path = url.removeprefix("https://krisha.kz")
+    listing = select(Listing.source_url, Listing.source_archived_at, Listing.source_unavailable_at, Listing.source_availability_observed_at)
+    discovery = select(SearchResult.url, SearchResult.source_archived_at, SearchResult.source_unavailable_at, SearchResult.source_availability_observed_at)
+    rows = (await session.execute(
+        listing.where(Listing.source_url.contains(path, autoescape=True)).union_all(
+            discovery.where(SearchResult.url.contains(path, autoescape=True)))
+    )).all()
+    dated = [(_aware(seen), 'archived' if archived is not None else 'unavailable' if unavailable is not None else 'active')
+             for candidate, archived, unavailable, seen in rows
+             if normalize_krisha_listing_url(candidate) == url and seen is not None]
+    if dated:
+        newest = max(seen for seen, _ in dated)
+        states = {state for seen, state in dated if seen == newest}
+        return next(iter(states)) if newest >= _aware(since) and len(states) == 1 and 'active' not in states else None
+    # An explicit browser report can be the only evidence for a never-saved advert.
+    if observed_state in {'archived', 'unavailable'} and observed_at is not None and _aware(observed_at) >= _aware(since):
+        return observed_state
+    return None
+
+
+async def _reconcile_browser_verification(session: AsyncSession, job: BathroomCheckJob | None,
+                                          now: datetime, *, source_url: str | None = None,
+                                          archive_observed_at: datetime | None = None,
+                                          unavailable_observed_at: datetime | None = None) -> None:
+    if job is None or job.status != "paused" or not (task_id := job.criteria.get("verification_task_id")):
+        return
+    task = await session.get(BathroomCheckTask, task_id)
+    if (task is None or task.job_id != job.id or task.status != "failed" or task.last_outcome != "blocked"
+            or task.error != _browser_verification or task.completed_at is None
+            or source_url is not None and task.url != source_url):
+        return
+    state = await _confirmed_unavailability_after(session, task.url, task.completed_at,
+        archive_observed_at or unavailable_observed_at,
+        'archived' if archive_observed_at is not None else 'unavailable' if unavailable_observed_at is not None else None)
+    if state:
+        task.status, task.last_outcome, task.error = "unknown", "unavailable", (_krisha_archived if state == 'archived' else _krisha_unavailable)
+    else:
+        saved = await _fresh_browser_save(session, task, job, since=task.completed_at)
+        if saved is None:
+            return
+        _record_saved_task(task, saved[0])
+    task.completed_at = now
+    await session.flush()
+    tasks = await _tasks(session, job)
+    _clear_browser_verification(job)
+    job.criteria = {**job.criteria, "verification_resumed_url": task.url}
+    if any(task.status in {"pending", "leased"} for task in tasks):
+        job.status, job.message = "running", None
+        _wake_browser_worker(job)
+    else:
+        job.status, job.message = "completed", "Проверка завершена."
+
+
+async def resume_after_browser_import(source_url: str, *, archive_observed_at: datetime | None = None) -> None:
+    """Reconcile a committed browser observation with the current verification pause."""
+    try:
+        async with _queue_lock, SessionLocal() as session, session.begin():
+            control = await _control(session)
+            job = await _job(session, control)
+            await _reconcile_browser_verification(session, job, _now(), source_url=source_url,
+                                                  archive_observed_at=archive_observed_at)
+    except Exception:
+        # The card is committed. The next status request can reconcile the pause.
+        _logger.exception("Could not reconcile the browser verification pause")
+
+
+async def resume_after_browser_unavailable(source_url: str, *, observed_at: datetime) -> None:
+    """Reconcile an authoritative browser-unavailable report after its commit."""
+    try:
+        async with _queue_lock, SessionLocal() as session, session.begin():
+            control = await _control(session)
+            job = await _job(session, control)
+            await _reconcile_browser_verification(session, job, _now(), source_url=source_url,
+                                                  unavailable_observed_at=observed_at)
+    except Exception:
+        _logger.exception("Could not reconcile the browser unavailable observation")
+
+
 @router.post("/complete")
 async def bathroom_check_complete(request: CompleteRequest, background_tasks: BackgroundTasks = None) -> dict:
     async with _queue_lock, SessionLocal() as session, session.begin():
@@ -546,31 +689,45 @@ async def bathroom_check_complete(request: CompleteRequest, background_tasks: Ba
             return await _status(session, job)
         if task.status != "leased":
             raise HTTPException(409, "Время проверки истекло. Автоматический повтор отключён.")
-        if request.outcome in {"blocked", "error"}:
+        recovered = (await _fresh_browser_save(session, task, job)
+                     if (request.outcome, request.error) in _save_timeout_messages else None)
+        effective_outcome = 'imported' if recovered is not None else request.outcome
+        if recovered is not None:
+            _record_saved_task(task, recovered[0])
+        elif request.outcome in {"blocked", "error"}:
             task.status, task.error = "failed", request.error or "Источник запросил проверку или браузер не смог прочитать объявление."
-            job.status, job.message = "paused", "Проверка приостановлена: " + task.error
+            if job.status != "paused" or job.message != _manual_pause:
+                _clear_browser_verification(job)
+                if request.outcome == "blocked" and request.error == _browser_verification:
+                    job.criteria = {**job.criteria, "verification_task_id": task.id}
+                job.status, job.message = "paused", "Проверка приостановлена: " + task.error
         elif request.outcome == "unavailable":
             task.status, task.error = "unknown", request.error or "Объявление снято с публикации."
-            if request.error == "Объявление в архиве Krisha и может быть неактуальным":
+            if request.error == _krisha_archived:
                 await set_source_availability(session, task.url, state="archived", observed_at=now)
         else:
             count = await _stored_count(session, task.url)
             if job.criteria.get("mode") == "details" and not await _details_ready(session, task.url, task.claimed_at):
                 count = None
-                job.status = "paused"
-                job.message = "Подробные данные объявления не получены. Проверьте расширение и нажмите «Продолжить»."
-                if request.error:
-                    job.message += " Причина: " + request.error[:500]
+                if job.status != "paused" or job.message != _manual_pause:
+                    job.status = "paused"
+                    job.message = "Подробные данные объявления не получены. Проверьте расширение и нажмите «Продолжить»."
+                    if request.error:
+                        job.message += " Причина: " + request.error[:500]
             task.status = "unknown" if count is None else "confirmed" if count >= 2 else "rejected"
             task.error = request.error if task.status == "unknown" else None
         task.completed_at = now
-        task.last_outcome = ("unknown" if request.outcome == "imported" and job.status == "paused" else request.outcome)
+        task.last_outcome = ("unknown" if effective_outcome == "imported" and job.status == "paused" and recovered is None else effective_outcome)
         job.next_claim_at = now + timedelta(seconds=GAP_SECONDS)
         await session.flush()
         tasks = await _tasks(session, job)
         if job.status == "running" and not any(task.status in {"pending", "leased"} for task in tasks):
             job.status, job.message = "completed", "Проверка завершена."
-        if background_tasks is not None and request.outcome in {"blocked", "error", "unavailable"}:
+        elif job.status == "running" and recovered is not None:
+            # Older workers stop locally after sending an error even if the
+            # server recovered the task. Wake them on the next status poll.
+            _wake_browser_worker(job)
+        if background_tasks is not None and recovered is None and request.outcome in {"blocked", "error", "unavailable"}:
             journal_status = {"blocked": "blocked", "error": "error", "unavailable": "skipped"}[request.outcome]
             verification = any(term in (request.error or "").casefold() for term in
                                ("проверку браузера", "проверку безопасности", "captcha"))

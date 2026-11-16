@@ -417,7 +417,16 @@ class ListingArchived(ListingImportError):
 
 
 class ListingUnavailable(ListingImportError):
-    """The canonical advert URL returned 404 or 410; the reason is unknown."""
+    """Krisha explicitly reports that the canonical advert URL is unavailable."""
+
+
+def _has_not_found_notice(parser: _BathroomFieldHTMLParser) -> bool:
+    heading = next((node for node in parser.visible_nodes()
+                    if (node.tag == "h1" or (node.attrs.get("role"), node.attrs.get("aria-level")) == ("heading", "1"))
+                    and not _in_foreign_context(node, include_author=True)), None)
+    if heading is None or heading.text().casefold().rstrip(".!?") != "страница не найдена":
+        return False
+    return "ссылка не существует или объявление удалено" in parser.root.text().casefold().replace("ё", "е")
 
 
 def _has_archive_notice(parser: _BathroomFieldHTMLParser) -> bool:
@@ -1075,6 +1084,8 @@ async def import_krisha_listing(source_url: str, *, expected_city: str | None = 
     verification = r"проверка\s+(?:безопасности|браузера)|подтвердите.{0,30}(?:человек|робот)|checking\s+your\s+browser|are\s+you\s+(?:a\s+)?robot|(?:^|\W)(?:captcha|recaptcha)(?:$|\W)|^(?:403|429|468)(?:\s*$|\s+(?:Forbidden|Too Many Requests))|HTTP(?:\s+Error)?\s*[:—-]?\s*(?:403|429|468)"
     if any(re.search(verification, value, re.I) for value in titles):
         raise ListingImportError("Источник запросил проверку безопасности. Введите данные вручную")
+    if _has_not_found_notice(detail_parser):
+        raise ListingUnavailable("Krisha сообщает: страница объявления не найдена")
     if _has_archive_notice(detail_parser):
         raise ListingArchived("Объявление в архиве Krisha и может быть неактуальным")
 

@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 from typing import Any, Literal
-from sqlalchemy import delete, select, text
+from sqlalchemy import and_, delete, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import selectinload
@@ -19,7 +19,7 @@ from app import __version__
 from app.access import require_basic_auth
 from app.author import OWNER_FROM_DESCRIPTION
 from app.availability import listing_availability, set_listing_sold, set_source_availability, unavailable_urls
-from app.bathroom_queue import router as bathroom_check_router
+from app.bathroom_queue import resume_after_browser_import, resume_after_browser_unavailable, router as bathroom_check_router
 from app.ai_service import analyze_listing, current_analysis
 from app.checker import ListingNotFound, check_all_listings, check_listing, periodic_checker
 from app.cities import CITY_NAMES, SEARCH_CITIES, SearchCity, city_matches, city_slug, is_city_coordinate_pair, result_city_slug
@@ -37,7 +37,7 @@ from app.market_index import periodic_market_index, router as market_index_route
 from app.market_type import MarketFilter, matches_market_type
 from app.olx import normalize_olx_listing_url, olx_advert_id
 from app import olx
-from app.krisha_search import normalize_krisha_listing_url
+from app.krisha_search import normalize_krisha_import_url, normalize_krisha_listing_url
 from app.models import BathroomCheckControl, BathroomCheckJob, BathroomCheckTask, DuplicateDecision, Listing, ListingCheck, ListingLike, ListingTargetPrice, ListingWorkflow, PriceSnapshot, SearchHistory, SearchResult
 from app.listing_tracking import tracking_summary
 from app.property_duplicates import canonical_url, confirmed_component, cross_platform_listing_groups, cross_platform_listing_ids, decision_key, duplicate_hidden_ids, group_listings, load_duplicate_decisions, offer, unique_offers
@@ -318,9 +318,11 @@ async def _load_listing_response(listing_id: int) -> ListingResponse:
     return _to_response(row, liked=liked, workflow=workflow, cross_platform=cross_platform)
 
 
-async def _save_listing(payload: ListingCreate, *, allow_existing: bool) -> ListingResponse:
+async def _save_listing(payload: ListingCreate, *, allow_existing: bool,
+                        background_tasks: BackgroundTasks | None = None) -> ListingResponse:
     try:
-        saved = await persist_listing(payload, allow_existing=allow_existing, notify=True)
+        saved = await persist_listing(payload, allow_existing=allow_existing, notify=True,
+                                      background_tasks=background_tasks)
     except ListingAlreadyExists as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -383,7 +385,7 @@ async def import_listing(payload: ListingImportRequest) -> ListingResponse:
     response_model=ListingResponse,
     status_code=status.HTTP_201_CREATED,
 )
-async def import_listing_from_browser(payload: ListingCreate) -> ListingResponse:
+async def import_listing_from_browser(payload: ListingCreate, background_tasks: BackgroundTasks) -> ListingResponse:
     """Persist public data extracted by the Krisha-page bookmarklet.
 
     The browser script runs on the page the user opened normally. It sends
@@ -413,7 +415,8 @@ async def import_listing_from_browser(payload: ListingCreate) -> ListingResponse
             and not payload.property_details.get("Адрес")
             and payload.title.lstrip()[:1].isdigit()):
         browser_payload = browser_payload.model_copy(update={"address": own_address})
-    saved = await _save_listing(browser_payload, allow_existing=True)
+    saved = await _save_listing(browser_payload, allow_existing=True, background_tasks=background_tasks)
+    await resume_after_browser_import(canonical_url)
     await observe("krisha", canonical_url, "browser", "success",
                   fields=browser_payload.model_dump(exclude_none=True))
     return saved
@@ -446,9 +449,12 @@ async def _browser_import_city(payload: ListingCreate, url: str) -> SearchCity:
                 select(BathroomCheckJob)
                 .join(BathroomCheckControl, BathroomCheckControl.current_job_id == BathroomCheckJob.id)
                 .join(BathroomCheckTask, BathroomCheckTask.job_id == BathroomCheckJob.id)
-                .where(BathroomCheckJob.status == "running", BathroomCheckTask.url == url,
-                       BathroomCheckTask.status == "leased",
-                       BathroomCheckTask.lease_expires_at > datetime.now(UTC))
+                .where(BathroomCheckTask.url == url, or_(
+                    and_(BathroomCheckJob.status == "running", BathroomCheckTask.status == "leased",
+                         BathroomCheckTask.lease_expires_at > datetime.now(UTC)),
+                    and_(BathroomCheckJob.status == "paused", BathroomCheckTask.status == "failed",
+                         BathroomCheckJob.criteria["verification_task_id"].as_integer() == BathroomCheckTask.id),
+                ))
             )
             if job and (job.criteria.get("city") == "ekibastuz"
                         or job.criteria.get("manual_import") and job.criteria.get("source_url") == url):
@@ -457,18 +463,27 @@ async def _browser_import_city(payload: ListingCreate, url: str) -> SearchCity:
     raise HTTPException(422, "Автоимпорт сохраняет объявления с подтверждённым городом Астана.")
 
 
-class ArchivedListingRequest(ListingImportRequest):
+class ListingAvailabilityRequest(ListingImportRequest):
     model_config = ConfigDict(extra="forbid")
-    availability_status: Literal["archived"]
+    availability_status: Literal["archived", "unavailable"]
 
 
 @app.post("/api/v1/listings/availability")
-async def observe_archived_listing(payload: ArchivedListingRequest) -> dict[str, object]:
+async def observe_listing_availability(payload: ListingAvailabilityRequest) -> dict[str, object]:
     source_url = str(payload.source_url)
+    canonical_url = normalize_krisha_import_url(source_url)
+    if payload.availability_status == "unavailable" and not canonical_url:
+        raise HTTPException(422, "Укажите ссылку на недоступное объявление Krisha.")
+    observed_at = datetime.now(UTC)
     async with SessionLocal() as session:
-        listing_id = await set_source_availability(session, source_url, state="archived")
+        listing_id = await set_source_availability(session, source_url, state=payload.availability_status, observed_at=observed_at)
         await session.commit()
-    return {"id": listing_id, "source_url": source_url, "availability_status": "archived"}
+    if canonical_url:
+        if payload.availability_status == "archived":
+            await resume_after_browser_import(canonical_url, archive_observed_at=observed_at)
+        else:
+            await resume_after_browser_unavailable(canonical_url, observed_at=observed_at)
+    return {"id": listing_id, "source_url": source_url, "availability_status": payload.availability_status}
 
 
 @app.post("/api/v1/checks/run")

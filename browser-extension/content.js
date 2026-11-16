@@ -35,6 +35,9 @@
   let waitingDetails = false;
   let lastSavedDetails = false;
   let archiveReporting = false;
+  let waitingForUserCheck = false;
+  let userCheckDeadline = 0;
+  let observationGeneration = 0;
   const hasText = value => typeof value === 'string' && !!value.trim();
   const fastSnapshotReady = payload => {
     let listingId = null;
@@ -103,7 +106,57 @@
     const headings = [document.title || '', ...document.querySelectorAll('h1, [role="heading"][aria-level="1"]')]
       .filter(value => typeof value === 'string' || visible(value))
       .map(value => typeof value === 'string' ? value : value.innerText || value.textContent || '');
-    return [...headings, pageText()].some(value => unavailable.test(String(value).replace(/\s+/g, ' ').trim()));
+    const notice = [...headings, pageText()].map(value => String(value).replace(/\s+/g, ' ').trim()).find(value => unavailable.test(value));
+    return notice ? (/архив/i.test(notice) ? 'archived' : 'unavailable') : null;
+  };
+  const explicitNotFound = () => {
+    const excluded = '.offer__description, [data-testid="description"], [data-testid="advert-description"], .recommendations, .related, .similar, .similar-offers, .offer__similar, .a-card, [data-testid*="recommend"], [data-testid*="similar"]';
+    const headings = [...document.querySelectorAll('h1, h2, h3, [role="heading"]')];
+    const textMatches = value => /Ссылка\s+не\s+существует\s+или\s+объявление\s+удалено[.!]?/i.test(String(value || '').replace(/\s+/g, ' '));
+    return headings.some(heading => {
+      if (!visible(heading) || heading.closest?.(excluded)
+        || !/^Страница\s+не\s+найдена[.!]?$/i.test(String(heading.innerText || heading.textContent || '').replace(/\s+/g, ' ').trim())) return false;
+      let node = heading.parentElement;
+      if (node === document.body) {
+        // Only direct paragraph siblings; never scan the full page body.
+        return [...(node.children || [])].some(message => message.tagName === 'P' && visible(message)
+          && !message.closest?.(excluded) && !message.querySelector?.(excluded)
+          && textMatches(message.innerText || message.textContent));
+      }
+      for (let depth = 0; node && node !== document.body && depth < 4; depth++, node = node.parentElement) {
+        if (!visible(node) || node.closest?.(excluded)) return false;
+        // Inspect visible message elements, not an ancestor's combined text:
+        // that text can include unrelated cards or a seller's description.
+        const direct = [...(node.childNodes || [])].filter(child => child.nodeType === 3).map(child => child.textContent).join(' ');
+        if (textMatches(direct)) return true;
+        const messages = [...(node.querySelectorAll?.('p, span, div, [role="alert"]') || [])];
+        if (messages.some(message => visible(message) && !message.closest?.(excluded)
+          && !message.querySelector?.(excluded) && textMatches(message.innerText || message.textContent))) return true;
+      }
+      return false;
+    });
+  };
+  const reportAvailability = (status, sourceUrl) => {
+    if (archiveReporting) return;
+    archiveReporting = true;
+    const archived = status === 'archived';
+    const reason = archived ? 'Объявление в архиве Krisha и может быть неактуальным' : 'Объявление не найдено или удалено на Krisha';
+    let finished = false;
+    const complete = response => {
+      if (finished) return;
+      finished = true;
+      const error = chrome.runtime.lastError?.message || (!response?.ok ? response?.error || 'Статус не подтверждён' : '');
+      if (error) {
+        show(`ApartmentAgent: статус объявления не подтверждён: ${error}`, true);
+        notifyQueue('error', 'Не удалось подтвердить статус объявления');
+        return;
+      }
+      show(archived ? (response.id ? 'ApartmentAgent: карточка помечена как архивная.' : 'ApartmentAgent: объявление в архиве; сохранённой карточки нет.')
+        : (response.id ? 'ApartmentAgent: карточка помечена как недоступная.' : 'ApartmentAgent: объявление недоступно; сохранённой карточки нет.'));
+      notifyQueue('unknown', reason, 'unavailable');
+    };
+    chrome.runtime.sendMessage({type:'apartment-agent-availability', payload:{source_url:sourceUrl, availability_status:status}}, complete);
+    window.setTimeout(() => complete({ok:false,error:'нет ответа сервера'}), 6000);
   };
   const bathroomLabel = payload => Number.isInteger(payload.bathrooms_count)
     ? `Санузлов: ${payload.bathrooms_count_is_lower_bound ? 'не менее ' : ''}${payload.bathrooms_count}.`
@@ -128,48 +181,85 @@
     }
   };
   const observe = () => {
-    const deadline = startedAt + 12000;
-    const saveDeadline = deadline + 3000;
     let payload = null;
     let extractionError = null;
     try { payload = window.ApartmentAgentExtract?.(); } catch (error) { extractionError = error; }
     if (challengeDetected(payload)) {
-      show('ApartmentAgent: сайт запросил проверку браузера. Пройдите её самостоятельно и продолжите очередь в приложении.', true);
-      notifyQueue('blocked', 'Сайт запросил проверку браузера');
+      if (!waitingForUserCheck) {
+        waitingForUserCheck = true;
+        userCheckDeadline = Date.now() + 15 * 60 * 1000;
+        observationGeneration += 1;
+        show('ApartmentAgent: сайт запросил проверку браузера. Пройдите её самостоятельно.', true);
+        notifyQueue('blocked', 'Сайт запросил проверку браузера');
+      }
+      // Only observe; never interact with a challenge or retry imports while it is present.
+      if (Date.now() >= userCheckDeadline) {
+        show('ApartmentAgent: после завершения проверки обновите страницу объявления.');
+        return;
+      }
+      window.setTimeout(observe, 5000);
       return;
+    }
+    if (payload?.availability_status !== 'archived' && explicitNotFound()) {
+      reportAvailability('unavailable', payload?.source_url || location.href.split('#')[0]);
+      return;
+    }
+    if (waitingForUserCheck) {
+      const ready = payload && ['price_kzt', 'area_m2', 'rooms'].every(key => Number(payload[key]) > 0);
+      if (!ready && payload?.availability_status !== 'archived' && !unavailableDetected()) {
+        if (Date.now() >= userCheckDeadline) {
+          show('ApartmentAgent: после завершения проверки обновите страницу объявления.');
+          return;
+        }
+        window.setTimeout(observe, 5000);
+        return;
+      }
+      // The document can recover without a navigation. Give the new DOM its
+      // own bounded observation window and let the server reconcile the lease.
+      waitingForUserCheck = false;
+      startedAt = Date.now();
+      finalSnapshotSeen = false;
+      failures = 0;
+      retryAfter = 0;
+      lastError = '';
+      observedSignature = '';
+      lastSuccessfulSignature = '';
+      succeeded.clear();
+      stableSince = startedAt;
     }
     if (payload?.availability_status === 'archived') {
-      if (archiveReporting) return;
-      archiveReporting = true;
-      let finished = false;
-      const complete = response => {
-        if (finished) return;
-        finished = true;
-        const error = chrome.runtime.lastError?.message || (!response?.ok ? response?.error || 'Статус не подтверждён' : '');
-        show(error ? `ApartmentAgent: объявление в архиве, но статус не сохранён: ${error}`
-          : response.id ? 'ApartmentAgent: карточка помечена как архивная.' : 'ApartmentAgent: объявление в архиве; сохранённой карточки нет.', !!error);
-        notifyQueue('unknown', 'Объявление в архиве Krisha и может быть неактуальным', 'unavailable');
-      };
-      chrome.runtime.sendMessage({type:'apartment-agent-availability', payload:{source_url:payload.source_url, availability_status:'archived'}}, complete);
-      window.setTimeout(() => complete({ok:false,error:'нет ответа сервера'}), 6000);
+      reportAvailability('archived', payload.source_url);
       return;
     }
-    if (unavailableDetected()) {
-      show('ApartmentAgent: объявление удалено или неактуально. Очередь пропускает эту страницу.');
-      notifyQueue('unknown', 'Объявление удалено или неактуально', 'unavailable');
+    const unavailableStatus = unavailableDetected();
+    if (unavailableStatus) {
+      reportAvailability(unavailableStatus, payload?.source_url || location.href.split('#')[0]);
       return;
     }
+    // Recompute after a user check resets startedAt, so a long challenge does
+    // not consume the new observation and save windows.
+    const deadline = startedAt + 12000;
+    const saveDeadline = startedAt + 45000;
     const settling = Date.now() >= deadline;
+    const genericKrishaTitle = /^(?:крыша|krisha(?:\.kz)?)$/i.test(String(document.title || '').replace(/\s+/g, ' ').trim());
+    const emptyCore = payload && ['price_kzt', 'area_m2', 'rooms'].every(key => !Number(payload[key]));
+    if (settling && !inFlight && !savedMessage && !extractionError && genericKrishaTitle && emptyCore
+      && Date.now() < startedAt + 32000) {
+      // A bare site shell can hydrate late. Observe passively without saving
+      // missing values or treating the generic title as an unavailable advert.
+      window.setTimeout(observe, 2000);
+      return;
+    }
     if (settling && (Date.now() >= saveDeadline || (finalSnapshotSeen && !inFlight))) {
       finish();
       return;
     }
     if (settling && inFlight) {
-      window.setTimeout(observe, 400);
+      window.setTimeout(observe, 1000);
       return;
     }
     // The last DOM read may contain fields that arrived after the previous
-    // poll. Save that snapshot and wait briefly for the acknowledgement.
+    // poll. Save that snapshot and wait for the bounded acknowledgement.
     if (settling) finalSnapshotSeen = true;
     if (!inFlight && failures < 3 && Date.now() >= retryAfter) {
       try {
@@ -189,8 +279,10 @@
           if (!succeeded.has(signature)) {
             inFlight = true;
             show('ApartmentAgent: импортирую открытое объявление…');
+            const requestGeneration = observationGeneration;
             chrome.runtime.sendMessage({type: 'apartment-agent-import', payload}, response => {
               inFlight = false;
+              if (requestGeneration !== observationGeneration) return;
               const error = chrome.runtime.lastError?.message || (!response?.ok ? response?.error || 'импорт не выполнен' : '');
               if (error) {
                 failures += 1;
@@ -202,12 +294,12 @@
               succeeded.add(signature);
               lastSuccessfulSignature = signature;
               lastError = '';
-              lastSavedBathrooms = payload.bathrooms_count;
+              const listing = response.listing;
+              lastSavedBathrooms = Object.hasOwn(listing, 'bathrooms_count') ? listing.bathrooms_count : payload.bathrooms_count;
               lastSavedDetails = payload.details_extracted === true;
               waitingDetails = response.waiting_details === true;
-              const listing = response.listing;
               const advertId = new URL(listing.source_url).pathname.replace(/\/$/, '').split('/').at(-1);
-              savedMessage = `ApartmentAgent: сохранено объявление №${advertId} в карточку №${listing.id}. Рейтинг ${listing.assessment.score}/100. ${bathroomLabel(payload)}`;
+              savedMessage = `ApartmentAgent: сохранено объявление №${advertId} в карточку №${listing.id}. Рейтинг ${listing.assessment.score}/100. ${bathroomLabel({...payload, bathrooms_count:lastSavedBathrooms, bathrooms_count_is_lower_bound:listing.bathrooms_count_is_lower_bound ?? payload.bathrooms_count_is_lower_bound})}`;
               show(savedMessage);
             });
           }

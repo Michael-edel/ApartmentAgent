@@ -222,6 +222,274 @@ async def test_error_is_not_retried_but_remaining_tasks_can_resume(env):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('mode,count,expected', [
+    ('bathrooms', 2, 'confirmed'), ('bathrooms', 1, 'rejected'), ('bathrooms', None, 'unknown'),
+    ('details', 2, 'confirmed'), ('details', None, 'unknown'),
+])
+async def test_missing_save_ack_recovers_fresh_browser_card(env, mode, count, expected):
+    await seed(env)
+    await queue.bathroom_check_start(queue.StartRequest(mode=mode))
+    leased = await queue.bathroom_check_claim(queue.ClaimRequest(worker_id='browser-1', extension_version=queue.DETAILS_EXTENSION_RELEASE))
+    await store_count(env, leased['task']['url'], count)
+    async with env.sessions() as session:
+        row = await session.scalar(select(Listing))
+        row.last_imported_at = env.clock['now'] + timedelta(seconds=1)
+        row.details_imported_at = env.clock['now'] + timedelta(seconds=1)
+        await session.commit()
+    env.clock['now'] += timedelta(seconds=2)
+    result = await complete(leased, 'error', error='Подтверждение сохранения не получено')
+    assert result['status'] == 'completed' and result['pending'] == 0 and result[expected] == 1
+    async with env.sessions() as session:
+        task = await session.get(BathroomCheckTask, leased['task']['id'])
+        assert (task.last_outcome, task.error) == ('imported', None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome,error", [
+    ("error", "Подтверждение сохранения не получено"),
+    ("blocked", "Страница не подтвердила импорт за 60 секунд. Проверьте вкладку вручную."),
+])
+async def test_recovered_save_wakes_workers_with_more_tasks(env, outcome, error):
+    await seed(env, ("https://krisha.kz/a/show/100", "https://krisha.kz/a/show/200"))
+    await queue.bathroom_check_start()
+    leased = await claim()
+    await store_count(env, leased["task"]["url"], 2)
+    async with env.sessions() as session:
+        row = await session.scalar(select(Listing))
+        row.last_imported_at = env.clock["now"]
+        await session.commit()
+
+    result = await complete(leased, outcome, error=error)
+    assert (result["status"], result["confirmed"], result["pending"], result["failed"]) == ("running", 1, 1, 0)
+    assert (await queue.bathroom_check_status())["criteria"]["resume_generation"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome,error", [
+    ("error", "Подтверждение сохранения не получено"),
+    ("blocked", "Страница не подтвердила импорт за 60 секунд. Проверьте вкладку вручную."),
+])
+async def test_missing_ack_does_not_recover_stale_partial_or_other_errors(env, outcome, error):
+    await seed(env)
+    await queue.bathroom_check_start(queue.StartRequest(mode='details'))
+    leased = await queue.bathroom_check_claim(queue.ClaimRequest(worker_id='browser-1', extension_version=queue.DETAILS_EXTENSION_RELEASE))
+    await store_count(env, leased['task']['url'], 2)
+    async with env.sessions() as session:
+        row = await session.scalar(select(Listing))
+        row.last_imported_at = env.clock['now'] + timedelta(seconds=1)
+        row.details_imported_at = env.clock['now'] - timedelta(minutes=1)
+        await session.commit()
+    env.clock['now'] += timedelta(seconds=2)
+    result = await complete(leased, outcome, error=error)
+    assert result['status'] == 'paused' and result['failed'] == 1
+    # A late full commit is reconciled on explicit resume, without reopening.
+    async with env.sessions() as session:
+        row = await session.scalar(select(Listing))
+        row.details_imported_at = env.clock['now']
+        row.last_imported_at = env.clock['now']
+        await session.commit()
+    resumed = await queue.bathroom_check_resume()
+    assert resumed['status'] == 'completed' and resumed['confirmed'] == 1 and resumed['pending'] == 0
+
+
+@pytest.mark.asyncio
+async def test_real_browser_error_is_not_hidden_by_fresh_save(env):
+    await seed(env)
+    await queue.bathroom_check_start()
+    leased = await claim()
+    await store_count(env, leased['task']['url'], 2)
+    async with env.sessions() as session:
+        row = await session.scalar(select(Listing))
+        row.last_imported_at = env.clock['now']
+        await session.commit()
+    result = await complete(leased, 'error', error='Страница недоступна')
+    assert result['status'] == 'paused' and result['failed'] == 1
+
+
+@pytest.mark.asyncio
+async def test_verification_resume_uses_exact_fresh_save_and_keeps_queue_gap(env):
+    first_url = "https://krisha.kz/a/show/100"
+    second_url = "https://krisha.kz/a/show/200"
+    await seed(env, (first_url, second_url))
+    started = await queue.bathroom_check_start()
+    first = await claim()
+    assert first["task"]["url"] == first_url
+    await store_count(env, first_url, None)
+    await store_count(env, second_url, None)
+    async with env.sessions.begin() as session:
+        listing = await session.scalar(select(Listing).where(Listing.source_url == first_url))
+        listing.last_imported_at = env.clock["now"]
+    env.clock["now"] += timedelta(seconds=2)
+    blocked = await complete(first, "blocked", error="Сайт запросил проверку браузера")
+    assert blocked["verification_url"] == first_url
+    assert (await queue.bathroom_check_status())["status"] == "paused"
+    env.clock["now"] += timedelta(seconds=4)
+    async with env.sessions.begin() as session:
+        listing = await session.scalar(select(Listing).where(Listing.source_url == second_url))
+        listing.last_imported_at = env.clock["now"]
+    await queue.resume_after_browser_import(second_url)
+    assert (await queue.bathroom_check_status())["status"] == "paused"
+    async with env.sessions.begin() as session:
+        listing = await session.scalar(select(Listing).where(Listing.source_url == first_url))
+        listing.last_imported_at = listing.details_imported_at = env.clock["now"]
+    await queue.resume_after_browser_import(first_url)
+    await queue.resume_after_browser_import(first_url)
+    resumed = await queue.bathroom_check_status()
+    assert resumed["job_id"] == started["job_id"] and resumed["status"] == "running"
+    assert resumed["verification_url"] is None
+    assert (resumed["unknown"], resumed["enriched"], resumed["failed"]) == (1, 1, 0)
+    assert resumed["criteria"]["verification_resumed_url"] == first_url
+    assert resumed["criteria"]["resume_generation"] == 1
+    assert (await claim())["task"] is None
+    env.clock["now"] += timedelta(seconds=queue.GAP_SECONDS)
+    second = await claim()
+    assert second["task"]["url"] == second_url
+    assert (await complete(second, "unknown"))["status"] == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("manual_action", [None, "pause", "cancel"])
+async def test_late_details_snapshot_reconciles_verification_unless_manually_stopped(env, manual_action):
+    await queue.bathroom_check_start(queue.StartRequest(mode="details", source_url="123"))
+    leased = await queue.bathroom_check_claim(queue.ClaimRequest(worker_id="browser-1", extension_version="0.4.15"))
+    url = leased["task"]["url"]
+    await store_count(env, url, 2)
+    await complete(leased, "blocked", error="Сайт запросил проверку браузера")
+    if manual_action:
+        await getattr(queue, f"bathroom_check_{manual_action}")()
+    env.clock["now"] += timedelta(seconds=2)
+    async with env.sessions.begin() as session:
+        listing = await session.scalar(select(Listing))
+        listing.last_imported_at = env.clock["now"]
+    await queue.resume_after_browser_import(url)
+    pending = await queue.bathroom_check_status()
+    assert pending["status"] == ("cancelled" if manual_action == "cancel" else "paused")
+    env.clock["now"] += timedelta(seconds=1)
+    async with env.sessions.begin() as session:
+        listing = await session.scalar(select(Listing))
+        listing.last_imported_at = listing.details_imported_at = env.clock["now"]
+    # Status polling also handles a commit made just before or without the import hook.
+    final = await queue.bathroom_check_status()
+    if manual_action is None:
+        assert (final["status"], final["confirmed"], final["failed"]) == ("completed", 1, 0)
+        assert final["criteria"]["verification_resumed_url"] == url
+    else:
+        assert final["status"] == pending["status"] and final["failed"] == 1
+        assert "verification_resumed_url" not in final["criteria"]
+
+
+@pytest.mark.asyncio
+async def test_fresh_archive_observation_finishes_only_the_matching_verification_task(env):
+    first_url = "https://krisha.kz/a/show/100"
+    second_url = "https://krisha.kz/a/show/200"
+    await seed(env, (first_url, second_url))
+    await queue.bathroom_check_start()
+    first = await claim()
+    before_check = env.clock["now"]
+    env.clock["now"] += timedelta(seconds=2)
+    await complete(first, "blocked", error="Сайт запросил проверку браузера")
+    async with env.sessions.begin() as session:
+        await queue.set_source_availability(session, first_url, state="archived", observed_at=before_check)
+        await queue.set_source_availability(session, second_url, state="archived", observed_at=env.clock["now"])
+    assert (await queue.bathroom_check_status())["status"] == "paused"
+    env.clock["now"] += timedelta(seconds=4)
+    async with env.sessions.begin() as session:
+        await queue.set_source_availability(session, first_url, state="archived", observed_at=env.clock["now"])
+    result = await queue.bathroom_check_status()
+    assert (result["status"], result["unavailable"], result["enriched"], result["failed"], result["pending"]) == (
+        "running", 1, 0, 0, 1)
+    assert result["criteria"]["verification_resumed_url"] == first_url
+    async with env.sessions() as session:
+        discovery = await session.scalar(select(SearchResult).where(SearchResult.url == first_url))
+        assert queue._aware(discovery.source_archived_at) == before_check
+
+
+@pytest.mark.asyncio
+async def test_browser_report_for_unsaved_archive_finishes_verification_without_a_card(env):
+    await queue.bathroom_check_start(queue.StartRequest(mode="details", source_url="123"))
+    leased = await queue.bathroom_check_claim(queue.ClaimRequest(worker_id="browser-1", extension_version="0.4.17"))
+    url = leased["task"]["url"]
+    await complete(leased, "blocked", error="Сайт запросил проверку браузера")
+    env.clock["now"] += timedelta(seconds=4)
+    await queue.resume_after_browser_import(url, archive_observed_at=env.clock["now"])
+    result = await queue.bathroom_check_status()
+    assert (result["status"], result["unavailable"], result["failed"]) == ("completed", 1, 0)
+
+
+@pytest.mark.asyncio
+async def test_fresh_unavailable_after_verification_wakes_queue_and_keeps_inactive(env):
+    first_url, second_url = 'https://krisha.kz/a/show/100', 'https://krisha.kz/a/show/200'
+    await seed(env, (first_url, second_url))
+    await queue.bathroom_check_start()
+    first = await claim()
+    await complete(first, 'blocked', error='Сайт запросил проверку браузера')
+    env.clock['now'] += timedelta(seconds=4)
+    async with env.sessions.begin() as session:
+        await queue.set_source_availability(session, first_url, state='unavailable', observed_at=env.clock['now'])
+    await queue.resume_after_browser_unavailable(first_url, observed_at=env.clock['now'])
+    await queue.resume_after_browser_unavailable(first_url, observed_at=env.clock['now'])
+    result = await queue.bathroom_check_status()
+    assert (result['status'], result['unavailable'], result['failed'], result['pending']) == ('running', 1, 0, 1)
+    assert result['criteria']['resume_generation'] == 1
+    async with env.sessions() as session:
+        row = await session.scalar(select(SearchResult).where(SearchResult.url == first_url))
+        assert row.source_unavailable_at is not None and row.source_archived_at is None
+    env.clock['now'] += timedelta(seconds=queue.GAP_SECONDS)
+    assert (await claim())['task']['url'] == second_url
+
+
+@pytest.mark.asyncio
+async def test_unsaved_unavailable_hook_finishes_verification(env):
+    await queue.bathroom_check_start(queue.StartRequest(mode='details', source_url='123'))
+    leased = await queue.bathroom_check_claim(queue.ClaimRequest(worker_id='browser-1', extension_version=queue.DETAILS_EXTENSION_RELEASE))
+    await complete(leased, 'blocked', error='Сайт запросил проверку браузера')
+    env.clock['now'] += timedelta(seconds=4)
+    await queue.resume_after_browser_unavailable(leased['task']['url'], observed_at=env.clock['now'])
+    result = await queue.bathroom_check_status()
+    assert (result['status'], result['unavailable'], result['pending'], result['failed']) == ('completed', 1, 0, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('action', ['pause', 'cancel'])
+async def test_manual_stop_is_not_undone_by_unavailable_report(env, action):
+    await queue.bathroom_check_start(queue.StartRequest(mode='details', source_url='123'))
+    leased = await queue.bathroom_check_claim(queue.ClaimRequest(worker_id='browser-1', extension_version=queue.DETAILS_EXTENSION_RELEASE))
+    await complete(leased, 'blocked', error='Сайт запросил проверку браузера')
+    await getattr(queue, f'bathroom_check_{action}')()
+    env.clock['now'] += timedelta(seconds=4)
+    await queue.resume_after_browser_unavailable(leased['task']['url'], observed_at=env.clock['now'])
+    result = await queue.bathroom_check_status()
+    assert result['status'] == ('paused' if action == 'pause' else 'cancelled')
+    assert result['unavailable'] == 0
+
+
+@pytest.mark.asyncio
+async def test_stale_and_wrong_url_unavailable_do_not_resume(env):
+    await seed(env, ('https://krisha.kz/a/show/100', 'https://krisha.kz/a/show/200'))
+    await queue.bathroom_check_start()
+    leased = await claim()
+    before = env.clock['now']
+    env.clock['now'] += timedelta(seconds=2)
+    await complete(leased, 'blocked', error='Сайт запросил проверку браузера')
+    async with env.sessions.begin() as session:
+        await queue.set_source_availability(session, leased['task']['url'], state='unavailable', observed_at=before)
+    await queue.resume_after_browser_unavailable('https://krisha.kz/a/show/200', observed_at=env.clock['now'])
+    await queue.resume_after_browser_unavailable(leased['task']['url'], observed_at=before)
+    assert (await queue.bathroom_check_status())['status'] == 'paused'
+
+
+@pytest.mark.asyncio
+async def test_current_unavailable_completes_leased_task_without_timeout(env):
+    await seed(env)
+    await queue.bathroom_check_start()
+    leased = await claim()
+    async with env.sessions.begin() as session:
+        await queue.set_source_availability(session, leased['task']['url'], state='unavailable', observed_at=env.clock['now'])
+    result = await complete(leased, 'unavailable', error='Страница не найдена')
+    assert (result['status'], result['unavailable'], result['pending'], result['failed']) == ('completed', 1, 0, 0)
+
+
+@pytest.mark.asyncio
 async def test_manual_pause_allows_current_import_and_resume_continues_next(env):
     await seed(env, ("https://krisha.kz/a/show/100", "https://krisha.kz/a/show/200"))
     await queue.bathroom_check_start()

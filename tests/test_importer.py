@@ -45,6 +45,24 @@ async def test_missing_page_and_access_block_are_distinct(monkeypatch, status_co
 
 
 @pytest.mark.asyncio
+async def test_not_found_notice_takes_precedence_over_recommendations_on_http_200(monkeypatch):
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url):
+            return httpx.Response(200, text="""
+                <title>Крыша</title><h1>Страница не найдена</h1>
+                <p>Ссылка не существует или объявление удалено.</p>
+                <div class="recommendations">Можете посмотреть другие предложения:
+                <h2>4-комнатная квартира, 83 м², 37 837 400 ₸</h2></div>
+            """, request=httpx.Request("GET", url))
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    with pytest.raises(ListingUnavailable, match="страница объявления не найдена"):
+        await import_krisha_listing("https://krisha.kz/a/show/1016547402")
+
+
+@pytest.mark.asyncio
 async def test_archive_precedes_populated_metadata_but_not_browser_challenge(monkeypatch):
     class FakeClient:
         html = ''
@@ -80,7 +98,8 @@ async def test_missing_redirected_page_does_not_mark_original_unavailable(monkey
 @pytest.mark.asyncio
 async def test_positive_visible_live_offer_can_clear_stale_archive(monkeypatch):
     html = '''<h1>3-комнатная квартира 80 м²</h1><div class="offer__price">45 000 000 ₸</div>
-      <dl><dt>Город</dt><dd>Астана</dd><dt>Тип дома</dt><dd>кирпичный</dd></dl>'''
+      <dl><dt>Город</dt><dd>Астана</dd><dt>Тип дома</dt><dd>кирпичный</dd></dl>
+      <div class="offer__description">Страница не найдена. Ссылка не существует или объявление удалено.</div>'''
     class FakeClient:
         def __init__(self, **kwargs): pass
         async def __aenter__(self): return self

@@ -4,7 +4,7 @@ import httpx
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app import checker, listing_service, main, search_agent
+from app import bathroom_queue, checker, listing_service, main, search_agent
 from app.availability import restore_verified_check_history
 from app.importer import ListingArchived, ListingImportError, ListingUnavailable
 from app.models import BathroomCheckControl, BathroomCheckJob, BathroomCheckTask, Base, Listing, ListingCheck, ListingLike, SearchResult
@@ -22,7 +22,7 @@ async def sessions(monkeypatch):
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    for module in (main, search_agent, checker, listing_service):
+    for module in (main, search_agent, checker, listing_service, bathroom_queue):
         monkeypatch.setattr(module, "SessionLocal", factory)
     for key, value in dict(target_rooms=2, min_price_kzt=None, max_price_kzt=40_000_000,
                            min_area_m2=50, max_area_m2=None, min_bathrooms=0,
@@ -71,7 +71,7 @@ async def test_saved_city_scope_and_browser_import(sessions):
             job = BathroomCheckJob(status="running", criteria={"manual_import": True, "source_url": manual_url})
             session.add(job)
             await session.flush()
-            session.add(BathroomCheckControl(id=1, current_job_id=job.id))
+            await session.merge(BathroomCheckControl(id=1, current_job_id=job.id))
             session.add(BathroomCheckTask(job_id=job.id, url=manual_url, status="leased",
                                           lease_expires_at=datetime.now(UTC) + timedelta(minutes=1)))
         manual = await client.post(import_url, json={**payload, "source_url": manual_url,
@@ -240,6 +240,40 @@ async def test_sold_and_source_status_hide_inactive_offers_without_losing_saved_
         assert response.json()["availability"] == "sold"
         assert (await client.put(sale_url, json={"sold": False})).json()["availability"] == "active"
         assert (await client.get("/api/v1/search/status")).json()["total_results"] == 2
+
+
+@pytest.mark.asyncio
+async def test_browser_missing_page_hides_discovery_and_saved_pin(sessions, monkeypatch):
+    monkeypatch.setattr(main.settings, "search_city", "astana")
+    monkeypatch.setattr(main.settings, "market_type", "all")
+    monkeypatch.setattr(main.settings, "search_conditions", {})
+    async with sessions.begin() as session:
+        session.add(listing(70))
+        for advert_id in (70, 1016547402):
+            session.add(SearchResult(url=f"http://www.krisha.kz/a/show/{advert_id}/?q=legacy",
+                                     city="astana", search_engine="fixture", query="",
+                                     title="2-комнатная квартира, 60 м², 25 млн тг",
+                                     imported_listing_id=70 if advert_id == 70 else None))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+        found = "/api/v1/search/results?include_hidden=true&seller=all"
+        map_route = "/api/v1/search/map?seller=all"
+        assert len((await client.get(found)).json()) == 2
+        pins = (await client.get(map_route)).json()
+        assert [row["listing_id"] for row in pins["items"]] == [70]
+        assert pins["without_coordinates"] == 1
+        for advert_id, card_id in ((70, 70), (1016547402, None)):
+            response = await client.post("/api/v1/listings/availability", json={
+                "source_url": advert(advert_id), "availability_status": "unavailable",
+            })
+            assert response.status_code == 200
+            assert response.json() == {"source_url": advert(advert_id),
+                                       "availability_status": "unavailable", "id": card_id}
+        assert (await client.get(found)).json() == []
+        pins = (await client.get(map_route)).json()
+        assert pins["items"] == pins["without_coordinates_items"] == []
+        card = (await client.get("/api/v1/listings/70")).json()
+        assert card["availability"] == "unavailable" and card["source_unavailable_at"]
+        assert card["source_archived_at"] is None
 
 
 @pytest.mark.asyncio

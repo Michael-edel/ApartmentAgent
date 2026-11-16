@@ -1,5 +1,6 @@
 import httpx
 import pytest
+from fastapi import BackgroundTasks
 from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -36,16 +37,68 @@ def test_old_extension_placeholder_is_not_saved_as_an_apartment_photo():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("explicit", [False, True])
 async def test_browser_endpoint_corrects_office_address_from_old_extensions(monkeypatch, explicit):
-    async def save(value, *, allow_existing):
+    background_tasks = BackgroundTasks()
+
+    async def save(value, *, allow_existing, background_tasks):
         assert allow_existing is True
+        assert isinstance(background_tasks, BackgroundTasks)
         return value
     monkeypatch.setattr(main, "_save_listing", save)
+    async def resume(url):
+        assert url == "https://krisha.kz/a/show/123"
+    monkeypatch.setattr(main, "resume_after_browser_import", resume)
     value = payload(address="Явный адрес 7" if explicit else "Астана, Нура р-н, пр. Улы Дала, 13",
                     property_details={"Город": "Астана", **({"Адрес": "Явный адрес 7"} if explicit else {})})
     value = value.model_copy(update={"title": "4-комнатная квартира · 95.66 м², Айтматова 21"})
-    result = await main.import_listing_from_browser(value)
+    result = await main.import_listing_from_browser(value, background_tasks)
     assert result.address == (value.address if explicit else "Айтматова 21")
     assert result.price_kzt == value.price_kzt and result.source == "browser"
+
+
+@pytest.mark.asyncio
+async def test_browser_import_sends_confirmation_before_notifications(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        monkeypatch.setattr(listing_service, "SessionLocal", sessions)
+        monkeypatch.setattr(main, "SessionLocal", sessions)
+        from app import bathroom_queue
+        monkeypatch.setattr(bathroom_queue, "SessionLocal", sessions)
+        monkeypatch.setattr(main.settings, "twogis_enabled", False)
+        monkeypatch.setattr(main.settings, "ai_enabled", False)
+        order = []
+
+        async def notify(*args, **kwargs):
+            order.append("notification")
+
+        async def alerts(*, city):
+            order.append("target checks")
+
+        async def observe(*args, **kwargs):
+            pass
+
+        monkeypatch.setattr(listing_service, "notify_listing", notify)
+        monkeypatch.setattr(listing_service, "evaluate_target_alerts", alerts)
+        monkeypatch.setattr(main, "observe", observe)
+
+        async def app(scope, receive, send):
+            async def observe_response(message):
+                if message["type"] == "http.response.body" and not message.get("more_body"):
+                    order.append("response")
+                await send(message)
+
+            await main.app(scope, receive, observe_response)
+
+        value = payload(property_details={"Город": "Астана"}, bathrooms_count=2)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post("/api/v1/listings/browser-import", json=value.model_dump(mode="json"))
+        assert response.status_code == 201
+        assert response.json()["bathrooms_count"] == 2
+        assert order == ["response", "notification", "target checks"]
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
