@@ -53,6 +53,8 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
     const body = options.body ? JSON.parse(options.body) : null;
     env.requests.push({path,body});
     let result = {job_id:env.jobId,status:env.status,current_url:env.lease?.url || null,mode:env.mode || 'bathrooms'};
+    if (!path && env.omitCurrentUrl) delete result.current_url;
+    if (!path && env.currentUrlOverride !== undefined) result.current_url = env.currentUrlOverride;
     if (env.resumeGeneration !== undefined || env.verificationResumedUrl) result.criteria = {resume_generation:env.resumeGeneration ?? 0, ...(env.verificationResumedUrl ? {verification_resumed_url:env.verificationResumedUrl} : {})};
     if (path === '/claim') {
       if (!env.lease && env.status === 'running' && env.now >= (env.nextClaimAt || 0)) env.lease = env.tasks.shift() || null;
@@ -66,6 +68,7 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
       if (env.completeStatus) env.status = env.completeStatus;
       result.status = env.status;
       if (env.completeMessage) result.message = env.completeMessage;
+      if (env.loseCompleteAfterCommit) throw new Error('Connection lost after commit');
       if (env.invalidCompleteReply) return {ok:true,async json() {return {};}};
     } else if (path === '/pause') {env.status = 'paused'; result.status = 'paused';}
     return {ok:true,async json() {return result;}};
@@ -456,10 +459,65 @@ function environment(urls = ['https://krisha.kz/a/show/100', 'https://krisha.kz/
   assert.deepEqual(ambiguousComplete.outcomes, ['unknown'], 'the fixture committed before returning an invalid reply');
   assert.equal(ambiguousComplete.state().halted, true);
   assert.equal(ambiguousComplete.state().task.tab_id, ambiguousId);
+  assert.equal(ambiguousComplete.state().task.completion_requested, true, 'completion intent survives an invalid response');
+  ambiguousComplete.omitCurrentUrl = true;
   ambiguousComplete.now += 90000;
   await ambiguousComplete.heartbeat();
+  assert.equal(ambiguousComplete.state().halted, true, 'missing current_url is not evidence of completion');
+  assert.equal(ambiguousComplete.created.length, 1);
+  ambiguousComplete.omitCurrentUrl = false;
+  ambiguousComplete.currentUrlOverride = 'https://example.com/unrelated';
+  await ambiguousComplete.heartbeat();
+  assert.equal(ambiguousComplete.state().halted, true, 'an invalid lease address cannot establish completion');
+  ambiguousComplete.currentUrlOverride = undefined;
+  await ambiguousComplete.heartbeat();
   assert.deepEqual(ambiguousComplete.outcomes, ['unknown'], 'heartbeat cannot replay an ambiguous completion');
-  assert.equal(ambiguousComplete.created.length, 1, 'heartbeat cannot claim after an ambiguous write');
+  assert.equal(ambiguousComplete.state().halted, false, 'valid running status and explicit empty current_url reconcile the finished lease');
+  assert.equal(ambiguousComplete.created.length, 1, 'respect normal spacing before opening a new task');
+  ambiguousComplete.now += 31000;
+  await ambiguousComplete.heartbeat();
+  assert.equal(ambiguousComplete.created.length, 2, 'next task starts without a fabricated resume generation');
+  assert.deepEqual(ambiguousComplete.outcomes, ['unknown']);
+
+  const pausedCompletion = environment();
+  const pausedCompletionWorker = pausedCompletion.worker();
+  await pausedCompletionWorker.start();
+  pausedCompletion.invalidCompleteReply = true;
+  await pausedCompletionWorker.finished({tab:{id:pausedCompletion.state().task.tab_id}}, 'unknown');
+  pausedCompletion.status = 'paused';
+  await pausedCompletion.heartbeat();
+  assert.equal(pausedCompletion.state().halted, true, 'a paused job never resumes automatically');
+  assert.equal(pausedCompletion.created.length, 1);
+  assert.deepEqual(pausedCompletion.outcomes, ['unknown']);
+
+  const lostAfterCommit = environment();
+  const lostWorker = lostAfterCommit.worker();
+  await lostWorker.start();
+  const lostTab = lostAfterCommit.state().task.tab_id;
+  lostAfterCommit.loseCompleteAfterCommit = true;
+  await lostWorker.finished({tab:{id:lostTab}}, 'unknown');
+  assert.equal(lostAfterCommit.state().halted, true);
+  assert.equal(lostAfterCommit.state().task.completion_requested, true);
+  const lostRestart = lostAfterCommit.worker();
+  lostAfterCommit.loseCompleteAfterCommit = false;
+  await lostRestart.start();
+  assert.equal(lostAfterCommit.state().halted, false, 'restart reconciles a known committed completion');
+  assert.deepEqual(lostAfterCommit.outcomes, ['unknown'], 'restart must not re-submit completion');
+  assert.equal(lostAfterCommit.created.length, 1, 'next task waits for the regular gap');
+  lostAfterCommit.now += 31000;
+  await lostAfterCommit.heartbeat();
+  assert.equal(lostAfterCommit.created.length, 2);
+
+  const unresolvedCompletion = environment();
+  const unresolvedWorker = unresolvedCompletion.worker();
+  await unresolvedWorker.start();
+  unresolvedCompletion.failApi = true;
+  await unresolvedWorker.finished({tab:{id:unresolvedCompletion.state().task.tab_id}}, 'unknown');
+  unresolvedCompletion.failApi = false;
+  await unresolvedWorker.kick(appSender);
+  assert.equal(unresolvedCompletion.state().halted, true, 'an unchanged lease cannot establish completion');
+  assert.equal(unresolvedCompletion.created.length, 1);
+  assert.deepEqual(unresolvedCompletion.outcomes, []);
 
   const resumed = environment(['https://krisha.kz/a/show/100']);
   const resumeWorker = resumed.worker();

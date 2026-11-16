@@ -113,6 +113,8 @@
   const complete = async (outcome, error = '') => {
     const task = state.task;
     if (!task) return;
+    task.completion_requested = true;
+    await save();
     const result = await api('/complete', {worker_id:state.worker_id, task_id:task.id, lease_token:task.lease_token, outcome, ...(error ? {error} : {})});
     if (!['running', 'paused', 'completed', 'cancelled'].includes(result.status) || result.job_id !== state.job_id) {
       throw new Error('Сервер вернул неподходящий статус завершения очереди');
@@ -178,7 +180,8 @@
       state.unreadable_streak = 0;
       state.message = '';
     }
-    const sameLease = state.task && canonical(status.current_url) === state.task.url;
+    const currentUrl = canonical(status.current_url);
+    const sameLease = state.task && currentUrl === state.task.url;
     if (status.status === 'paused' && state.task && sameJob) {
       if (!sameLease) {
         // The server may have completed/expired the task before the worker
@@ -215,7 +218,15 @@
       await save();
       await closeOwned(oldTask);
     }
-    if (state.halted) return;
+    if (state.halted) {
+      // The server can finish a task even if the reply to /complete is lost.
+      // A fresh running status must explicitly show the old lease is gone.
+      const completionConfirmed = sameJob && state.task?.completion_requested === true
+        && !sameLease && (status.current_url === null || currentUrl);
+      if (!completionConfirmed) return;
+      state.halted = false;
+      state.message = '';
+    }
     state.job_id = status.job_id;
     await save();
     if (state.task) {
