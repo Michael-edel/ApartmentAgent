@@ -1,31 +1,84 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from html import escape
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import SessionLocal
-from app.models import TelegramNotification
+from app.krisha_search import normalize_krisha_import_url
+from app.models import Listing, SearchResult, TelegramNotification
+from app.olx import normalize_olx_listing_url
 from app.schemas import ListingCreate
 from app.scoring import assess_listing
 
 
-def _message_for_listing(listing: ListingCreate, *, price_change: tuple[int, int] | None = None) -> str:
+def telegram_timezone(settings) -> tzinfo:
+    name = getattr(settings, "telegram_digest_timezone", "Asia/Almaty")
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError, TypeError):
+        return timezone(timedelta(hours=5)) if name == "Asia/Almaty" else UTC
+
+
+def _local_time(value: datetime, zone: tzinfo) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    local = value.astimezone(zone)
+    offset = local.strftime("%z")
+    return f"{local:%d.%m.%Y %H:%M} (UTC{offset[:3]}:{offset[3:]})"
+
+
+async def _listing_dates(session: AsyncSession, listing_id: int) -> tuple[datetime | None, datetime | None]:
+    row = (await session.execute(
+        select(func.min(SearchResult.first_seen), Listing.created_at)
+        .outerjoin(SearchResult, SearchResult.imported_listing_id == Listing.id)
+        .where(Listing.id == listing_id)
+        .group_by(Listing.id, Listing.created_at)
+    )).one_or_none()
+    return (row[0], row[1]) if row is not None else (None, None)
+
+
+def _listing_source_block(
+    source_url: str,
+    *,
+    found_at: datetime | None,
+    saved_at: datetime | None,
+    sent_at: datetime,
+    zone: tzinfo,
+    city: str | None = None,
+    district: str | None = None,
+) -> str:
+    if normalize_krisha_import_url(source_url):
+        source = "🟨 <b>Krisha.kz</b>"
+    elif normalize_olx_listing_url(source_url):
+        source = "🟩 <b>OLX.kz</b>"
+    else:
+        source = "⬜ <b>Другая площадка</b>"
+    lines = [" · ".join([source, *(escape(place) for place in (city, district) if place)])]
+    if found_at is not None:
+        lines.append(f"Найдено {_local_time(found_at, zone)}")
+    elif saved_at is not None:
+        lines.append(f"Сохранено {_local_time(saved_at, zone)}")
+    lines.append(f"Отправлено {_local_time(sent_at, zone)}")
+    return "<blockquote>" + "\n".join(lines) + "</blockquote>"
+
+
+def _message_for_listing(listing: ListingCreate, source_block: str, *,
+                         price_change: tuple[int, int] | None = None) -> str:
     assessment = assess_listing(listing, get_settings())
     title = escape(listing.residential_complex or listing.title)
     lines = [
         f"🏠 <b>{title}</b>",
+        source_block,
         f"Цена: <b>{listing.price_kzt:,} ₸</b> · {assessment.price_per_m2:,} ₸/м²".replace(",", " "),
         f"{listing.area_m2:g} м² · {listing.rooms} комн. · этаж {listing.floor or '—'}/{listing.floors_total or '—'}",
         f"Рейтинг: <b>{assessment.score}/100</b> · {assessment.verdict}",
     ]
-    if listing.district or listing.residential_complex:
-        lines.append(
-            " · ".join(escape(item) for item in (listing.district, listing.residential_complex) if item)
-        )
     if listing.address:
         lines.append(f"Адрес: {escape(listing.address)}")
     elif listing.latitude is not None and listing.longitude is not None:
@@ -65,7 +118,6 @@ async def notify_listing(
     change = price_change or (0, 0)
     suffix = "new" if created else f"{change[0]}-{change[1]}"
     event_key = f"{event_type}:{listing_id}:{suffix}"
-    message = _message_for_listing(listing, price_change=price_change)
 
     async with SessionLocal() as session:
         record = await session.scalar(
@@ -73,6 +125,11 @@ async def notify_listing(
         )
         if record and record.status == "sent":
             return True
+        found_at, saved_at = await _listing_dates(session, listing_id)
+        source_block = _listing_source_block(str(listing.source_url), found_at=found_at, saved_at=saved_at,
+                                             sent_at=datetime.now(UTC), zone=telegram_timezone(settings),
+                                             city=listing.city, district=listing.district)
+        message = _message_for_listing(listing, source_block, price_change=price_change)
         if record is None:
             record = TelegramNotification(
                 event_key=event_key,
@@ -83,6 +140,8 @@ async def notify_listing(
             )
             session.add(record)
             await session.flush()
+        else:
+            record.message = message
         record.attempts = (record.attempts or 0) + 1
         await session.commit()
 
@@ -151,10 +210,13 @@ async def notify_target_price(*, listing_id: int, offer_id: int, price_kzt: int,
     key = f'target_price:{listing_id}:{offer_id}:{price_kzt}:{version}'
     relation = {'self': 'избранное объявление', 'confirmed': 'подтверждённая та же квартира',
                 'probable': 'возможно та же квартира'}.get(relationship, 'объявление')
-    message = (f'🎯 Цена достигла цели: <b>{price_kzt:,} ₸</b> '
-               f'(цель {target_kzt:,} ₸)\n{relation}; последняя сохранённая цена\n'
-               f'<a href="{escape(source_url, quote=True)}">Открыть объявление</a>').replace(',', ' ')
     async with SessionLocal() as session:
+        found_at, saved_at = await _listing_dates(session, offer_id)
+        source_block = _listing_source_block(source_url, found_at=found_at, saved_at=saved_at,
+                                             sent_at=datetime.now(UTC), zone=telegram_timezone(settings))
+        prices = f'🎯 Цена достигла цели: <b>{price_kzt:,} ₸</b> (цель {target_kzt:,} ₸)'.replace(',', ' ')
+        message = (f'{prices}\n{source_block}\n{relation} · последняя сохранённая цена\n'
+                   f'<a href="{escape(source_url, quote=True)}">Открыть объявление</a>')
         session.add(TelegramNotification(event_key=key, event_type='target_price', listing_id=listing_id,
                                          message=message, status='pending', attempts=1))
         try:
@@ -163,7 +225,7 @@ async def notify_target_price(*, listing_id: int, offer_id: int, price_kzt: int,
             await session.rollback()
             claimed = await session.execute(update(TelegramNotification).where(
                 TelegramNotification.event_key == key, TelegramNotification.status == 'error'
-            ).values(status='pending', attempts=TelegramNotification.attempts + 1, error=None))
+            ).values(status='pending', attempts=TelegramNotification.attempts + 1, error=None, message=message))
             await session.commit()
             if not claimed.rowcount:
                 return False

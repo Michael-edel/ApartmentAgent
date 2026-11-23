@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from sqlalchemy import select, update
@@ -14,6 +13,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.import_observability import ImportEvent
 from app.models import Listing, ListingObservation, SearchResult, TelegramNotification
+from app.telegram import telegram_timezone
 
 
 def _aware(value: datetime) -> datetime:
@@ -22,13 +22,6 @@ def _aware(value: datetime) -> datetime:
 
 def _configured(settings) -> bool:
     return bool(settings.telegram_enabled and settings.telegram_bot_token and settings.telegram_chat_id)
-
-
-def _zone(settings):
-    try:
-        return ZoneInfo(getattr(settings, 'telegram_digest_timezone', 'Asia/Almaty'))
-    except (ZoneInfoNotFoundError, ValueError, TypeError):
-        return timezone(timedelta(hours=5)) if getattr(settings, 'telegram_digest_timezone', 'Asia/Almaty') == 'Asia/Almaty' else UTC
 
 
 async def _claim_and_send(event_key: str, event_type: str, message: str, settings) -> bool:
@@ -245,7 +238,7 @@ async def run_notifications_once(now: datetime | None = None) -> dict:
     if not result['configured'] or not (alerts_enabled or digest_enabled):
         return result
     now = _aware(now or datetime.now(UTC))
-    local = now.astimezone(_zone(settings))
+    local = now.astimezone(telegram_timezone(settings))
     day = local.date().isoformat()
     async with SessionLocal() as session:
         alerts = await _degradation_events(session, now, day) if alerts_enabled else []

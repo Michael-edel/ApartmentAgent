@@ -60,17 +60,21 @@ async def test_related_age_target_matches_and_paused(sessions):
         second.source_archived_at = now; await session.commit()
         assert await listing_tracking.target_price_matches(session, first.id) == []
 
-@pytest.mark.asyncio
-async def test_target_notification_deduplicates_without_real_network(sessions, monkeypatch):
-    from types import SimpleNamespace
+@pytest.fixture
+def telegram_payloads(sessions, monkeypatch):
     from app import telegram
-    from app.models import TelegramNotification
+    from app.config import Settings
+
     monkeypatch.setattr(telegram, 'SessionLocal', sessions)
-    monkeypatch.setattr(telegram, 'get_settings', lambda: SimpleNamespace(telegram_enabled=True, telegram_bot_token='test', telegram_chat_id='test'))
+    settings = Settings(_env_file=None, telegram_enabled=True, telegram_bot_token='test',
+                        telegram_chat_id='test', telegram_notify_min_score=0)
+    monkeypatch.setattr(telegram, 'get_settings', lambda: settings)
     calls = []
+
     class Response:
         def raise_for_status(self): pass
         def json(self): return {'ok':True}
+
     class FakeClient:
         def __init__(self, **kwargs): pass
         async def __aenter__(self): return self
@@ -78,15 +82,70 @@ async def test_target_notification_deduplicates_without_real_network(sessions, m
         async def post(self, url, *, json):
             calls.append(json)
             return Response()
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 23, 20, 7, tzinfo=UTC).astimezone(tz)
+
     monkeypatch.setattr(telegram.httpx, 'AsyncClient', FakeClient)
+    monkeypatch.setattr(telegram, 'datetime', FixedDateTime)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_listing_notification_shows_first_seen_time_and_platform(sessions, monkeypatch, telegram_payloads):
+    from app.models import TelegramNotification
+
+    async def skip_target_alerts(**kwargs):
+        pass
+
+    monkeypatch.setattr(listing_service, 'evaluate_target_alerts', skip_target_alerts)
+    first_seen = datetime(2026, 11, 23, 18, 54, tzinfo=UTC)
     async with sessions() as session:
-        row = Listing(source_url='https://krisha.kz/a/show/98', title='Test', city='Астана', rooms=2, area_m2=80, price_kzt=20)
+        session.add_all([
+            SearchResult(url='https://www.krisha.kz/a/show/1', search_engine='test', query='',
+                         title='Квартира', first_seen=first_seen),
+            SearchResult(url='https://krisha.kz/a/show/1', search_engine='test', query='',
+                         title='Квартира', first_seen=first_seen + timedelta(minutes=12)),
+        ])
+        await session.commit()
+
+    await listing_service.persist_listing(payload(district='Есиль & Нура'), refresh_ai=False)
+    await listing_service.persist_listing(payload(price_kzt=39000000, district='Есиль & Нура'), refresh_ai=False)
+
+    assert len(telegram_payloads) == 2
+    for request in telegram_payloads:
+        assert request['parse_mode'] == 'HTML' and not request['disable_web_page_preview']
+        assert ('<blockquote>🟨 <b>Krisha.kz</b> · Астана · Есиль &amp; Нура\n'
+                'Найдено 23.11.2026 23:54 (UTC+05:00)\n'
+                'Отправлено 24.11.2026 01:07 (UTC+05:00)</blockquote>') in request['text']
+    assert 'Цена изменилась' in telegram_payloads[-1]['text']
+    async with sessions() as session:
+        messages = await session.scalars(select(TelegramNotification.message).order_by(TelegramNotification.id))
+        assert messages.all() == [request['text'] for request in telegram_payloads]
+
+
+@pytest.mark.asyncio
+async def test_target_notification_deduplicates_without_real_network(sessions, telegram_payloads):
+    from app import telegram
+    from app.models import TelegramNotification
+
+    url = 'https://www.olx.kz/d/obyavlenie/astana-IDowt.html'
+    async with sessions() as session:
+        row = Listing(source_url=url, title='Test', city='Астана', rooms=2, area_m2=80, price_kzt=20,
+                      created_at=datetime(2026, 11, 23, 19, tzinfo=UTC))
         session.add(row); await session.commit(); listing_id = row.id
     args = dict(listing_id=listing_id, offer_id=listing_id, price_kzt=20, target_kzt=30,
-                target_updated_at=datetime.now(UTC), source_url='https://krisha.kz/a/show/98', relationship='self')
+                target_updated_at=datetime.now(UTC), source_url=url, relationship='self')
     assert await telegram.notify_target_price(**args)
     assert not await telegram.notify_target_price(**args)
-    assert len(calls) == 1
+    assert len(telegram_payloads) == 1
+    message = telegram_payloads[0]['text']
+    assert ('<blockquote>🟩 <b>OLX.kz</b>\n'
+            'Сохранено 24.11.2026 00:00 (UTC+05:00)\n'
+            'Отправлено 24.11.2026 01:07 (UTC+05:00)</blockquote>') in message
+    assert f'href="{url}"' in message
     async with sessions() as session:
         records = (await session.scalars(select(TelegramNotification))).all()
         assert len(records) == 1 and records[0].status == 'sent'
