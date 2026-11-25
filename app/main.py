@@ -24,6 +24,8 @@ from app.ai_service import analyze_listing, current_analysis
 from app.checker import ListingNotFound, check_all_listings, check_listing, periodic_checker
 from app.cities import CITY_NAMES, SEARCH_CITIES, SearchCity, city_matches, city_slug, is_city_coordinate_pair, result_city_slug
 from app.config import get_settings
+from app.commercial import periodic_commercial
+from app.commercial_browser import router as commercial_router
 from app.database import SessionLocal, engine, initialize_database
 from app.digest import periodic_digest
 from app.import_observability import SourceCoolingDown, observe, observed_fetch, router as import_observability_router
@@ -63,7 +65,7 @@ _DUPLICATE_COLUMNS = (
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(application: FastAPI):
     await initialize_database()
     await load_search_preference()
 
@@ -72,9 +74,11 @@ async def lifespan(_: FastAPI):
     search_task = asyncio.create_task(periodic_search(stop_event))
     market_task = asyncio.create_task(periodic_market_index(stop_event))
     digest_task = asyncio.create_task(periodic_digest(stop_event))
+    application.state.commercial_monitor_changed = asyncio.Event()
+    commercial_task = asyncio.create_task(periodic_commercial(stop_event, application.state.commercial_monitor_changed))
     yield
     stop_event.set()
-    await asyncio.gather(checker_task, search_task, market_task, digest_task, return_exceptions=True)
+    await asyncio.gather(checker_task, search_task, market_task, digest_task, commercial_task, return_exceptions=True)
     await engine.dispose()
 
 
@@ -87,6 +91,7 @@ app.include_router(listing_quality_router)
 app.include_router(listing_export_router)
 app.include_router(market_index_router)
 app.include_router(import_observability_router)
+app.include_router(commercial_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https://([a-z0-9-]+\.)*krisha\.kz$",

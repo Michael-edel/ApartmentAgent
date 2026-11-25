@@ -23,6 +23,38 @@ class Base(DeclarativeBase):
     pass
 
 
+class CommercialScan(Base):
+    __tablename__ = "commercial_scans"
+    deal_type: Mapped[str] = mapped_column(String(16), primary_key=True)
+    initialized: Mapped[bool] = mapped_column(Boolean, default=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CommercialMonitorPreference(Base):
+    __tablename__ = "commercial_monitor_preferences"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean)
+
+
+class CommercialListing(Base):
+    __tablename__ = "commercial_listings"
+    url: Mapped[str] = mapped_column(Text, primary_key=True)
+    deal_type: Mapped[str] = mapped_column(String(16))
+    title: Mapped[str] = mapped_column(Text)
+    price: Mapped[str | None] = mapped_column(Text, nullable=True)
+    area: Mapped[float] = mapped_column(Float)
+    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CommercialEvent(Base):
+    __tablename__ = "commercial_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    url: Mapped[str] = mapped_column(Text)
+    message: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default='queued')
+
+
 class ListingLike(Base):
     __tablename__ = "listing_likes"
 

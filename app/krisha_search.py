@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse
@@ -58,6 +59,8 @@ class KrishaSearchItem:
     seller_type: str | None = None
     market_type: str | None = None
     city_evidence: set[str] = field(default_factory=set)
+    description: str | None = None
+    published_at: datetime | None = None
 
 
 def _locality_key(value: object) -> str | None:
@@ -95,6 +98,9 @@ class _CardMetadataParser(HTMLParser):
         self.card_id: str | None = None
         self.title_url: str | None = None
         self.card_roles: set[str] = set()
+        self.description_depth: int | None = None
+        self.description_text: list[str] = []
+        self.descriptions: dict[str, str] = {}
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "section":
@@ -113,11 +119,14 @@ class _CardMetadataParser(HTMLParser):
             if not re.fullmatch(r"[1-9]\d{0,14}", card_id):
                 return
             self.card_id, self.depth, self.card_roles, self.title_url = card_id, 1, set(), None
+            self.description_text = []
             self.card_cities = {city for key in ("data-city", "data-city-name")
                                 if (city := _locality_key(attributes.get(key)))}
             return
         if self.depth:
             self.depth += 1
+            if "a-card__text" in classes:
+                self.description_depth = self.depth
             if "a-card__city" in classes or "a-card__subtitle" in classes:
                 self.city_depth, self.city_text = self.depth, []
                 self.city_is_explicit = "a-card__city" in classes
@@ -139,6 +148,8 @@ class _CardMetadataParser(HTMLParser):
             self.label_text.append(data)
         if self.city_depth is not None:
             self.city_text.append(data)
+        if self.description_depth is not None:
+            self.description_text.append(data)
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "section" and self.sections:
@@ -167,9 +178,13 @@ class _CardMetadataParser(HTMLParser):
             self.specialist_footer_depth = None
         if self.depth == self.complex_footer_depth:
             self.complex_footer_depth = None
+        if self.depth == self.description_depth:
+            self.description_depth = None
         self.depth -= 1
         if not self.depth:
             if self.card_id and self.title_url == f"https://krisha.kz/a/show/{self.card_id}":
+                if self.description_text:
+                    self.descriptions[self.title_url] = " ".join(" ".join(self.description_text).split())
                 if any(self.sections):
                     self.catalog_urls.add(self.title_url)
                 if self.card_cities:
@@ -326,6 +341,16 @@ def _extract_json_items(html: str) -> list[KrishaSearchItem]:
                 continue
             title = node.get("title") or node.get("name") or node.get("heading")
             description = node.get("description") or node.get("text")
+            # A refreshed listing date is insufficient to establish original publication.
+            publication = node.get("dateCreated")
+            published_at = None
+            if isinstance(publication, str):
+                try:
+                    candidate = datetime.fromisoformat(publication)
+                    if candidate.utcoffset() is not None:
+                        published_at = candidate
+                except ValueError:
+                    pass
             locations = [node.get("address"), node.get("location")]
             values = [node.get(key) for key in ("city", "cityName", "addressLocality")]
             for location in locations:
@@ -336,6 +361,8 @@ def _extract_json_items(html: str) -> list[KrishaSearchItem]:
                     title=str(title).strip() if title else "Новое объявление Krisha",
                     url=url,
                     snippet=str(description).strip()[:500] if description else None,
+                    description=str(description).strip()[:500] if description else None,
+                    published_at=published_at,
                     city_evidence={city for value in values if (city := _locality_key(value))},
                 )
             )
@@ -386,11 +413,18 @@ def parse_krisha_search_page(html: str, *, expected_city: str | None = None) -> 
                 existing.title = item.title[:300]
             if item.snippet and not existing.snippet:
                 existing.snippet = item.snippet
+            if item.description and not existing.description:
+                existing.description = item.description
+            if item.published_at and (not existing.published_at or item.published_at < existing.published_at):
+                existing.published_at = item.published_at
         else:
             by_url[item.url] = item
 
     metadata = _CardMetadataParser()
     metadata.feed(html)
+    for url, description in metadata.descriptions.items():
+        if url in by_url and not by_url[url].description:
+            by_url[url].description = description
     for url, cities in metadata.cities.items():
         if url in by_url:
             by_url[url].city_evidence.update(cities)

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ApartmentAgent Browser Import",
-  "version": "0.4.20",
+  "version": "0.4.25",
   "description": "Автоматически передаёт публичные данные открытого объявления Krisha в ApartmentAgent.",
   "permissions": ["storage", "alarms", "tabs"],
   "host_permissions": [
@@ -15,6 +15,17 @@
   "action": {"default_title": "ApartmentAgent"},
   "options_page": "options.html",
   "content_scripts": [
+    {
+      "matches": [
+        "https://krisha.kz/arenda/kommercheskaya-nedvizhimost/ekibastuz/*",
+        "https://krisha.kz/prodazha/kommercheskaya-nedvizhimost/ekibastuz/*",
+        "https://krisha.kz/prodazha/biznes/ekibastuz/*",
+        "https://krisha.kz/arenda/prombazy/ekibastuz/*",
+        "https://krisha.kz/prodazha/prombazy/ekibastuz/*"
+      ],
+      "js": ["commercial-page.js"],
+      "run_at": "document_idle"
+    },
     {
       "matches": ["https://krisha.kz/a/*", "https://*.krisha.kz/a/*"],
       "js": ["extractor.js", "content.js"],

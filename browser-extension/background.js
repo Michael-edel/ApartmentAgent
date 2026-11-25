@@ -1,4 +1,4 @@
-importScripts('queue-worker.js');
+importScripts('queue-worker.js', 'commercial-worker.js');
 
 const DEFAULTS = {enabled: true, apiOrigin: ''};
 const importError = (detail, status) => {

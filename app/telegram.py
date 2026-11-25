@@ -17,6 +17,11 @@ from app.schemas import ListingCreate
 from app.scoring import assess_listing
 
 
+def apartment_topic(settings) -> dict[str, int]:
+    thread_id = getattr(settings, "telegram_apartment_thread_id", None)
+    return {"message_thread_id": thread_id} if thread_id is not None else {}
+
+
 def telegram_timezone(settings) -> tzinfo:
     name = getattr(settings, "telegram_digest_timezone", "Asia/Almaty")
     try:
@@ -152,6 +157,7 @@ async def notify_listing(
                 url,
                 json={
                     "chat_id": settings.telegram_chat_id,
+                    **apartment_topic(settings),
                     "text": message,
                     "parse_mode": "HTML",
                     "disable_web_page_preview": False,
@@ -232,7 +238,7 @@ async def notify_target_price(*, listing_id: int, offer_id: int, price_kzt: int,
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(f'https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage',
-                                         json={'chat_id': settings.telegram_chat_id, 'text': message,
+                                         json={'chat_id': settings.telegram_chat_id, **apartment_topic(settings), 'text': message,
                                                'parse_mode': 'HTML', 'disable_web_page_preview': False})
             response.raise_for_status()
             payload = response.json()

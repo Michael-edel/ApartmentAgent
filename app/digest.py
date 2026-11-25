@@ -13,7 +13,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.import_observability import ImportEvent
 from app.models import Listing, ListingObservation, SearchResult, TelegramNotification
-from app.telegram import telegram_timezone
+from app.telegram import apartment_topic, telegram_timezone
 
 
 def _aware(value: datetime) -> datetime:
@@ -42,7 +42,7 @@ async def _claim_and_send(event_key: str, event_type: str, message: str, setting
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.post(f'https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage',
-                json={'chat_id':settings.telegram_chat_id, 'text':message[:3800], 'disable_web_page_preview':True})
+                json={'chat_id':settings.telegram_chat_id, **apartment_topic(settings), 'text':message[:3800], 'disable_web_page_preview':True})
             response.raise_for_status()
             if not response.json().get('ok'):
                 raise RuntimeError('Telegram отклонил сообщение')

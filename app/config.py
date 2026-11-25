@@ -22,6 +22,10 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    telegram_apartment_thread_id: int | None = None
+    telegram_business_thread_id: int | None = None
+    commercial_monitor_enabled: bool = False
+    commercial_interval_minutes: int = Field(default=15, ge=5)
     telegram_enabled: bool = True
     telegram_notify_min_score: int = 85
     telegram_parser_alerts_enabled: bool = False
@@ -71,6 +75,11 @@ class Settings(BaseSettings):
     min_score_to_notify: int = 85
     min_bathrooms: int = 0
     exclude_pledged: bool = True
+
+    @field_validator('telegram_apartment_thread_id', 'telegram_business_thread_id', mode='before')
+    @classmethod
+    def empty_topic_id(cls, value):
+        return None if value == '' else value
 
     @field_validator('search_city', mode='before')
     @classmethod

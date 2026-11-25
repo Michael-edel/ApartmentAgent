@@ -11,7 +11,7 @@
   <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
   <link rel="apple-touch-icon" sizes="180x180" href="/static/icon-180.png">
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="/static/styles.css?v=159">
+  <link rel="stylesheet" href="/static/styles.css?v=160">
   <link rel="stylesheet" href="/static/listing-map.css?v=4">
   <link rel="stylesheet" href="/static/listing-workflow.css?v=1">
   <link rel="stylesheet" href="/static/listing-inspection.css?v=1">
@@ -143,6 +143,19 @@
           <button id="resumeBathroomCheck" class="secondary-action" type="button" hidden>Продолжить</button>
           <button id="cancelBathroomCheck" class="secondary-action" type="button" hidden>Остановить</button>
         </div>
+      </section>
+      <section class="commercial-monitor-panel" aria-labelledby="commercialMonitorLabel">
+        <label class="checkbox" id="commercialMonitorLabel">
+          <input id="commercialMonitorEnabled" type="checkbox" aria-describedby="commercialMonitorScope" disabled>
+          Мониторинг коммерции
+        </label>
+        <p class="microcopy" id="commercialMonitorScope">Экибастуз · от 100 м²</p>
+        <div aria-live="polite">
+          <p class="microcopy">Последняя успешная проверка — <span id="commercialMonitorLastCheck">—</span></p>
+          <p class="microcopy">Krisha · сохранено <strong id="commercialMonitorKrisha">—</strong><span id="commercialMonitorKrishaCheck"></span></p>
+          <p class="microcopy">OLX · сохранено <strong id="commercialMonitorOlx">—</strong><span id="commercialMonitorOlxCheck"></span></p>
+        </div>
+        <p id="commercialMonitorMessage" class="microcopy" role="status">Загружаю состояние мониторинга…</p>
       </section>
       <details id="importHealth" class="listing-comparables">
         <summary>Состояние источников и журнал импорта</summary>
@@ -332,6 +345,7 @@
   <script src="/static/listing-quality.js?v=1" defer></script>
   <script src="/static/search-quality.js?v=4" defer></script>
   <script src="/static/import-health.js?v=2" defer></script>
+  <script src="/static/commercial-monitor.js?v=1" defer></script>
   <script src="/static/search-profiles.js?v=5" defer></script>
   <script src="/static/app.js?v=185" defer></script>
 </body>

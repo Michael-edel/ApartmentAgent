@@ -36,7 +36,7 @@
   let lastSavedDetails = false;
   let archiveReporting = false;
   let waitingForUserCheck = false;
-  let userCheckDeadline = 0;
+  let fastUserCheckUntil = 0;
   let observationGeneration = 0;
   const hasText = value => typeof value === 'string' && !!value.trim();
   const fastSnapshotReady = payload => {
@@ -180,6 +180,10 @@
       notifyQueue('unknown', `Не удалось прочитать: ${fields}.${title ? ` Заголовок: ${title}` : ''}`, 'unreadable');
     }
   };
+  const observeUserCheckAgain = () => {
+    // Long checks still recover in this document. Read less often while waiting.
+    window.setTimeout(observe, Date.now() < fastUserCheckUntil ? 5000 : 30000);
+  };
   const observe = () => {
     let payload = null;
     let extractionError = null;
@@ -187,17 +191,13 @@
     if (challengeDetected(payload)) {
       if (!waitingForUserCheck) {
         waitingForUserCheck = true;
-        userCheckDeadline = Date.now() + 15 * 60 * 1000;
+        fastUserCheckUntil = Date.now() + 15 * 60 * 1000;
         observationGeneration += 1;
         show('ApartmentAgent: сайт запросил проверку браузера. Пройдите её самостоятельно.', true);
         notifyQueue('blocked', 'Сайт запросил проверку браузера');
       }
       // Only observe; never interact with a challenge or retry imports while it is present.
-      if (Date.now() >= userCheckDeadline) {
-        show('ApartmentAgent: после завершения проверки обновите страницу объявления.');
-        return;
-      }
-      window.setTimeout(observe, 5000);
+      observeUserCheckAgain();
       return;
     }
     if (payload?.availability_status !== 'archived' && explicitNotFound()) {
@@ -207,11 +207,7 @@
     if (waitingForUserCheck) {
       const ready = payload && ['price_kzt', 'area_m2', 'rooms'].every(key => Number(payload[key]) > 0);
       if (!ready && payload?.availability_status !== 'archived' && !unavailableDetected()) {
-        if (Date.now() >= userCheckDeadline) {
-          show('ApartmentAgent: после завершения проверки обновите страницу объявления.');
-          return;
-        }
-        window.setTimeout(observe, 5000);
+        observeUserCheckAgain();
         return;
       }
       // The document can recover without a navigation. Give the new DOM its

@@ -424,10 +424,15 @@ assert.deepEqual(recoveredAfterTwoMinutes.outcomes, ['blocked'], 'the original b
 const longChallenge = fixture();
 longChallenge.document.title = 'Проверка безопасности';
 longChallenge.run();
-longChallenge.advance(910000);
+const afterFifteenMinutes = 15 * 60 * 1000 + 10000;
+longChallenge.advance(afterFifteenMinutes);
 assert.deepEqual(longChallenge.outcomes, ['blocked']);
 assert.equal(longChallenge.posted.length, 0, 'the extension must not post during a long user check');
-assert.match(longChallenge.messages.at(-1), /после завершения проверки обновите страницу/);
+longChallenge.document.title = '4-комнатная квартира 100 м²';
+longChallenge.advance(afterFifteenMinutes + 35000);
+assert.equal(longChallenge.posted.length, 1, 'a check lasting over 15 minutes can recover on the same document');
+assert.match(longChallenge.messages.at(-1), /сохранено объявление/);
+assert.deepEqual(longChallenge.outcomes, ['blocked'], 'the server owns continuation after the original check');
 
 // An old successful snapshot must not suppress a fresh post after a check.
 const challengeAfterSave = fixture();
