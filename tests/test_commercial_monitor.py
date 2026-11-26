@@ -270,7 +270,7 @@ async def test_commercial_split_routes_mixed_new_ads_and_price_changes(commercia
     assert await commercial.send_commercial_events(settings) is True
     assert [payload['message_thread_id'] for payload in payloads] == [51, 52, 52, 51]
     for payload, (listing, notice) in zip(payloads, [
-        (new_rent, 'Новое объявление'), (new_sale, 'Новое объявление'),
+        (new_rent, 'Впервые найдено'), (new_sale, 'Впервые найдено'),
         (old_sale, '30 000 000 ₸ → 27 000 000 ₸'), (old_rent, '500 000 ₸ → 450 000 ₸'),
     ], strict=True):
         assert notice in payload['text'] and listing.url in payload['text']
@@ -347,6 +347,24 @@ async def test_queued_notice_gets_cover_saved_after_the_event(commercial_deliver
     async with sessions() as session:
         event = await session.scalar(select(CommercialEvent))
         assert event.photo_url == cover and event.sent_with_photo is True
+
+
+@pytest.mark.parametrize(('source', 'label'), [('krisha', '🟨 <b>Krisha.kz</b>'), ('olx', '🟩 <b>OLX.kz</b>')])
+def test_commercial_format_preserves_queued_event_and_orders_fields(source, label):
+    old = (
+        '🏢 <b>Коммерческая недвижимость · Продажа</b>\n'
+        f'Цена изменилась · {"Krisha" if source == "krisha" else "OLX"} · Экибастуз\n'
+        'Магазин &amp; склад\nПлощадь: 120 м²\nЦена: 42 000 000 ₸ → 40 000 000 ₸\n'
+        'Обнаружено 25.11.2026 15:00 (UTC+05:00)\n'
+        '<a href="https://example.com/offer">Открыть объявление</a>'
+    )
+    rendered = commercial._commercial_message(old, '26.11.2026 12:01')
+    assert rendered.index('Цена:') < rendered.index(label) < rendered.index('Обнаружено') < rendered.index('Отправлено')
+    assert 'Цена изменилась' in rendered
+    assert '42 000 000 ₸ → 40 000 000 ₸' in rendered
+    assert 'Магазин &amp; склад' in rendered
+    assert '<a href="https://example.com/offer">Открыть объявление</a>' in rendered
+    assert '(UTC' not in rendered
 
 
 @pytest.mark.parametrize("reject_media", [False, True])

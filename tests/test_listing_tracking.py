@@ -11,6 +11,7 @@ from app.schemas import ListingCreate
 
 @pytest_asyncio.fixture
 async def sessions(monkeypatch):
+    import app.listing_quality  # Register the correction table before creating the test database.
     engine = create_async_engine('sqlite+aiosqlite:///:memory:')
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -72,6 +73,7 @@ def telegram_payloads(sessions, monkeypatch):
     calls = []
 
     class Response:
+        status_code = 200
         def raise_for_status(self): pass
         def json(self): return {'ok':True}
 
@@ -116,9 +118,9 @@ async def test_listing_notification_shows_first_seen_time_and_platform(sessions,
 
     assert len(telegram_payloads) == 2
     for request in telegram_payloads:
-        assert request['parse_mode'] == 'HTML' and not request['disable_web_page_preview']
+        assert request['parse_mode'] == 'HTML' and request['link_preview_options']['is_disabled']
         assert ('<blockquote>🟨 <b>Krisha.kz</b> · Астана · Есиль &amp; Нура\n'
-                'Найдено 23.11.2026 23:54\n'
+                'Обнаружено 23.11.2026 23:54\n'
                 'Отправлено 24.11.2026 01:07</blockquote>') in request['text']
     assert 'Цена изменилась' in telegram_payloads[-1]['text']
     async with sessions() as session:
@@ -149,3 +151,64 @@ async def test_target_notification_deduplicates_without_real_network(sessions, t
     async with sessions() as session:
         records = (await session.scalars(select(TelegramNotification))).all()
         assert len(records) == 1 and records[0].status == 'sent'
+
+
+@pytest.mark.asyncio
+async def test_listing_notification_sends_photo_with_ordered_fields(sessions, monkeypatch, telegram_payloads):
+    async def skip_target_alerts(**kwargs):
+        pass
+
+    monkeypatch.setattr(listing_service, 'evaluate_target_alerts', skip_target_alerts)
+    photo = 'https://alaps-photos-kr.kcdn.kz/a/photo.jpg'
+    await listing_service.persist_listing(payload(photo_urls=[photo]), refresh_ai=False)
+    sent = telegram_payloads[0]
+    assert sent['photo'] == photo
+    caption = sent['caption']
+    assert caption.index('Цена:') < caption.index('Krisha.kz') < caption.index('Сохранено') < caption.index('Отправлено')
+    assert '(UTC' not in caption
+    assert 'https://krisha.kz/a/show/1' in caption
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['photo', 'rejected_photo', 'no_photo', 'other_error'])
+async def test_apartment_photo_send_and_explicit_fallback(mode):
+    import httpx
+    from types import SimpleNamespace
+    from app import telegram
+
+    calls = []
+    class Client:
+        async def post(self, url, *, json):
+            calls.append((url.rsplit('/', 1)[-1], json))
+            if url.endswith('/sendPhoto') and mode in {'rejected_photo', 'other_error'}:
+                reason = ('Bad Request: failed to get HTTP URL content' if mode == 'rejected_photo'
+                          else 'Bad Request: chat not found')
+                return httpx.Response(400, json={'ok': False, 'description': reason})
+            return httpx.Response(200, json={'ok': True})
+
+    settings = SimpleNamespace(telegram_bot_token='test', telegram_chat_id='-1001', telegram_apartment_thread_id=42)
+    photo = 'https://alaps-photos-kr.kcdn.kz/a/photo.jpg'
+    message = 'Цена: 40 000 000 ₸\nИсточник: Krisha'
+    response = await telegram._send_apartment_message(Client(), settings, message, None if mode == 'no_photo' else photo)
+    assert response.status_code == (400 if mode == 'other_error' else 200)
+    assert [method for method, _ in calls] == {
+        'photo': ['sendPhoto'], 'rejected_photo': ['sendPhoto', 'sendMessage'],
+        'no_photo': ['sendMessage'], 'other_error': ['sendPhoto'],
+    }[mode]
+    assert all(data['message_thread_id'] == 42 for _, data in calls)
+    if mode in {'no_photo', 'rejected_photo'}:
+        assert calls[-1][1]['text'] == message
+        assert calls[-1][1]['link_preview_options']['is_disabled'] is True
+    if mode != 'no_photo':
+        assert calls[0][1]['photo'] == photo and calls[0][1]['caption'] == message
+
+
+def test_apartment_photo_uses_source_specific_hosts():
+    from app.telegram import _listing_photo
+    assert _listing_photo('https://krisha.kz/a/show/123', [
+        'https://example.com/photo.jpg', 'https://alaps-photos-kr.kcdn.kz/a/photo.jpg',
+    ]) == 'https://alaps-photos-kr.kcdn.kz/a/photo.jpg'
+    assert _listing_photo('https://astana.etagi.com/realty/123/', [
+        'https://cdn.esoft.digital/content/photo.jpg',
+    ]) == 'https://cdn.esoft.digital/content/photo.jpg'
+    assert _listing_photo('https://krisha.kz/a/show/123', ['https://cdn.esoft.digital/content/photo.jpg']) is None

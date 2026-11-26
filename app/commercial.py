@@ -300,6 +300,31 @@ def event_message(item, deal, area, price, old_price=None, *, section='property'
             f'<a href="{escape(item.url, quote=True)}">Открыть объявление</a>')
 
 
+def _commercial_message(message: str, sent_at: str) -> str:
+    """Format both current and already-queued commercial notifications."""
+    message = LEGACY_DETECTION_OFFSET.sub(r'\1', message)
+    match = re.fullmatch(
+        r'(?P<header>🏢 <b>[^\n]+</b>)\n'
+        r'(?P<notice>Впервые найдено|Новое объявление|Цена изменилась) · '
+        r'(?P<source>Krisha|OLX) · Экибастуз\n'
+        r'(?P<title>.*?)\nПлощадь: (?P<area>[^\n]+)\nЦена: (?P<price>[^\n]+)\n'
+        r'(?:(?P<detected>Обнаружено \d{2}\.\d{2}\.\d{4} \d{2}:\d{2})\n)?'
+        r'(?P<link><a href="[^\n]+">Открыть объявление</a>)',
+        message,
+        re.DOTALL,
+    )
+    if match is None:
+        return f'{message}\nОтправлено {sent_at}'
+    parts = match.groupdict()
+    source = '🟨 <b>Krisha.kz</b>' if parts['source'] == 'Krisha' else '🟩 <b>OLX.kz</b>'
+    detected = f"\n{parts['detected']}" if parts['detected'] else ''
+    return (
+        f"{parts['header']}\nЦена: <b>{parts['price']}</b>\n"
+        f"<blockquote>{source} · Экибастуз{detected}\nОтправлено {sent_at}</blockquote>\n"
+        f"{parts['notice']}\n{parts['title']}\nПлощадь: {parts['area']}\n{parts['link']}"
+    )
+
+
 async def save_scan(deal, items, *, source='krisha', section='property', checked_at=None,
                     require_enabled=False, complete=True, photo_attempts=()):
     # Keep the original scan keys for property and OLX so deployment does not reset their baselines.
@@ -370,7 +395,7 @@ async def save_scan(deal, items, *, source='krisha', section='property', checked
                 if first_discovery:
                     session.add(CommercialEvent(url=item.url, deal_type=deal, message=event_message(
                         item, deal, area, price, section=section,
-                        detected_at=checked_at if tracking_started_at else None),
+                        detected_at=checked_at),
                         status='queued', photo_url=row.photo_url))
         if complete:
             scan.initialized = True
@@ -403,8 +428,7 @@ async def _post_commercial_event(client, settings, event, *, thread_id=None):
     source = 'olx' if normalize_olx_listing_url(event.url) else 'krisha'
     photo = public_listing_photo(event.photo_url, source)
     sent_at = _local_time(datetime.now(UTC), telegram_timezone(settings))
-    message = LEGACY_DETECTION_OFFSET.sub(r'\1', event.message)
-    message = f'{message}\nОтправлено {sent_at}'
+    message = _commercial_message(event.message, sent_at)
     if photo and len(message) <= 1024:
         response = await client.post(f'{endpoint}/sendPhoto', json={
             **target, 'photo': photo, 'caption': message,

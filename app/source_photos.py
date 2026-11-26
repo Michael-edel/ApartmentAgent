@@ -4,6 +4,7 @@ from urllib.parse import urlsplit
 
 KRISHA_PHOTO_HOSTS = frozenset({
     "photos.krisha.kz", "krisha-photos.kcdn.kz", "krisha-photos.kcdn.online", "kzala2-photos-kr.kcdn.kz",
+    "alaps-photos-kr.kcdn.kz",
 })
 
 
@@ -27,6 +28,8 @@ def public_listing_photo(value: object, source: str) -> str | None:
         allowed = host in KRISHA_PHOTO_HOSTS
     elif source == "olx":
         allowed = host.endswith(".olxcdn.com")
+    elif source == "etagi":
+        allowed = host == "cdn.esoft.digital" and url.path.startswith("/content/")
     else:
         return None
     if not allowed or any(term in url.path.casefold() for term in ("empty-photo", "no-photo", "nophoto", "placeholder")):

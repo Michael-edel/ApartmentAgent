@@ -16,6 +16,7 @@ from app.olx import normalize_olx_listing_url
 from app.etagi import normalize_etagi_url
 from app.schemas import ListingCreate
 from app.scoring import assess_listing
+from app.source_photos import public_listing_photo
 
 
 def apartment_topic(settings) -> dict[str, int]:
@@ -67,7 +68,7 @@ def _listing_source_block(
         source = "⬜ <b>Другая площадка</b>"
     lines = [" · ".join([source, *(escape(place) for place in (city, district) if place)])]
     if found_at is not None:
-        lines.append(f"Найдено {_local_time(found_at, zone)}")
+        lines.append(f"Обнаружено {_local_time(found_at, zone)}")
     elif saved_at is not None:
         lines.append(f"Сохранено {_local_time(saved_at, zone)}")
     lines.append(f"Отправлено {_local_time(sent_at, zone)}")
@@ -80,8 +81,8 @@ def _message_for_listing(listing: ListingCreate, source_block: str, *,
     title = escape(listing.residential_complex or listing.title)
     lines = [
         f"🏠 <b>{title}</b>",
-        source_block,
         f"Цена: <b>{listing.price_kzt:,} ₸</b> · {assessment.price_per_m2:,} ₸/м²".replace(",", " "),
+        source_block,
         f"{listing.area_m2:g} м² · {listing.rooms} комн. · этаж {listing.floor or '—'}/{listing.floors_total or '—'}",
         f"Рейтинг: <b>{assessment.score}/100</b> · {assessment.verdict}",
     ]
@@ -102,6 +103,35 @@ def _message_for_listing(listing: ListingCreate, source_block: str, *,
         lines.append(f"{direction} Цена изменилась: {old:,} → {new:,} ₸".replace(",", " "))
     lines.append(f'<a href="{escape(str(listing.source_url), quote=True)}">Открыть объявление</a>')
     return "\n".join(lines)
+
+
+def _listing_photo(source_url: str, photos: list[str] | None) -> str | None:
+    source = ("krisha" if normalize_krisha_import_url(source_url) else
+              "olx" if normalize_olx_listing_url(source_url) else
+              "etagi" if normalize_etagi_url(source_url) else "")
+    return next((url for photo in photos or [] if (url := public_listing_photo(photo, source))), None)
+
+
+async def _send_apartment_message(client, settings, message: str, photo: str | None):
+    endpoint = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
+    target = {"chat_id": settings.telegram_chat_id, **apartment_topic(settings), "parse_mode": "HTML"}
+    if photo and len(message) <= 1024:
+        response = await client.post(f"{endpoint}/sendPhoto", json={
+            **target, "photo": photo, "caption": message,
+        })
+        if response.status_code != 400:
+            return response
+        error = response.json()
+        description = str(error.get("description", "")).casefold()
+        media_failure = any(marker in description for marker in (
+            "failed to get http url content", "wrong file identifier", "wrong type of the web page content",
+            "webpage_media_empty", "photo_invalid_dimensions", "image_process_failed", "file is too big",
+        ))
+        if error.get("ok") is not False or not media_failure:
+            return response
+    return await client.post(f"{endpoint}/sendMessage", json={
+        **target, "text": message, "link_preview_options": {"is_disabled": True},
+    })
 
 
 async def notify_listing(
@@ -132,6 +162,8 @@ async def notify_listing(
         if record and record.status == "sent":
             return True
         found_at, saved_at = await _listing_dates(session, listing_id)
+        saved_photos = await session.scalar(select(Listing.photo_urls).where(Listing.id == listing_id))
+        photo = _listing_photo(str(listing.source_url), [*listing.photo_urls, *(saved_photos or [])])
         source_block = _listing_source_block(str(listing.source_url), found_at=found_at, saved_at=saved_at,
                                              sent_at=datetime.now(UTC), zone=telegram_timezone(settings),
                                              city=listing.city, district=listing.district)
@@ -151,19 +183,9 @@ async def notify_listing(
         record.attempts = (record.attempts or 0) + 1
         await session.commit()
 
-    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(
-                url,
-                json={
-                    "chat_id": settings.telegram_chat_id,
-                    **apartment_topic(settings),
-                    "text": message,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": False,
-                },
-            )
+            response = await _send_apartment_message(client, settings, message, photo)
             response.raise_for_status()
             payload = response.json()
             if not payload.get("ok"):
@@ -219,10 +241,13 @@ async def notify_target_price(*, listing_id: int, offer_id: int, price_kzt: int,
                 'probable': 'возможно та же квартира'}.get(relationship, 'объявление')
     async with SessionLocal() as session:
         found_at, saved_at = await _listing_dates(session, offer_id)
+        offer_photos = await session.scalar(select(Listing.photo_urls).where(Listing.id == offer_id))
+        photo = _listing_photo(source_url, offer_photos)
         source_block = _listing_source_block(source_url, found_at=found_at, saved_at=saved_at,
                                              sent_at=datetime.now(UTC), zone=telegram_timezone(settings))
-        prices = f'🎯 Цена достигла цели: <b>{price_kzt:,} ₸</b> (цель {target_kzt:,} ₸)'.replace(',', ' ')
-        message = (f'{prices}\n{source_block}\n{relation} · последняя сохранённая цена\n'
+        target = f'Цель: {target_kzt:,} ₸'.replace(',', ' ')
+        price_line = f'Цена: <b>{price_kzt:,} ₸</b>'.replace(',', ' ')
+        message = (f'🎯 <b>Достигнута целевая цена</b>\n{price_line}\n{source_block}\n{target} · {relation}\n'
                    f'<a href="{escape(source_url, quote=True)}">Открыть объявление</a>')
         session.add(TelegramNotification(event_key=key, event_type='target_price', listing_id=listing_id,
                                          message=message, status='pending', attempts=1))
@@ -238,9 +263,7 @@ async def notify_target_price(*, listing_id: int, offer_id: int, price_kzt: int,
                 return False
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(f'https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage',
-                                         json={'chat_id': settings.telegram_chat_id, **apartment_topic(settings), 'text': message,
-                                               'parse_mode': 'HTML', 'disable_web_page_preview': False})
+            response = await _send_apartment_message(client, settings, message, photo)
             response.raise_for_status()
             payload = response.json()
             if not payload.get('ok'):
