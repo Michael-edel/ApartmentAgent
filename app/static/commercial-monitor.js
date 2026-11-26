@@ -7,6 +7,7 @@
   const krishaCheck = document.querySelector('#commercialMonitorKrishaCheck');
   const olxCount = document.querySelector('#commercialMonitorOlx');
   const olxCheck = document.querySelector('#commercialMonitorOlxCheck');
+  const trackingStart = document.querySelector('#commercialMonitorTrackingStart');
   const message = document.querySelector('#commercialMonitorMessage');
   const dateTime = new Intl.DateTimeFormat('ru-RU', {dateStyle: 'short', timeStyle: 'short'});
   const number = new Intl.NumberFormat('ru-RU');
@@ -32,6 +33,9 @@
     setText(krishaCheck, sourceCheckTime(status.sources.krisha.last_checked_at));
     setText(olxCount, number.format(status.sources.olx.count));
     setText(olxCheck, sourceCheckTime(status.sources.olx.last_checked_at));
+    const tracking = status.tracking_started_at;
+    setText(trackingStart, tracking ? `Отсчёт обнаружений — ${dateTime.format(new Date(tracking))}` : '');
+    trackingStart.hidden = !tracking;
   }
 
   async function request(path, options) {

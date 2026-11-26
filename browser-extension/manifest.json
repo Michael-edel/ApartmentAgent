@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ApartmentAgent Browser Import",
-  "version": "0.4.25",
+  "version": "0.4.31",
   "description": "Автоматически передаёт публичные данные открытого объявления Krisha в ApartmentAgent.",
   "permissions": ["storage", "alarms", "tabs"],
   "host_permissions": [
@@ -28,7 +28,7 @@
     },
     {
       "matches": ["https://krisha.kz/a/*", "https://*.krisha.kz/a/*"],
-      "js": ["extractor.js", "content.js"],
+      "js": ["extractor.js", "commercial-page.js", "content.js"],
       "run_at": "document_idle"
     },
     {

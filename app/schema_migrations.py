@@ -5,6 +5,15 @@ from sqlalchemy.engine import Connection
 # columns introduced after the initial MVP schema was deployed.
 _COLUMNS: dict[str, dict[str, str]] = {
     "commercial_scans": {"last_checked_at": "TIMESTAMP WITH TIME ZONE"},
+    "commercial_monitor_preferences": {"tracking_started_at": "TIMESTAMP WITH TIME ZONE"},
+    "commercial_listings": {
+        "published_at": "TIMESTAMP WITH TIME ZONE",
+        "detected_at": "TIMESTAMP WITH TIME ZONE",
+        "photo_url": "TEXT",
+        "photo_urls": "JSON NOT NULL DEFAULT '[]'",
+        "photo_checked_at": "TIMESTAMP WITH TIME ZONE",
+    },
+    "commercial_events": {"photo_url": "TEXT", "sent_with_photo": "BOOLEAN", "deal_type": "VARCHAR(16)"},
     "search_preferences": {"city": "VARCHAR(30)", "market_type": "VARCHAR(20)", "seller": "VARCHAR(20)", "min_price_kzt": "BIGINT", "max_price_kzt": "BIGINT", "min_area_m2": "DOUBLE PRECISION", "max_area_m2": "DOUBLE PRECISION", "min_bathrooms": "INTEGER", "exclude_pledged": "BOOLEAN", "active_profile_id": "INTEGER", "conditions": "JSON"},
     "listings": {
         "market_type": "VARCHAR(20)",

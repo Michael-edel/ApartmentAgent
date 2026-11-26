@@ -14,6 +14,7 @@ import httpx
 from app.config import SearchSettingsProxy
 from app.cities import city_slug, SEARCH_CITIES
 from app.seller import IDENTITY_CONFIRMED_REALTOR
+from app.source_photos import public_listing_photo
 
 settings = SearchSettingsProxy()
 
@@ -61,6 +62,7 @@ class KrishaSearchItem:
     city_evidence: set[str] = field(default_factory=set)
     description: str | None = None
     published_at: datetime | None = None
+    photo_url: str | None = None
 
 
 def _locality_key(value: object) -> str | None:
@@ -101,6 +103,8 @@ class _CardMetadataParser(HTMLParser):
         self.description_depth: int | None = None
         self.description_text: list[str] = []
         self.descriptions: dict[str, str] = {}
+        self.card_photo: str | None = None
+        self.photos: dict[str, str] = {}
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "section":
@@ -109,6 +113,16 @@ class _CardMetadataParser(HTMLParser):
             attributes = dict(attrs)
             if "a-card__title" in (attributes.get("class") or "").split():
                 self.title_url = normalize_krisha_listing_url(attributes.get("href") or "")
+            return
+        if tag in ("img", "source") and self.depth and not self.card_photo:
+            attributes = dict(attrs)
+            candidates = [attributes.get(key) for key in ("data-src", "data-original", "src")]
+            for key in ("data-srcset", "srcset"):
+                for candidate in (attributes.get(key) or "").split(","):
+                    if parts := candidate.split():
+                        candidates.append(parts[0])
+            self.card_photo = next((photo for value in candidates
+                                    if (photo := public_listing_photo(value, "krisha"))), None)
             return
         if tag != "div":
             return
@@ -120,6 +134,7 @@ class _CardMetadataParser(HTMLParser):
                 return
             self.card_id, self.depth, self.card_roles, self.title_url = card_id, 1, set(), None
             self.description_text = []
+            self.card_photo = None
             self.card_cities = {city for key in ("data-city", "data-city-name")
                                 if (city := _locality_key(attributes.get(key)))}
             return
@@ -185,6 +200,8 @@ class _CardMetadataParser(HTMLParser):
             if self.card_id and self.title_url == f"https://krisha.kz/a/show/{self.card_id}":
                 if self.description_text:
                     self.descriptions[self.title_url] = " ".join(" ".join(self.description_text).split())
+                if self.card_photo:
+                    self.photos[self.title_url] = self.card_photo
                 if any(self.sections):
                     self.catalog_urls.add(self.title_url)
                 if self.card_cities:
@@ -422,6 +439,9 @@ def parse_krisha_search_page(html: str, *, expected_city: str | None = None) -> 
 
     metadata = _CardMetadataParser()
     metadata.feed(html)
+    for url, photo in metadata.photos.items():
+        if url in by_url:
+            by_url[url].photo_url = photo
     for url, description in metadata.descriptions.items():
         if url in by_url and not by_url[url].description:
             by_url[url].description = description

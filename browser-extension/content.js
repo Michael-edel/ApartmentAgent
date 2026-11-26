@@ -310,9 +310,16 @@
     if (finalSnapshotSeen && !inFlight) finish();
     else window.setTimeout(observe, 400);
   };
-  window.setTimeout(() => {
+  const start = () => window.setTimeout(() => {
     // A delayed initial timer must not consume the observation and save window.
     startedAt = Date.now() - firstObservationDelay;
     observe();
   }, firstObservationDelay);
+  if (window.ApartmentAgentReadCommercialPhoto) {
+    void window.ApartmentAgentReadCommercialPhoto(challengeDetected).then(handled => {
+      if (!handled) start();
+    }, start);
+  } else {
+    start();
+  }
 })();

@@ -33,9 +33,7 @@ def telegram_timezone(settings) -> tzinfo:
 def _local_time(value: datetime, zone: tzinfo) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
-    local = value.astimezone(zone)
-    offset = local.strftime("%z")
-    return f"{local:%d.%m.%Y %H:%M} (UTC{offset[:3]}:{offset[3:]})"
+    return value.astimezone(zone).strftime("%d.%m.%Y %H:%M")
 
 
 async def _listing_dates(session: AsyncSession, listing_id: int) -> tuple[datetime | None, datetime | None]:

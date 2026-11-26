@@ -6,12 +6,12 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app import commercial, commercial_browser
 from app.main import app
-from app.models import Base, CommercialListing
+from app.models import Base, CommercialEvent, CommercialListing
 from app.schema_migrations import ensure_legacy_columns
 
 STATUS_URL = "/api/v1/commercial/status"
@@ -152,6 +152,84 @@ async def test_rejected_browser_report_does_not_advance_last_check(monitor):
     assert (await client.get(STATUS_URL)).json() == status
 
 
+async def test_browser_looks_up_missing_photos_for_changed_listings_before_backfill(monitor):
+    client, sessions, _ = monitor
+    catalog = commercial.KRISHA_CATALOGS["property", "rent"]
+    photo = "https://krisha-photos.kcdn.online/webp/example/1-750x470.jpg"
+    unchanged = {"url": "https://krisha.kz/a/show/1", "title": "Офис · 110 м²", "price": "110 000 ₸"}
+    changing = {"url": "https://krisha.kz/a/show/2", "title": "Офис · 120 м²", "price": "120 000 ₸"}
+    saved_photo = {"url": "https://krisha.kz/a/show/3", "title": "Офис · 130 м²", "photo_urls": [photo]}
+    small = {"url": "https://krisha.kz/a/show/4", "title": "Офис · 90 м²"}
+    scan_url = f"{BROWSER_URL}/scan"
+    candidate_url = f"{BROWSER_URL}/photo-candidates"
+    assert (await client.post(scan_url, json={"catalog": catalog, "cards": [unchanged, changing, saved_photo]})).status_code == 200
+
+    changed = {**changing, "price": "115 000 ₸"}
+    saved_without_photo = {**saved_photo, "photo_urls": []}
+    candidates = await client.post(candidate_url, json={"catalog": catalog, "cards": [
+        unchanged, changed, saved_without_photo, small,
+    ]})
+    assert candidates.json() == {"urls": [changing["url"], unchanged["url"]]}
+    async with sessions() as session:
+        listing = await session.get(CommercialListing, changing["url"])
+        assert listing.price == changing["price"]
+        assert listing.photo_url is None
+
+    result = await client.post(scan_url, json={"catalog": catalog, "cards": [{**changed, "photo_urls": [photo]}]})
+    assert result.status_code == 200
+    async with sessions() as session:
+        listing = await session.get(CommercialListing, changing["url"])
+        event = await session.scalar(select(CommercialEvent).where(CommercialEvent.url == changing["url"]))
+        assert listing.price == changed["price"]
+        assert listing.photo_url == event.photo_url == photo
+        assert listing.photo_urls == [photo]
+
+    candidates = await client.post(candidate_url, json={"catalog": catalog, "cards": [
+        unchanged, changed, saved_without_photo, small,
+    ]})
+    assert candidates.json() == {"urls": [unchanged["url"]]}
+    denied = await client.post(candidate_url, headers={"origin": "https://krisha.kz"}, json={
+        "catalog": catalog, "cards": [unchanged],
+    })
+    assert denied.status_code == 403
+
+
+async def test_browser_photo_queue_progresses_and_keeps_gallery_on_thumbnail_update(monitor):
+    client, sessions, _ = monitor
+    catalog = commercial.KRISHA_CATALOGS["property", "rent"]
+    cards = [{"url": f"https://krisha.kz/a/show/{number}", "title": "Офис · 120 м²"} for number in range(10, 17)]
+    first, missing, timed_out, *waiting = [card["url"] for card in cards]
+    cdn = "https://kzala2-photos-kr.kcdn.kz/webp/82/8287575c-025b-41e9-88da-51970eb69f79/"
+    cover, second, thumbnail = [cdn + filename for filename in ("1-750x470.webp", "2-750x470.webp", "1-120x90.jpg")]
+    scan_url = f"{BROWSER_URL}/scan"
+    candidate_url = f"{BROWSER_URL}/photo-candidates"
+    payload = {"catalog": catalog, "cards": cards}
+    assert (await client.post(scan_url, json=payload)).status_code == 200
+    assert (await client.post(candidate_url, json=payload)).json() == {"urls": [first, missing, timed_out]}
+
+    found = {**cards[0], "photo_url": thumbnail, "photo_urls": [cover, thumbnail, second, cdn + "empty-photo.jpg",
+        "https://kzala2-photos-kr.kcdn.kz.example.test/untrusted.jpg"]}
+    batch = {"catalog": catalog, "cards": [found, *cards[1:]], "photo_lookups": [
+        {"url": first, "status": "found", "rendered": True},
+        {"url": missing, "status": "metadata_missing", "rendered": True,
+         "diagnostics": {"gallery_roots": 1, "primary_images": 3, "trusted_links": 0}},
+        {"url": timed_out, "status": "render_timeout"},
+    ]}
+    result = await client.post(scan_url, json=batch)
+    assert result.status_code == 200
+    assert result.json()["with_photos"] == result.json()["with_galleries"] == 1
+    assert (await client.post(candidate_url, json=payload)).json() == {"urls": waiting[:3]}
+
+    assert (await client.post(scan_url, json={"catalog": catalog, "cards": [{**cards[0], "photo_url": thumbnail}]})).status_code == 200
+    async with sessions() as session:
+        listing = await session.get(CommercialListing, first)
+        assert listing.photo_urls == [cover, second]
+        assert listing.photo_url == cover
+        assert (await session.get(CommercialListing, missing)).photo_checked_at is not None
+        assert (await session.get(CommercialListing, timed_out)).photo_checked_at is not None
+        assert (await session.get(CommercialListing, waiting[0])).photo_checked_at is None
+
+
 async def test_browser_reports_verification_and_saves_partial_catalog_without_marking_it_complete(monitor):
     client, _, _ = monitor
     catalog = commercial.KRISHA_CATALOGS["property", "rent"]
@@ -175,22 +253,77 @@ async def test_browser_reports_verification_and_saves_partial_catalog_without_ma
     assert status["sources"]["krisha"]["last_checked_at"] is not None
 
 
+async def test_tracking_marks_existing_listings_and_notifies_once_at_first_discovery(monitor):
+    client, sessions, _ = monitor
+    catalog = commercial.KRISHA_CATALOGS["property", "rent"]
+    known = {"url": "https://krisha.kz/a/show/101", "title": "Офис · 110 м²",
+             "price": "220 000 ₸ за месяц", "published_at": "2020-01-01T05:00:00+05:00"}
+    new = {"url": "https://krisha.kz/a/show/102", "title": "Офис · 120 м²",
+           "price": "300 000 ₸ за месяц"}
+    assert (await client.post(f"{BROWSER_URL}/scan", json={"catalog": catalog, "cards": [known]})).status_code == 200
+    started_at = await commercial.start_commercial_tracking()
+    assert await commercial.start_commercial_tracking() == started_at
+    async with sessions() as session:
+        existing = await session.get(CommercialListing, known["url"])
+        assert commercial._utc(existing.detected_at) == started_at
+        assert commercial._utc(existing.published_at).year == 2020
+        assert existing.price == known["price"]
+        assert (await session.scalars(select(CommercialEvent))).all() == []
+
+    for _ in range(2):
+        assert (await client.post(f"{BROWSER_URL}/scan",
+                                  json={"catalog": catalog, "cards": [known, new]})).status_code == 200
+    status = (await client.get(STATUS_URL)).json()
+    assert datetime.fromisoformat(status["tracking_started_at"]) == started_at
+    async with sessions() as session:
+        discovered = await session.get(CommercialListing, new["url"])
+        discovery_at = discovered.detected_at
+        assert commercial._utc(discovery_at) >= started_at
+        assert discovered.published_at is None
+
+    changed = {**known, "price": "200 000 ₸ за месяц 1 818 ₸ за м²"}
+    for _ in range(2):
+        assert (await client.post(f"{BROWSER_URL}/scan",
+                                  json={"catalog": catalog, "cards": [changed, new]})).status_code == 200
+    async with sessions() as session:
+        events = (await session.scalars(select(CommercialEvent).order_by(CommercialEvent.id))).all()
+        assert [event.url for event in events] == [new["url"], known["url"]]
+        assert "Впервые найдено" in events[0].message and "Обнаружено" in events[0].message
+        assert "220 000 ₸ за месяц → 200 000 ₸ за месяц" in events[1].message
+        assert (await session.get(CommercialListing, new["url"])).detected_at == discovery_at
+
+
 async def test_previous_commercial_schema_retains_its_baseline_and_saved_count(monitor):
     client, sessions, _ = monitor
     started = datetime(2026, 11, 24, 8, tzinfo=UTC)
     seen = datetime(2026, 11, 24, 8, 15, tzinfo=UTC)
     async with sessions.begin() as session:
         await session.execute(text("ALTER TABLE commercial_scans DROP COLUMN last_checked_at"))
+        await session.execute(text("ALTER TABLE commercial_listings DROP COLUMN photo_urls"))
+        await session.execute(text("ALTER TABLE commercial_listings DROP COLUMN photo_checked_at"))
+        await session.execute(text("ALTER TABLE commercial_events DROP COLUMN deal_type"))
         await session.execute(
             text("INSERT INTO commercial_scans (deal_type, initialized, started_at) "
                  "VALUES ('olx-rent', TRUE, :started)"),
             {"started": started.isoformat()},
         )
-        session.add(CommercialListing(
-            url="olx:legacy", deal_type="rent", area=105, title="Legacy OLX rental", seen_at=seen,
+        await session.execute(text(
+            "INSERT INTO commercial_listings (url, deal_type, area, title, seen_at, photo_url) "
+            "VALUES ('olx:legacy', 'rent', 105, 'Legacy OLX rental', :seen, :photo)"
+        ), {"seen": seen.isoformat(), "photo": "https://a.olxcdn.com/legacy.jpg"})
+        await session.execute(text(
+            "INSERT INTO commercial_events (url, message, status, sent_with_photo) "
+            "VALUES ('https://krisha.kz/a/show/765', 'Legacy notification', 'sent', TRUE)"
         ))
         database = await session.connection()
         await database.run_sync(ensure_legacy_columns)
+        legacy = await session.get(CommercialListing, "olx:legacy")
+        assert legacy.photo_urls == []
+        assert legacy.photo_checked_at is None
+        assert legacy.photo_url == "https://a.olxcdn.com/legacy.jpg"
+        legacy_event = await session.scalar(select(CommercialEvent))
+        assert legacy_event.status == 'sent' and legacy_event.deal_type is None
+        assert legacy_event.sent_with_photo is True
 
     status = (await client.get(STATUS_URL)).json()
     assert status["sources"]["olx"]["count"] == 1

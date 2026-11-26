@@ -35,6 +35,7 @@ class CommercialMonitorPreference(Base):
     __tablename__ = "commercial_monitor_preferences"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     enabled: Mapped[bool] = mapped_column(Boolean)
+    tracking_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class CommercialListing(Base):
@@ -45,14 +46,22 @@ class CommercialListing(Base):
     price: Mapped[str | None] = mapped_column(Text, nullable=True)
     area: Mapped[float] = mapped_column(Float)
     seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    detected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    photo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    photo_urls: Mapped[list[str]] = mapped_column(JSON, default=list, server_default='[]')
+    photo_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class CommercialEvent(Base):
     __tablename__ = "commercial_events"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     url: Mapped[str] = mapped_column(Text)
+    deal_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
     message: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), default='queued')
+    photo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sent_with_photo: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 
 class ListingLike(Base):

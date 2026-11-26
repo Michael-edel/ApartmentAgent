@@ -118,8 +118,8 @@ async def test_listing_notification_shows_first_seen_time_and_platform(sessions,
     for request in telegram_payloads:
         assert request['parse_mode'] == 'HTML' and not request['disable_web_page_preview']
         assert ('<blockquote>🟨 <b>Krisha.kz</b> · Астана · Есиль &amp; Нура\n'
-                'Найдено 23.11.2026 23:54 (UTC+05:00)\n'
-                'Отправлено 24.11.2026 01:07 (UTC+05:00)</blockquote>') in request['text']
+                'Найдено 23.11.2026 23:54\n'
+                'Отправлено 24.11.2026 01:07</blockquote>') in request['text']
     assert 'Цена изменилась' in telegram_payloads[-1]['text']
     async with sessions() as session:
         messages = await session.scalars(select(TelegramNotification.message).order_by(TelegramNotification.id))
@@ -143,8 +143,8 @@ async def test_target_notification_deduplicates_without_real_network(sessions, t
     assert len(telegram_payloads) == 1
     message = telegram_payloads[0]['text']
     assert ('<blockquote>🟩 <b>OLX.kz</b>\n'
-            'Сохранено 24.11.2026 00:00 (UTC+05:00)\n'
-            'Отправлено 24.11.2026 01:07 (UTC+05:00)</blockquote>') in message
+            'Сохранено 24.11.2026 00:00\n'
+            'Отправлено 24.11.2026 01:07</blockquote>') in message
     assert f'href="{url}"' in message
     async with sessions() as session:
         records = (await session.scalars(select(TelegramNotification))).all()

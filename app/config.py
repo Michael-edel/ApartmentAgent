@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     telegram_chat_id: str = ""
     telegram_apartment_thread_id: int | None = None
     telegram_business_thread_id: int | None = None
+    telegram_business_rent_thread_id: int | None = Field(default=None, gt=0)
+    telegram_business_sale_thread_id: int | None = Field(default=None, gt=0)
     commercial_monitor_enabled: bool = False
     commercial_interval_minutes: int = Field(default=15, ge=5)
     telegram_enabled: bool = True
@@ -76,7 +78,8 @@ class Settings(BaseSettings):
     min_bathrooms: int = 0
     exclude_pledged: bool = True
 
-    @field_validator('telegram_apartment_thread_id', 'telegram_business_thread_id', mode='before')
+    @field_validator('telegram_apartment_thread_id', 'telegram_business_thread_id',
+                     'telegram_business_rent_thread_id', 'telegram_business_sale_thread_id', mode='before')
     @classmethod
     def empty_topic_id(cls, value):
         return None if value == '' else value

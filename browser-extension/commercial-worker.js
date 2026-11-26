@@ -5,7 +5,10 @@
   const KEY = 'apartmentAgentCommercialScan';
   const PREFIX = '/api/v1/commercial/browser';
   const MAX_PAGES = 10;
+  const MAX_GALLERY_CHECKS = 3;
+  const PHOTO_HASH = '#apartment-agent-commercial-photo';
   let serial = Promise.resolve();
+  let pendingPhoto = null;
   const run = fn => {
     const job = serial.then(fn);
     serial = job.catch(() => {});
@@ -49,10 +52,84 @@
       console.warn(`ApartmentAgent: не удалось передать состояние каталога (${status}).`, error);
     }
   };
+  const renderedPhoto = async url => {
+    let tab;
+    let timeout;
+    const taggedUrl = url + PHOTO_HASH;
+    try {
+      tab = await chrome.tabs.create({url: 'about:blank', active: false});
+      return await new Promise(resolve => {
+        pendingPhoto = {tabId: tab.id, url: taggedUrl, canonicalUrl: url, resolve};
+        timeout = setTimeout(() => resolve({status: 'render_timeout'}), 18000);
+        chrome.tabs.update(tab.id, {url: taggedUrl}).catch(() => resolve({status: 'content_unavailable'}));
+      });
+    } catch (_) {
+      return {status: 'content_unavailable'};
+    } finally {
+      pendingPhoto = null;
+      if (timeout) clearTimeout(timeout);
+      const current = await getTab(tab?.id);
+      const address = current?.pendingUrl || current?.url;
+      if (address === 'about:blank' || address === taggedUrl || address === url) {
+        await chrome.tabs.remove(current.id).catch(() => {});
+      }
+    }
+  };
+  const enrichPhoto = async (state, card) => {
+    const url = card.url;
+    let result;
+    try {
+      result = await chrome.tabs.sendMessage(state.tabId, {type: 'apartment-agent-commercial-photo', url}, {frameId: 0});
+    } catch (_) {
+      return {status: 'content_unavailable', url};
+    }
+    const usedRendered = result?.status === 'metadata_missing' && result.http_status === 200;
+    if (usedRendered) result = await renderedPhoto(url);
+    const detailStatuses = ['content_unavailable', 'http_unavailable', 'redirect_or_fetch_error', 'verification',
+      'metadata_missing', 'canonical_mismatch', 'render_timeout', 'found'];
+    const status = detailStatuses.includes(result?.status) ? result.status : 'content_unavailable';
+    const outcome = {status, url};
+    if (usedRendered) outcome.rendered = true;
+    if (Number.isInteger(result?.http_status)) outcome.http_status = result.http_status;
+    if (result?.photo_diagnostics) outcome.diagnostics = result.photo_diagnostics;
+    if (status === 'verification' || [403, 429, 468].includes(outcome.http_status)) {
+      state.detailPhotosBlocked = true;
+      console.warn('ApartmentAgent: Krisha ограничила загрузку фото. Каталоги сохраняются, запросы карточек отложены до следующей проверки.');
+    }
+    if (status === 'found' && typeof result.photo_url === 'string') {
+      card.photo_url = result.photo_url;
+      if (Array.isArray(result.photo_urls)) card.photo_urls = result.photo_urls.slice(0, 30);
+    }
+    return outcome;
+  };
+  const enrichCatalogPhotos = async (state, payload) => {
+    if (state.detailPhotosBlocked || !state.cards.length) return [{status: 'not_needed'}];
+    let candidates;
+    try {
+      candidates = await api(state.origin, '/photo-candidates', payload);
+    } catch (_) {
+      return [{status: 'preflight_unavailable'}];
+    }
+    if (!Array.isArray(candidates?.urls)) return [{status: 'candidate_missing'}];
+    const catalogCards = new Map(state.cards.map(card => [card.url, card]));
+    const outcomes = [];
+    for (const url of new Set(candidates.urls.slice(0, MAX_GALLERY_CHECKS))) {
+      if (typeof url !== 'string' || !/^https:\/\/krisha\.kz\/a\/show\/[1-9]\d{0,14}$/.test(url)) continue;
+      const card = catalogCards.get(url);
+      if (!card) continue;
+      if (outcomes.length) await new Promise(resolve => setTimeout(resolve, 1500));
+      outcomes.push(await enrichPhoto(state, card));
+      if (state.detailPhotosBlocked) break;
+    }
+    return outcomes.length ? outcomes : [{status: 'candidate_missing'}];
+  };
   const saveCatalog = async (state, complete = true) => {
     const catalog = state.catalogs[state.index];
     const payload = {catalog, cards: state.cards};
     if (!complete) payload.complete = false;
+    const photoLookups = await enrichCatalogPhotos(state, payload);
+    payload.photo_lookup = photoLookups[0];
+    if (photoLookups.length > 1) payload.photo_lookups = photoLookups;
     const result = await api(state.origin, '/scan', payload);
     if (!result.ok || result.catalog !== catalog) throw new Error('Catalog scan was not confirmed');
   };
@@ -150,6 +227,18 @@
     if (alarm.name === ALARM) runScheduled();
   });
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (['apartment-agent-commercial-photo-claim', 'apartment-agent-commercial-photo-rendered'].includes(message?.type)) {
+      // This reply must remain independent of the catalog job waiting for it.
+      const lookup = pendingPhoto;
+      const tracked = lookup && sender.frameId === 0 && sender.tab?.id === lookup.tabId
+        && [lookup.url, lookup.canonicalUrl].includes(sender.url);
+      if (tracked && message.type === 'apartment-agent-commercial-photo-rendered') {
+        lookup.resolve({status: message.status, photo_url: message.photo_url, photo_urls: message.photo_urls,
+          photo_diagnostics: message.photo_diagnostics, http_status: message.http_status});
+      }
+      sendResponse({tracked: Boolean(tracked)});
+      return false;
+    }
     if (message?.type !== 'apartment-agent-commercial-page') return false;
     void run(async () => {
       try {
