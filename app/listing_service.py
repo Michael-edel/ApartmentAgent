@@ -16,6 +16,7 @@ from app.availability import listing_availability, set_source_availability
 from app.cities import CITY_NAMES, city_slug, is_city_coordinate_pair
 from app.config import get_settings
 from app.database import SessionLocal
+from app.etagi import normalize_etagi_url
 from app.models import Listing, ListingObservation, PriceSnapshot, SearchResult
 from app.olx import normalize_olx_listing_url, olx_advert_id
 from app.krisha_search import normalize_krisha_listing_url
@@ -75,7 +76,7 @@ def _snapshot(listing_id: int, price_kzt: int, area_m2: float) -> PriceSnapshot:
 def _values(payload: ListingCreate) -> dict[str, object]:
     values = payload.model_dump(mode="json")
     raw_url = str(payload.source_url)
-    values["source_url"] = normalize_krisha_listing_url(raw_url) or normalize_olx_listing_url(raw_url) or raw_url
+    values["source_url"] = normalize_krisha_listing_url(raw_url) or normalize_olx_listing_url(raw_url) or normalize_etagi_url(raw_url) or raw_url
     return values
 
 
@@ -607,7 +608,7 @@ async def persist_listing(
                     relevant = 'bathrooms_count' if key == 'bathrooms_count_is_lower_bound' else key
                     if relevant in corrected_fields:
                         setattr(result, key, getattr(row, key))
-        if payload.source in {"krisha-import", "browser", "olx-import"} and payload.availability_status is not None:
+        if payload.source in {"krisha-import", "browser", "olx-import", "etagi"} and payload.availability_status is not None:
             await set_source_availability(session, row.source_url, state=payload.availability_status, observed_at=now)
         await session.commit()
         await session.refresh(row)

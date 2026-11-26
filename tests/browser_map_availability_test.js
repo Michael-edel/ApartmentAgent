@@ -24,7 +24,7 @@ class Element {
   const group = {addTo() { return this; }, clearLayers() { layers = []; }};
   const L = {map:() => map, tileLayer:() => ({on() {}, addTo() {}}), layerGroup:() => group,
     divIcon: value => value, marker: (_position, options) => ({bindPopup(popup) {this.popup = popup; return this;},
-      addTo() {layers.push({title:options.title, popup:this.popup}); return this;}})};
+      addTo() {layers.push({title:options.title, icon:options.icon, popup:this.popup}); return this;}})};
   const response = {city:'astana', items:[
     {source_url:'https://krisha.kz/a/show/1016547402', title:'Активная метка', latitude:51.1, longitude:71.4, platform:'krisha'},
     {source_url:'https://krisha.kz/a/show/22', title:'Вторая метка', latitude:51.2, longitude:71.4, platform:'krisha'},
@@ -58,5 +58,21 @@ class Element {
   window.ApartmentAgentMap.setUnavailableUrls([]);
   assert.equal(layers.length, 2, 'a reactivated item can reappear');
   assert.equal(fits, beforeFits);
+
+  response.items.push(
+    {source_url:'https://astana.etagi.com/realty/object/', title:'Квартира Этажей', latitude:51.21, longitude:71.4, platform:'etagi'},
+    {source_url:'https://www.olx.kz/d/obyavlenie/duplicate/', title:'Дубль Krisha и OLX', latitude:51.22, longitude:71.4, platform:'olx', cross_platform:true},
+  );
+  window.ApartmentAgentMap.open();
+  await new Promise(resolve => setImmediate(resolve));
+  const sourceSelect = all(body.children.at(-1)).find(node => node.tag === 'select');
+  sourceSelect.value = 'etagi';
+  sourceSelect.listeners.change();
+  assert.deepEqual(layers.map(x => x.title), ['Квартира Этажей']);
+  assert.match(layers[0].icon.html, /listing-map-pin etagi/);
+  assert.match(visibleText(layers[0].popup), /Источник: Этажи/);
+  sourceSelect.value = 'cross';
+  sourceSelect.listeners.change();
+  assert.deepEqual(layers.map(x => x.title), ['Дубль Krisha и OLX']);
   console.log('Map availability checks passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

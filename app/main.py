@@ -38,7 +38,7 @@ from app.market_comparison import LOOKBACK_DAYS, compare_saved_listings
 from app.market_index import periodic_market_index, router as market_index_router
 from app.market_type import MarketFilter, matches_market_type
 from app.olx import normalize_olx_listing_url, olx_advert_id
-from app import olx
+from app import etagi, olx
 from app.krisha_search import normalize_krisha_import_url, normalize_krisha_listing_url
 from app.models import BathroomCheckControl, BathroomCheckJob, BathroomCheckTask, DuplicateDecision, Listing, ListingCheck, ListingLike, ListingTargetPrice, ListingWorkflow, PriceSnapshot, SearchHistory, SearchResult
 from app.listing_tracking import tracking_summary
@@ -209,6 +209,16 @@ def _is_blocked_import_error(message: str) -> bool:
     return any(token in lowered for token in ("огранич", "провер", "captcha", "403", "429", "468"))
 
 
+async def _import_link(source_url: str, expected_city: SearchCity | None = None) -> ListingCreate:
+    if olx_advert_id(source_url):
+        return await observed_fetch("olx", source_url, "manual", olx.import_olx_listing, source_url,
+                                    expected_city=expected_city)
+    if etagi.normalize_etagi_url(source_url):
+        return await observed_fetch("etagi", source_url, "manual", etagi.import_etagi_listing, source_url,
+                                    expected_city=expected_city)
+    return await observed_fetch("krisha", source_url, "manual", import_krisha_listing, source_url)
+
+
 async def _finish_search_result_monitor(result_id: int, source_url: str) -> None:
     import_status = "error"
     import_error: str | None = None
@@ -219,9 +229,7 @@ async def _finish_search_result_monitor(result_id: int, source_url: str) -> None
             expected_city = result_city_slug(result.city) if result is not None else None
         if expected_city not in SEARCH_CITIES:
             raise ListingImportError("Город объявления не входит в выбранные города поиска.")
-        payload = (await observed_fetch("olx", source_url, "manual", olx.import_olx_listing, source_url,
-                                        expected_city=expected_city) if olx_advert_id(source_url)
-                   else await observed_fetch("krisha", source_url, "manual", import_krisha_listing, source_url))
+        payload = await _import_link(source_url, expected_city)
         observed = city_slug(payload.city)
         if (payload.city_observed or observed != "astana") and observed != expected_city:
             raise ListingImportError("Город объявления отличается от города в выдаче.")
@@ -367,9 +375,7 @@ async def import_olx_listing(payload: ListingCreate) -> ListingResponse:
 async def import_listing(payload: ListingImportRequest) -> ListingResponse:
     source_url = str(payload.source_url)
     try:
-        listing_data = (await observed_fetch("olx", source_url, "manual", olx.import_olx_listing, source_url)
-                        if olx_advert_id(source_url) else
-                        await observed_fetch("krisha", source_url, "manual", import_krisha_listing, source_url))
+        listing_data = await _import_link(source_url)
     except (ListingArchived, ListingUnavailable) as exc:
         source_state = "archived" if isinstance(exc, ListingArchived) else "unavailable"
         async with SessionLocal() as session:
@@ -732,7 +738,9 @@ async def search_map(
             continue
         listing = saved.get(key)
         result = found.get(key)
-        platform = 'olx' if olx_advert_id(key) else 'krisha' if normalize_krisha_listing_url(key) else None
+        platform = next((name for name, identify in (
+            ('olx', olx_advert_id), ('krisha', normalize_krisha_listing_url), ('etagi', etagi.normalize_etagi_url),
+        ) if identify(key)), None)
         cross_platform = listing is not None and listing.id in cross_platform_groups
         if listing is not None:
             actual_market = listing.market_type or (result.market_type if result is not None else None)

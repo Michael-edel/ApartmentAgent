@@ -114,7 +114,7 @@ function updateCriteriaCity() {
   const label = document.querySelector('#criteriaCity');
   if (label) label.textContent = cityNames.get(city) || 'Астана';
   const mode = document.querySelector('#searchModeDescription');
-  if (mode) mode.textContent = city === 'ekibastuz' ? 'Экибастуз ищется вручную по нажатию «Искать сейчас». Фоновый поиск работает для Астаны.' : 'Агент проверяет прямую выдачу Krisha и резервные поисковые источники каждые 15 минут.';
+  if (mode) mode.textContent = city === 'ekibastuz' ? 'Экибастуз ищется вручную по нажатию «Искать сейчас». Фоновый поиск работает для Астаны.' : 'Фоновый поиск по Астане проверяет площадки каждые 15 минут.';
   if (searchLeftBankOnly) {
     searchLeftBankOnly.disabled = city !== 'astana';
     if (searchLeftBankOnly.disabled) searchLeftBankOnly.checked = false;
@@ -184,6 +184,7 @@ function listingPlatform(value) {
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return '';
     if (['olx.kz', 'www.olx.kz'].includes(url.hostname)) return 'olx';
     if (['krisha.kz', 'www.krisha.kz'].includes(url.hostname)) return 'krisha';
+    if (url.protocol === 'https:' && !url.port && ['astana.etagi.com', 'ekibastuz.etagi.com'].includes(url.hostname)) return 'etagi';
   } catch {
     return '';
   }
@@ -197,16 +198,19 @@ function isOlxUrl(value) {
 function sourceFrameClass(url, crossPlatform) {
   const platform = listingPlatform(url);
   if (!platform) return '';
+  if (platform === 'etagi') return 'etagi-source';
   return crossPlatform ? 'cross-platform-source' : `${platform}-source`;
 }
 
-function olxBadge(url) {
-  return isOlxUrl(url) ? '<span class="olx-badge">OLX.kz</span>' : '';
+function sourceBadge(url) {
+  const platform = listingPlatform(url);
+  if (platform === 'olx') return '<span class="olx-badge">OLX.kz</span>';
+  if (platform === 'etagi') return '<span class="etagi-badge">Этажи</span>';
+  return '';
 }
 
 function duplicateSourceBadge(url) {
-  if (isOlxUrl(url)) return olxBadge(url);
-  return listingPlatform(url) === 'krisha' ? '<span class="meta">Krisha.kz</span>' : '';
+  return listingPlatform(url) === 'krisha' ? '<span class="meta">Krisha.kz</span>' : sourceBadge(url);
 }
 
 function buildBookmarklet() {
@@ -1060,7 +1064,7 @@ function render(listings, pinnedListing = null, revealId = null) {
       <div class="price">${money.format(item.price_kzt)}</div>
       <div class="meta">${item.rooms} комн. · ${number.format(item.area_m2)} м² · ${money.format(item.assessment.price_per_m2)}/м² · этаж ${item.floor || '—'}/${item.floors_total || '—'}</div>
       ${advertNumber ? `<div class="meta">Объявление Krisha №${advertNumber}</div>` : ''}
-      <div class="listing-bank">${olxBadge(item.source_url)}${marketBadge(item)}${riverBankBadge(item)}${availabilityBadge(item)}</div>
+      <div class="listing-bank">${sourceBadge(item.source_url)}${marketBadge(item)}${riverBankBadge(item)}${availabilityBadge(item)}</div>
       ${likeControl(item, 'listings')}
       ${hiddenControls(item, 'listing')}
       ${window.ApartmentAgentWorkflow?.render(item) || ''}
@@ -1291,7 +1295,7 @@ async function loadSearchResults() {
         ? '<section class="empty card"><strong>Нет объявлений с выбранным типом продавца</strong></section>'
         : strictBathrooms
         ? '<section class="empty card"><strong>Квартир с подтверждёнными двумя санузлами пока нет</strong><p>При отборе «От 2 санузлов» объявления без подтверждённого количества скрыты. Подходящие квартиры появятся после получения данных объявления.</p></section>'
-        : '<section class="empty card"><strong>Новых ссылок пока нет</strong><p>Объявления Krisha и OLX появятся здесь, когда будут найдены по выбранным условиям.</p></section>';
+        : '<section class="empty card"><strong>Новых ссылок пока нет</strong><p>Здесь появятся объявления Krisha, OLX и «Этажей» по выбранным условиям.</p></section>';
       return;
     }
     searchResults.innerHTML = items.map(item => {
@@ -1318,12 +1322,12 @@ async function loadSearchResults() {
           <div><span class="verdict">${escapeHtml(seenLabel)}</span><h3>${escapeHtml(cleanSearchTitle(item.title))}</h3></div>
           <div class="rating ${a.score < 85 ? 'medium' : ''}">${a.score ?? '—'}</div>
         </div>
-        <div class="search-facts">${olxBadge(item.url)}${facts.map(value => `<span>${escapeHtml(value)}</span>`).join('')}${marketBadge(item)}${typeof a.is_pledged === 'boolean' ? (a.is_pledged ? pledgeBadge(a) : '<span>Нет залога</span>') : ''}${bathroomBadge(a, true)}${sellerBadge(item)}${riverBankBadge(item)}</div>
+        <div class="search-facts">${sourceBadge(item.url)}${facts.map(value => `<span>${escapeHtml(value)}</span>`).join('')}${marketBadge(item)}${typeof a.is_pledged === 'boolean' ? (a.is_pledged ? pledgeBadge(a) : '<span>Нет залога</span>') : ''}${bathroomBadge(a, true)}${sellerBadge(item)}${riverBankBadge(item)}</div>
         ${likeControl(item, 'search/results')}
         ${hiddenControls(item, 'search')}
         ${reasons ? `<ul class="reason-list">${reasons}</ul>` : `<p class="meta">${escapeHtml(item.snippet || 'Откройте объявление для проверки параметров.')}</p>`}
         ${window.ApartmentAgentSearchQuality?.renderEvidence(item.quality_match) || ''}
-        <div class="meta source-meta">${advertNumber ? `Krisha №${advertNumber} · ` : `Источник: ${escapeHtml(item.search_engine)} · `}обнаружено ${dateTime.format(new Date(item.first_seen))}</div>
+        <div class="meta source-meta">${advertNumber ? `Krisha №${advertNumber} · ` : `Источник: ${escapeHtml(item.search_engine === 'etagi_direct' ? 'Этажи' : item.search_engine)} · `}обнаружено ${dateTime.format(new Date(item.first_seen))}</div>
         <div class="card-actions">
           ${imported && hasSavedCard ? `<a class="open-saved-card secondary-action" href="#listing-${savedId}">Открыть карточку →</a>` : `<button class="enrich-result primary secondary-action ${imported ? 'saved' : ''}" data-url="${escapeHtml(item.url)}" type="button" ${imported ? 'disabled' : ''}>${importLabel}</button>`}
           ${sourceUrl ? `<a class="search-open" data-result-id="${item.id}" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">Открыть и мониторить →</a>` : ''}
@@ -1482,7 +1486,7 @@ runSearchButton?.addEventListener('click', async () => {
     });
     const body = await readJson(response);
     if (!response.ok) throw new Error(body.detail || 'Не удалось выполнить поиск');
-    const blockedSites = [['krisha_direct', 'Krisha'], ['olx_direct', 'OLX']]
+    const blockedSites = [['krisha_direct', 'Krisha'], ['olx_direct', 'OLX'], ['etagi_direct', 'Этажи']]
       .filter(([provider]) => body.providers?.[provider]?.blocked)
       .map(([, name]) => name);
     const blockedNotice = blockedSites.length ? ` Ограничение доступа — ${blockedSites.join(', ')}.` : '';
@@ -1521,7 +1525,7 @@ importForm?.addEventListener('submit', async event => {
   event.preventDefault();
   const data = new FormData(importForm);
   const sourceUrl = String(data.get('source_url') || '').trim();
-  const browserImport = !isOlxUrl(sourceUrl) && event.submitter?.id !== 'serverImportButton';
+  const browserImport = !['olx', 'etagi'].includes(listingPlatform(sourceUrl)) && event.submitter?.id !== 'serverImportButton';
   if (browserImport && bathroomCheckBusy) return;
   if (browserImport) {
     bathroomCheckRevision += 1;

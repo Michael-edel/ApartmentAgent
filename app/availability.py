@@ -4,6 +4,7 @@ from typing import Literal
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.etagi import normalize_etagi_url
 from app.krisha_search import normalize_krisha_listing_url
 from app.models import Listing, ListingCheck, SearchResult
 from app.olx import normalize_olx_listing_url, olx_advert_id
@@ -26,7 +27,7 @@ def listing_is_available():
 
 
 def availability_key(url: str) -> str:
-    return normalize_krisha_listing_url(url) or normalize_olx_listing_url(url) or url
+    return normalize_krisha_listing_url(url) or normalize_olx_listing_url(url) or normalize_etagi_url(url) or url
 
 
 async def unavailable_urls(session: AsyncSession) -> set[str]:
@@ -45,7 +46,7 @@ async def _matching_ids(session: AsyncSession, model, url: str) -> list[int]:
         rows = (await session.execute(query.where(column.contains(f"{olx_id}.html", autoescape=True)))).all()
         return [row_id for row_id, row_url in rows if olx_advert_id(row_url) == olx_id]
     if canonical is None:
-        rows = (await session.execute(query.where(column == url))).all()
+        rows = (await session.execute(query.where(column == (normalize_etagi_url(url) or url)))).all()
         return [row_id for row_id, _ in rows]
     path = canonical.removeprefix('https://krisha.kz')
     rows = (await session.execute(query.where(column.contains(path, autoescape=True)))).all()

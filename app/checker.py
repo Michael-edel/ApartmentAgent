@@ -8,6 +8,7 @@ from app.availability import set_source_availability
 from app.cities import SEARCH_CITIES, SearchCity, city_slug
 from app.config import get_settings
 from app.database import SessionLocal
+from app.etagi import import_etagi_listing, normalize_etagi_url
 from app.import_observability import SourceCoolingDown, observed_fetch
 from app.importer import ListingArchived, ListingImportError, ListingUnavailable, import_krisha_listing
 from app.listing_service import persist_listing
@@ -60,6 +61,9 @@ async def check_listing(listing_id: int) -> ListingCheckResult:
             fresh = await observed_fetch("olx", source_url, "check", import_olx_listing,
                                          source_url, expected_city=saved_city)
             fresh = fresh.model_copy(update={"availability_status": "active"})
+        elif normalize_etagi_url(source_url):
+            fresh = await observed_fetch("etagi", source_url, "check", import_etagi_listing,
+                                         source_url, expected_city=saved_city)
         else:
             fresh = await observed_fetch("krisha", source_url, "check", import_krisha_listing, source_url)
         observed = city_slug(fresh.city)

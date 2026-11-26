@@ -11,8 +11,8 @@
   <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
   <link rel="apple-touch-icon" sizes="180x180" href="/static/icon-180.png">
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="/static/styles.css?v=160">
-  <link rel="stylesheet" href="/static/listing-map.css?v=4">
+  <link rel="stylesheet" href="/static/styles.css?v=161">
+  <link rel="stylesheet" href="/static/listing-map.css?v=5">
   <link rel="stylesheet" href="/static/listing-workflow.css?v=1">
   <link rel="stylesheet" href="/static/listing-inspection.css?v=1">
   <link rel="stylesheet" href="/static/listing-market-index.css?v=2">
@@ -49,7 +49,7 @@
     <section class="form-card card" id="searchPanel">
       <p class="eyebrow">Ранее обнаружение</p>
       <h2>Поиск новых объявлений</h2>
-      <p id="searchModeDescription">Агент проверяет прямую выдачу Krisha и резервные поисковые источники каждые 15 минут.</p>
+      <p id="searchModeDescription">Фоновый поиск по Астане проверяет площадки каждые 15 минут.</p>
       <div class="stats-grid search-stats">
         <article class="stat"><span>За час</span><strong id="foundHour">0</strong></article>
         <article class="stat"><span>Сегодня</span><strong id="foundToday">0</strong></article>
@@ -189,7 +189,7 @@
         <button id="refreshSearchButton" class="icon-button" aria-label="Обновить результаты">↻</button>
       </div>
     </section>
-    <p class="microcopy">Поиск по Krisha и OLX использует выбранные критерии. <a href="#savedListings">Сохранённые квартиры</a></p>
+    <p class="microcopy">Поиск по Krisha, OLX и «Этажам» использует выбранные критерии. <a href="#savedListings">Сохранённые квартиры</a></p>
     <label class="checkbox"><input id="searchShowHidden" type="checkbox"> Показывать скрытые объявления</label>
     <section id="searchResults" class="listing-grid"></section>
 
@@ -203,14 +203,14 @@
 
     <section class="form-card card">
       <p class="eyebrow">Быстрое добавление</p>
-      <h2>Ссылка на Krisha или OLX</h2>
+      <h2>Ссылка на Krisha, OLX или «Этажи»</h2>
       <form id="importForm">
         <label>Номер или ссылка
           <input id="importUrl" name="source_url" type="text" maxlength="2000" required placeholder="1010095181 или https://krisha.kz/a/show/...">
         </label>
         <button type="submit">Импортировать автоматически</button>
         <button id="serverImportButton" class="secondary-action" type="submit">Загрузить без расширения</button>
-        <p class="microcopy">Для OLX достаточно ссылки. Для Krisha можно указать номер и использовать расширение для браузерного импорта.</p>
+        <p class="microcopy">Для OLX и «Этажей» укажите ссылку на объявление. Для Krisha можно указать номер и использовать расширение для браузерного импорта.</p>
         <p id="importMessage" class="form-message" aria-live="polite"></p>
       </form>
     </section>
@@ -338,16 +338,16 @@
   </nav>
 
   <script src="/static/vendor/leaflet/leaflet.js" defer></script>
-  <script src="/static/listing-map.js?v=8" defer></script>
+  <script src="/static/listing-map.js?v=9" defer></script>
   <script src="/static/listing-workflow.js?v=1" defer></script>
   <script src="/static/listing-tracking.js?v=1" defer></script>
   <script src="/static/listing-inspection.js?v=1" defer></script>
   <script src="/static/listing-market-index.js?v=2" defer></script>
   <script src="/static/listing-quality.js?v=1" defer></script>
   <script src="/static/search-quality.js?v=4" defer></script>
-  <script src="/static/import-health.js?v=2" defer></script>
+  <script src="/static/import-health.js?v=3" defer></script>
   <script src="/static/commercial-monitor.js?v=2" defer></script>
   <script src="/static/search-profiles.js?v=5" defer></script>
-  <script src="/static/app.js?v=185" defer></script>
+  <script src="/static/app.js?v=186" defer></script>
 </body>
 </html>

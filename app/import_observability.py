@@ -19,9 +19,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.database import SessionLocal
 from app.models import Base
 
-Source = Literal['krisha', 'olx']
+Source = Literal['krisha', 'olx', 'etagi']
 Status = Literal['success', 'blocked', 'error', 'skipped']
-_BLOCK_CODES = frozenset({403, 429, 468})
+_BLOCK_CODES = frozenset({403, 423, 429, 468})
 _MAX_DELAY_SECONDS = 3600
 _BASE_DELAY_SECONDS = 60
 _EXTENSION_RECENT_SECONDS = 150
@@ -34,7 +34,12 @@ _FIELDS = frozenset({'title', 'city', 'district', 'address', 'price_kzt', 'area_
                      'repair_condition', 'residential_complex'})
 _METHODS = frozenset({'search', 'auto', 'browser', 'manual', 'check', 'queue', 'import'})
 _lock = asyncio.Lock()
-_request_locks = {source: asyncio.Lock() for source in ('krisha', 'olx')}
+_source_hosts = {
+    'krisha': {'krisha.kz', 'www.krisha.kz'},
+    'olx': {'olx.kz', 'www.olx.kz'},
+    'etagi': {'astana.etagi.com', 'ekibastuz.etagi.com'},
+}
+_request_locks = {source: asyncio.Lock() for source in _source_hosts}
 _logger = logging.getLogger(__name__)
 
 
@@ -70,8 +75,7 @@ def _safe_url(source: Source, value: str | None) -> str:
     """Allow only public source URLs and no query, fragment or userinfo."""
     try:
         parsed = urlsplit(value or '')
-        hosts = {'krisha': {'krisha.kz', 'www.krisha.kz'}, 'olx': {'olx.kz', 'www.olx.kz'}}
-        if (parsed.scheme != 'https' or (parsed.hostname or '').lower() not in hosts[source]
+        if (parsed.scheme != 'https' or (parsed.hostname or '').lower() not in _source_hosts[source]
                 or parsed.username is not None or parsed.password is not None or parsed.port is not None):
             return ''
         path = parsed.path[:500]
@@ -129,7 +133,7 @@ async def _cooldown(session, source: Source, now: datetime, channel: Literal['se
 
 
 async def source_cooldown(source: Source, channel: Literal['search', 'detail'] | None = None) -> dict:
-    if source not in ('krisha', 'olx'):
+    if source not in _source_hosts:
         raise ValueError('Unknown source')
     async with SessionLocal() as session:
         return await _cooldown(session, source, _now(), channel)
@@ -137,7 +141,7 @@ async def source_cooldown(source: Source, channel: Literal['search', 'detail'] |
 
 async def record_import(source: Source, url: str | None, method: str, status: Status, *,
                         fields=(), error: str | None = None, http_status: int | None = None) -> dict:
-    if source not in ('krisha', 'olx') or status not in ('success', 'blocked', 'error', 'skipped'):
+    if source not in _source_hosts or status not in ('success', 'blocked', 'error', 'skipped'):
         raise ValueError('Invalid source or status')
     method = method if method in _METHODS else 'import'
     code = http_status if isinstance(http_status, int) and not isinstance(http_status, bool) and 100 <= http_status <= 599 else None
@@ -210,7 +214,7 @@ async def _observe_request(source: Source, url: str | None, method: str, fetch, 
         code = int(match[1]) if match else None
         if type(exc).__name__ in {'ListingArchived', 'ListingUnavailable'}:
             state = 'skipped'
-        elif (code in _BLOCK_CODES or type(exc).__name__ in {'KrishaSearchBlocked', 'OlxSearchBlocked'}
+        elif (code in _BLOCK_CODES or type(exc).__name__ in {'KrishaSearchBlocked', 'OlxSearchBlocked', 'EtagiSearchBlocked'}
               or verification):
             state = 'blocked'
         else:
@@ -229,7 +233,7 @@ router = APIRouter(prefix='/api/v1/import-observability', tags=['import-observab
 async def import_observability_status() -> dict:
     async with SessionLocal() as session:
         result = {}
-        for source in ('krisha', 'olx'):
+        for source in _source_hosts:
             state = await _cooldown(session, source, _now())
             rows = (await session.execute(select(ImportEvent.status, func.count(ImportEvent.id))
                     .where(ImportEvent.source == source).group_by(ImportEvent.status))).all()

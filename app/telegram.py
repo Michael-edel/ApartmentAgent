@@ -13,6 +13,7 @@ from app.database import SessionLocal
 from app.krisha_search import normalize_krisha_import_url
 from app.models import Listing, SearchResult, TelegramNotification
 from app.olx import normalize_olx_listing_url
+from app.etagi import normalize_etagi_url
 from app.schemas import ListingCreate
 from app.scoring import assess_listing
 
@@ -60,6 +61,8 @@ def _listing_source_block(
         source = "🟨 <b>Krisha.kz</b>"
     elif normalize_olx_listing_url(source_url):
         source = "🟩 <b>OLX.kz</b>"
+    elif normalize_etagi_url(source_url):
+        source = "🟥 <b>Этажи</b>"
     else:
         source = "⬜ <b>Другая площадка</b>"
     lines = [" · ".join([source, *(escape(place) for place in (city, district) if place)])]

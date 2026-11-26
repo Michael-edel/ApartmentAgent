@@ -17,7 +17,7 @@ from app.krisha_search import KrishaSearchBlocked, normalize_krisha_listing_url
 from app.listing_service import fill_seller_from_krisha_search, persist_listing, sync_search_result_facts
 from app.models import Listing, SearchHistory, SearchPreference, SearchProfile, SearchResult
 from app.mortgage import parse_mortgage_text
-from app import olx
+from app import etagi, olx
 from app.property_duplicates import canonical_url
 from app.schemas import ListingCreate
 from app.scoring import listing_river_bank
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 _search_lock = asyncio.Lock()
 
 DISTRICTS = ["Есильский район", "Нура район", "Алматы район", "Сарыарка район", "Байконур район"]
-QUERYLESS_PROVIDERS = {"krisha_direct", "olx_direct"}
+DIRECT_PROVIDER_SOURCES = {"krisha_direct": "krisha", "olx_direct": "olx", "etagi_direct": "etagi"}
 
 
 class InvalidSearchArea(ValueError):
@@ -230,8 +230,10 @@ async def _save_items(
 ) -> tuple[int, int, list[SearchImportCandidate]]:
     accepted_by_url: dict[str, SearchItem] = {}
     for item in items:
-        if settings.market_type == 'new' and provider_name not in QUERYLESS_PROVIDERS:
+        if settings.market_type == 'new' and provider_name not in DIRECT_PROVIDER_SOURCES:
             continue  # Web snippets cannot establish a primary-market listing.
+        if provider_name == "etagi_direct" and (item.payload is None or city_slug(item.payload.city) != settings.search_city):
+            continue
         if _matches_target(item) and (provider_name not in {'brave', 'bing_rss'} or _secondary_city_confirmed(item)):
             accepted_by_url[item.url] = item
     accepted_items = list(accepted_by_url.values())
@@ -273,7 +275,7 @@ async def _save_items(
                     and provider_name != 'krisha_direct'):
                 accepted_count -= 1
                 continue
-            direct_source = bool(krisha_url or olx_id)
+            direct_source = bool(krisha_url or olx_id or etagi.normalize_etagi_url(item.url))
             seller_type = item.seller_type if direct_source and seller_category(item.seller_type) != "unknown" else None
             market_type = item.market_type if direct_source and item.market_type in {'new', 'secondary'} else None
             if krisha_url and seller_type:
@@ -414,7 +416,9 @@ async def _auto_import(candidates: list[SearchImportCandidate]) -> tuple[int, in
     unique_candidates = list({candidate.url: candidate for candidate in candidates}.values())
     for candidate in unique_candidates:
         is_olx = olx.olx_advert_id(candidate.url) is not None
-        source = "olx" if is_olx else "krisha"
+        is_etagi = etagi.normalize_etagi_url(candidate.url) is not None
+        source = "olx" if is_olx else "etagi" if is_etagi else "krisha"
+        has_catalogue_details = candidate.payload is not None and (is_etagi or is_olx and candidate.payload.details_extracted)
         if source in blocked_sources:
             await _mark_import_result(
                 candidate,
@@ -424,18 +428,19 @@ async def _auto_import(candidates: list[SearchImportCandidate]) -> tuple[int, in
             blocked += 1
             continue
         try:
-            if is_olx:
+            if has_catalogue_details:
                 payload = candidate.payload
-                if payload is None or not payload.details_extracted:
-                    payload = await observed_fetch(source, candidate.url, "auto", olx.import_olx_listing,
-                                                   candidate.url, expected_city=candidate.city)
+            elif is_olx or is_etagi:
+                fetch_listing = etagi.import_etagi_listing if is_etagi else olx.import_olx_listing
+                payload = await observed_fetch(source, candidate.url, "auto", fetch_listing,
+                                               candidate.url, expected_city=candidate.city)
             else:
                 city_options = {} if candidate.city == "astana" else {"expected_city": candidate.city}
                 payload = await observed_fetch(source, candidate.url, "auto", import_krisha_listing,
                                                candidate.url, **city_options)
             if city_slug(payload.city) != candidate.city:
                 raise ValueError("Город объявления не совпадает с выбранным городом поиска")
-            if is_olx and settings.exclude_pledged and payload.is_pledged is True:
+            if (is_olx or is_etagi) and settings.exclude_pledged and payload.is_pledged is True:
                 async with SessionLocal() as session:
                     row = await session.get(SearchResult, candidate.result_id)
                     if row is not None:
@@ -443,7 +448,7 @@ async def _auto_import(candidates: list[SearchImportCandidate]) -> tuple[int, in
                         await session.commit()
                 continue
             actual_market = getattr(payload, 'market_type', None)
-            if (is_olx or actual_market in ('new', 'secondary')) and not matches_market_type(settings.market_type, actual_market):
+            if (is_olx or is_etagi or actual_market in ('new', 'secondary')) and not matches_market_type(settings.market_type, actual_market):
                 async with SessionLocal() as session:
                     row = await session.get(SearchResult, candidate.result_id)
                     if row is not None:
@@ -476,7 +481,7 @@ async def _auto_import(candidates: list[SearchImportCandidate]) -> tuple[int, in
         except Exception as exc:  # noqa: BLE001
             errors += 1
             await _mark_import_result(candidate, import_status="error", error=str(exc))
-        if settings.auto_import_delay_seconds > 0 and not (is_olx and candidate.payload and candidate.payload.details_extracted):
+        if settings.auto_import_delay_seconds > 0 and not has_catalogue_details:
             await asyncio.sleep(settings.auto_import_delay_seconds)
     return imported, errors, blocked
 
@@ -507,13 +512,12 @@ async def _fetch_one(
     query: str,
 ) -> tuple[str, str, list[SearchItem] | None, Exception | None]:
     try:
-        timeout = 75.0 if provider_name in QUERYLESS_PROVIDERS else 25.0
         provider = PROVIDERS[provider_name]
-        if provider_name in QUERYLESS_PROVIDERS:
-            source = "olx" if provider_name == "olx_direct" else "krisha"
-            items = await observed_fetch(source, None, "search", _timed_provider, provider, query, timeout)
+        source = DIRECT_PROVIDER_SOURCES.get(provider_name)
+        if source is not None:
+            items = await observed_fetch(source, None, "search", _timed_provider, provider, query, 75.0)
         else:
-            items = await _timed_provider(provider, query, timeout)
+            items = await _timed_provider(provider, query, 25.0)
         return provider_name, query, items, None
     except Exception as exc:  # noqa: BLE001
         return provider_name, query, None, exc
@@ -547,14 +551,18 @@ async def _run_search(*, seller: str | None = None) -> SearchSummary:
     queries = _rotated_queries()
     owner_search = (seller or settings.search_seller) == 'owner'
     krisha_owner_search = owner_search or settings.market_type == 'secondary'
-    direct_providers = ["krisha_direct"] + (["olx_direct"] if "olx_direct" in settings.search_providers else [])
+    direct_providers = ["krisha_direct"] + [
+        name for name in settings.search_providers if name in DIRECT_PROVIDER_SOURCES and name != "krisha_direct"
+    ]
     enabled_providers = (direct_providers if krisha_owner_search else
                          [name for name in settings.search_providers if name in PROVIDERS])
     jobs: list[tuple[str, str]] = []
 
     for provider_name in enabled_providers:
+        if provider_name == "etagi_direct" and owner_search:
+            continue
         owner_only = krisha_owner_search if provider_name == "krisha_direct" else owner_search
-        provider_queries = [f"owner:{settings.target_rooms}" if owner_only else str(settings.target_rooms)] if provider_name in QUERYLESS_PROVIDERS else queries
+        provider_queries = [f"owner:{settings.target_rooms}" if owner_only else str(settings.target_rooms)] if provider_name in DIRECT_PROVIDER_SOURCES else queries
         summary.providers[provider_name] = {
             "queries": len(provider_queries),
             "found": 0,
@@ -573,7 +581,7 @@ async def _run_search(*, seller: str | None = None) -> SearchSummary:
     for provider_name, query, items, error in results:
         stats = summary.providers[provider_name]
         if error is not None:
-            if isinstance(error, (KrishaSearchBlocked, olx.OlxSearchBlocked, SourceCoolingDown)):
+            if isinstance(error, (KrishaSearchBlocked, olx.OlxSearchBlocked, etagi.EtagiSearchBlocked, SourceCoolingDown)):
                 summary.blocked += 1
                 stats["blocked"] += 1
                 await _save_provider_status(provider_name, query, "blocked", str(error))

@@ -5,6 +5,7 @@ import math
 import re
 from difflib import SequenceMatcher
 from datetime import UTC, datetime
+from functools import lru_cache
 from typing import Any, Iterable
 from urllib.parse import urlsplit, urlunsplit
 
@@ -14,6 +15,7 @@ from app.cities import city_slug
 from app.krisha_search import normalize_krisha_listing_url
 from app.models import DuplicateDecision
 from app.olx import normalize_olx_listing_url, olx_advert_id
+from app.etagi import normalize_etagi_url
 from app.seller import seller_category
 
 AREA_DIFFERENCE_M2 = 0.5
@@ -24,8 +26,20 @@ _KRISHA_PHOTO = re.compile(
 )
 
 
+@lru_cache(maxsize=4096)
+def _source_identity(url: str) -> tuple[str, str | None, bool]:
+    """Keep stable URL facts per advert instead of parsing URLs for every pair."""
+    krisha = normalize_krisha_listing_url(url)
+    if krisha:
+        return krisha, None, True
+    olx = normalize_olx_listing_url(url)
+    if olx:
+        return olx, olx_advert_id(olx), False
+    return normalize_etagi_url(url) or url.strip(), None, False
+
+
 def canonical_url(value: str) -> str:
-    return normalize_krisha_listing_url(value) or normalize_olx_listing_url(value) or value.strip()
+    return _source_identity(value)[0]
 
 
 def _house(value: str | None) -> str | None:
@@ -114,9 +128,10 @@ def confirmed_component(listing_id: int, decisions: Decisions) -> set[int]:
 
 
 def duplicate_evidence(first: Any, second: Any, *, decisions: Decisions | None = None) -> dict[str, Any] | None:
-    if canonical_url(first.source_url) == canonical_url(second.source_url):
+    first_url, first_olx, first_krisha = _source_identity(first.source_url)
+    second_url, second_olx, second_krisha = _source_identity(second.source_url)
+    if first_url == second_url:
         return {'kind': 'same_url', 'shared_photos': 0}
-    first_olx, second_olx = olx_advert_id(first.source_url), olx_advert_id(second.source_url)
     if first_olx and first_olx == second_olx:
         return {'kind': 'same_url', 'shared_photos': 0}
     if decisions:
@@ -125,10 +140,6 @@ def duplicate_evidence(first: Any, second: Any, *, decisions: Decisions | None =
             return {'kind': 'confirmed', 'shared_photos': 0}
         if decision == 'different':
             return None
-    first_city, second_city = (getattr(first, 'city', None) or '').strip().casefold(), (getattr(second, 'city', None) or '').strip().casefold()
-    if (first_city and second_city
-            and (city_slug(first_city) or first_city) != (city_slug(second_city) or second_city)):
-        return None
     first_rooms, second_rooms = getattr(first, 'rooms', None), getattr(second, 'rooms', None)
     first_area, second_area = getattr(first, 'area_m2', None), getattr(second, 'area_m2', None)
     if (first_rooms is None or second_rooms is None or first_rooms != second_rooms
@@ -140,6 +151,10 @@ def duplicate_evidence(first: Any, second: Any, *, decisions: Decisions | None =
         a, b = getattr(first, key, None), getattr(second, key, None)
         if a is not None and b is not None and a != b:
             return None
+    first_city, second_city = (getattr(first, 'city', None) or '').strip().casefold(), (getattr(second, 'city', None) or '').strip().casefold()
+    if (first_city and second_city
+            and (city_slug(first_city) or first_city) != (city_slug(second_city) or second_city)):
+        return None
     first_bathrooms, second_bathrooms = getattr(first, 'bathrooms_count', None), getattr(second, 'bathrooms_count', None)
     if first_bathrooms is not None and second_bathrooms is not None:
         first_lower = bool(getattr(first, 'bathrooms_count_is_lower_bound', False))
@@ -161,8 +176,6 @@ def duplicate_evidence(first: Any, second: Any, *, decisions: Decisions | None =
             house2 = name2
     if house1 and house2 and house1 != house2:
         return None
-    first_krisha = bool(normalize_krisha_listing_url(first.source_url))
-    second_krisha = bool(normalize_krisha_listing_url(second.source_url))
     cross_platform = (first_krisha and bool(second_olx)) or (second_krisha and bool(first_olx))
     if (cross_platform and first_city and second_city and first_floor_present(first, second)
             and _shared_description(first, second)):
@@ -211,8 +224,14 @@ def group_listings(rows: Iterable[Any], *, target: Any | None = None, decisions:
 
 def cross_platform_listing_groups(rows: Iterable[Any], decisions: Decisions) -> dict[int, int]:
     listings = list(rows)
-    olx = {row.id for row in listings if olx_advert_id(row.source_url)}
-    krisha = {row.id for row in listings if normalize_krisha_listing_url(row.source_url)}
+    olx = set()
+    krisha = set()
+    for row in listings:
+        _, olx_id, is_krisha = _source_identity(row.source_url)
+        if olx_id:
+            olx.add(row.id)
+        elif is_krisha:
+            krisha.add(row.id)
     if not olx or not krisha:
         return {}
     result = {}
@@ -271,8 +290,8 @@ def unique_offers(group: Iterable[Any], *, target: Any | None = None, decisions:
     if target is not None:
         rows.sort(key=lambda row: row.id != target.id)
     for row in rows:
-        olx_id = olx_advert_id(row.source_url)
-        key = ("olx", olx_id) if olx_id else ("url", canonical_url(row.source_url))
+        url, olx_id, _ = _source_identity(row.source_url)
+        key = ("olx", olx_id) if olx_id else ("url", url)
         if key not in seen:
             seen.add(key)
             result.append(offer(row, target=target, decisions=decisions))

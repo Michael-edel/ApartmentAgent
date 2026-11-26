@@ -16,18 +16,20 @@
       return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
     } catch (_) { return null; }
   };
-  const sourceLabel = item => item.cross_platform === true ? 'Krisha.kz и OLX.kz' :
-    item.platform === 'krisha' ? 'Krisha.kz' : item.platform === 'olx' ? 'OLX.kz' : 'Источник не определён';
+  const platformLabels = new Map([['krisha', 'Krisha.kz'], ['olx', 'OLX.kz'], ['etagi', 'Этажи']]);
+  const isKrishaOlxPair = item => item.cross_platform === true && ['krisha', 'olx'].includes(item.platform);
+  const sourceLabel = item => isKrishaOlxPair(item) ? 'Krisha.kz и OLX.kz' :
+    platformLabels.get(item.platform) || 'Источник не определён';
   const groupSource = group => {
-    if (group.every(item => item.cross_platform === true)) return 'cross';
-    if (group.some(item => item.cross_platform === true)) return 'mixed';
+    if (group.every(isKrishaOlxPair)) return 'cross';
+    if (group.some(isKrishaOlxPair)) return 'mixed';
     const platform = group[0]?.platform;
-    return ['krisha', 'olx'].includes(platform) && group.every(item => item.platform === platform) ? platform : 'mixed';
+    return platformLabels.has(platform) && group.every(item => item.platform === platform) ? platform : 'mixed';
   };
   const validPoint = item => Number.isFinite(item.latitude) && Number.isFinite(item.longitude)
     && item.latitude >= -90 && item.latitude <= 90 && item.longitude >= -180 && item.longitude <= 180;
-  const matchesSource = (item, source) => source === 'all' || item.cross_platform === true
-    || (source !== 'cross' && item.platform === source);
+  const matchesSource = (item, source) => source === 'all' || item.platform === source
+    || (isKrishaOlxPair(item) && ['krisha', 'olx', 'cross'].includes(source));
   const urlKey = raw => {
     try {
       const url = new URL(raw);
@@ -67,7 +69,7 @@
     const sourceFilter = node('label', 'Площадка', 'listing-map-filter');
     const sourceSelect = node('select');
     sourceSelect.disabled = true;
-    for (const [value, label] of [['all', 'Все площадки'], ['krisha', 'Krisha'], ['olx', 'OLX'], ['cross', 'На обоих сайтах']]) {
+    for (const [value, label] of [['all', 'Все площадки'], ...platformLabels, ['cross', 'Дубли Krisha и OLX']]) {
       const option = node('option', label);
       option.value = value;
       sourceSelect.append(option);
@@ -88,7 +90,7 @@
     missingList.append(missingLabel, missingItems);
     const legend = node('div', null, 'listing-map-legend');
     legend.setAttribute('aria-label', 'Обозначения источников');
-    for (const [kind, label] of [['krisha', 'Krisha.kz'], ['olx', 'OLX.kz'], ['cross', 'Одна квартира на двух сайтах'], ['mixed', 'Разные источники или неизвестно'], ['approximate', 'Примерное местоположение']]) {
+    for (const [kind, label] of [...platformLabels, ['cross', 'Одна квартира на Krisha и OLX'], ['mixed', 'Разные источники или неизвестно'], ['approximate', 'Примерное местоположение']]) {
       const entry = node('span', null, 'listing-map-legend-entry');
       const swatch = node('span', null, `listing-map-swatch ${kind}`); swatch.setAttribute('aria-hidden', 'true');
       entry.append(swatch, document.createTextNode(label)); legend.append(entry);

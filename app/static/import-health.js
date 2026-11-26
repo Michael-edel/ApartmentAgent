@@ -5,7 +5,7 @@
   const refresh = panel.querySelector('[data-import-health-refresh]');
   const labels = {success:'Данные получены', blocked:'Доступ ограничен', error:'Ошибка', skipped:'Архив или недоступно'};
   const methods = {search:'Выдача', auto:'Автоимпорт', browser:'Расширение', manual:'По ссылке', check:'Мониторинг', queue:'Очередь'};
-  const sites = {krisha:'Krisha', olx:'OLX'};
+  const sites = {krisha:'Krisha', olx:'OLX', etagi:'Этажи'};
   const time = value => value ? new Date(value).toLocaleString('ru-RU') : '—';
   const channelLabels = {search:'Поиск', detail:'Загрузка карточек'};
   const channelStatus = channel => channel.in_cooldown ? `пауза до ${time(channel.retry_at)}` : 'паузы нет';

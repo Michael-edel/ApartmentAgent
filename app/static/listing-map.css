@@ -22,6 +22,7 @@
 .listing-map-swatch{display:inline-block;width:13px;height:13px;border:1px solid #89968f;border-radius:50%;flex:none}
 .listing-map-pin.krisha,.listing-map-swatch.krisha{background:#d99a00;color:#172d29}
 .listing-map-pin.olx,.listing-map-swatch.olx{background:#16805d;color:#fff}
+.listing-map-pin.etagi,.listing-map-swatch.etagi{background:var(--etagi-source);color:#fff}
 .listing-map-pin.cross{background:linear-gradient(135deg,#d99a00 50%,#16805d 50%);color:#172d29}
 .listing-map-swatch.cross{background:linear-gradient(to right,#d99a00 50%,#16805d 50%)}
 .listing-map-pin.mixed,.listing-map-swatch.mixed{background:#617080;color:#fff}

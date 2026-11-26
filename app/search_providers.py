@@ -11,7 +11,7 @@ import httpx
 from app.config import SearchSettingsProxy
 from app.cities import CITY_NAMES
 from app.krisha_search import search_krisha_direct as fetch_krisha_direct
-from app import olx
+from app import etagi, olx
 from app.schemas import ListingCreate
 
 settings = SearchSettingsProxy()
@@ -160,9 +160,28 @@ async def search_olx_direct(query: str) -> list[SearchItem]:
             for item in items]
 
 
+async def search_etagi_direct(query: str) -> list[SearchItem]:
+    listings = await etagi.search_apartments(
+        city=settings.search_city, rooms=settings.target_rooms,
+        min_price_kzt=settings.min_price_kzt, max_price_kzt=settings.max_price_kzt,
+        min_area_m2=settings.min_area_m2, max_area_m2=settings.max_area_m2,
+        market_type=settings.market_type, owner_only=query.startswith("owner:"),
+        min_bathrooms_count=settings.min_bathrooms,
+    )
+    return [
+        SearchItem(
+            title=listing.title, url=str(listing.source_url),
+            snippet=f"{listing.rooms}-комнатная квартира · {listing.area_m2:g} м² · {listing.price_kzt} ₸",
+            seller_type=listing.seller_type, market_type=listing.market_type, payload=listing,
+        )
+        for listing in listings
+    ]
+
+
 PROVIDERS = {
     "krisha_direct": search_krisha_direct,
     "olx_direct": search_olx_direct,
+    "etagi_direct": search_etagi_direct,
     "brave": search_brave,
     "bing_rss": search_bing_rss,
 }
