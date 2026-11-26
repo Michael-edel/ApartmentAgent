@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections import defaultdict
 from difflib import SequenceMatcher
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -196,6 +197,19 @@ def _timestamp(row: Any) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
+def _group_keys(row: Any, *, nearby: bool = False) -> Iterable[tuple]:
+    url, olx_id, _ = _source_identity(row.source_url)
+    yield 'url', url
+    if olx_id:
+        yield 'olx', olx_id
+    rooms, area = getattr(row, 'rooms', None), getattr(row, 'area_m2', None)
+    if rooms is not None and isinstance(area, (int, float)) and math.isfinite(area) and area > 0:
+        area_bucket = math.floor(area)
+        radius = math.ceil(AREA_DIFFERENCE_M2) if nearby else 0
+        for bucket in range(area_bucket - radius, area_bucket + radius + 1):
+            yield 'area', rooms, bucket
+
+
 def group_listings(rows: Iterable[Any], *, target: Any | None = None, decisions: Decisions | None = None) -> list[list[Any]]:
     """Group confirmed links first. Automatic matches must agree with every member."""
     values = list(rows)
@@ -204,6 +218,13 @@ def group_listings(rows: Iterable[Any], *, target: Any | None = None, decisions:
     values.sort(key=lambda row: (_timestamp(row), row.id), reverse=True)
     if target is not None:
         values.insert(0, target)
+    confirmed: dict[int, set[int]] = defaultdict(set)
+    for (left, right), decision in (decisions or {}).items():
+        if decision == 'same':
+            confirmed[left].add(right)
+            confirmed[right].add(left)
+    groups_by_key: dict[tuple, set[int]] = defaultdict(set)
+    anchors: dict[int, int] = {}
     groups: list[list[Any]] = []
     included: set[int] = set()
     for row in values:
@@ -212,13 +233,25 @@ def group_listings(rows: Iterable[Any], *, target: Any | None = None, decisions:
         linked = confirmed_component(row.id, decisions) if decisions else {row.id}
         cluster = [member for member in values if member.id in linked] if len(linked) > 1 else [row]
         included.update(member.id for member in cluster)
-        for group in groups:
+        # Every cluster member must match the first member of a group. Index
+        # conditions necessary for this one pair, then keep the original order
+        # and check all pairs for each candidate group.
+        anchor = cluster[0]
+        candidates = {anchors[other] for other in confirmed.get(anchor.id, ()) if other in anchors}
+        for key in _group_keys(anchor, nearby=True):
+            candidates.update(groups_by_key.get(key, ()))
+        for index in sorted(candidates):
+            group = groups[index]
             if all(duplicate_evidence(candidate, member, decisions=decisions) is not None
                    for candidate in cluster for member in group):
                 group.extend(cluster)
                 break
         else:
+            index = len(groups)
             groups.append(cluster)
+            anchors[anchor.id] = index
+            for key in _group_keys(anchor):
+                groups_by_key[key].add(index)
     return groups
 
 

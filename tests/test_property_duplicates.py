@@ -53,6 +53,20 @@ def test_duplicate_groups_do_not_bridge_pairwise_incompatible_offers():
     assert all(not ({1, 3} <= {row.id for row in group}) for group in groups)
 
 
+def test_duplicate_group_candidates_preserve_area_boundary_and_override_evidence():
+    rows = [
+        listing(1, area_m2=89.9),
+        listing(2, area_m2=90.3),
+        listing(3, area_m2=90.6),
+        listing(4, source_url='https://www.olx.kz/d/obyavlenie/original-IDrfHFK.html', area_m2=83),
+        listing(5, source_url='https://www.olx.kz/d/obyavlenie/changed-IDrfHFK.html', area_m2=30, rooms=1),
+        listing(6, area_m2=110),
+        listing(7, area_m2=60, rooms=2),
+    ]
+    groups = group_listings(rows, decisions={(4, 5): 'different', (6, 7): 'same'})
+    assert [[row.id for row in group] for group in groups] == [[1, 2], [3], [4, 5], [6, 7]]
+
+
 def test_lower_bound_bathroom_compatibility():
     lower = listing(1, bathrooms_count=2, bathrooms_count_is_lower_bound=True)
     assert duplicate_evidence(lower, listing(2, bathrooms_count=3))

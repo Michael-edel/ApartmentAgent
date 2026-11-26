@@ -1,5 +1,6 @@
 """Determine the bank of the Esil from an Astana map pin."""
 
+from functools import lru_cache
 from itertools import pairwise
 from typing import Literal
 
@@ -30,6 +31,7 @@ def _near_river(latitude: float, longitude: float) -> bool:
     return False
 
 
+@lru_cache(maxsize=4096)
 def astana_bank(latitude: float | None, longitude: float | None) -> AstanaBank:
     if latitude is None or longitude is None:
         return "unknown"

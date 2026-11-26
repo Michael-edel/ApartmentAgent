@@ -13,7 +13,7 @@ from typing import Any, Literal
 from sqlalchemy import and_, delete, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import raiseload, selectinload
 
 from app import __version__
 from app.access import require_basic_auth
@@ -710,6 +710,8 @@ async def search_map(
     seller = seller or settings.search_seller
     selected_city = settings.search_city
     selected_market = settings.market_type
+    conditions = SearchConditions.model_validate(settings.search_conditions or {})
+    has_polygon = conditions.quality.polygon is not None
     async with SessionLocal() as session:
         unavailable = await unavailable_urls(session)
         hidden = await hidden_urls(session)
@@ -723,13 +725,22 @@ async def search_map(
         saved: dict[str, Any] = {}
         for row in saved_rows:
             saved.setdefault(_favorite_key(row.source_url), row)
-        found: dict[str, SearchResult] = {}
-        stream = await session.stream_scalars(
-            select(SearchResult).order_by(SearchResult.first_seen.desc(), SearchResult.id.desc())
-            .execution_options(yield_per=200)
-        )
+        found: dict[str, Any] = {}
+        # A result without a saved listing cannot provide exact coordinates.
+        # With a saved area, only the metadata used to label saved pins is needed.
+        order = (SearchResult.first_seen.desc(), SearchResult.id.desc())
+        if has_polygon:
+            stream = await session.stream(select(
+                SearchResult.id, SearchResult.url, SearchResult.market_type, SearchResult.seller_type,
+            ).order_by(*order).execution_options(yield_per=200))
+        else:
+            stream = await session.stream_scalars(
+                select(SearchResult).order_by(*order).execution_options(yield_per=200)
+            )
         async for row in stream:
-            found.setdefault(_favorite_key(row.url), row)
+            key = _favorite_key(row.url)
+            if not has_polygon or key in saved:
+                found.setdefault(key, row)
 
     items: list[dict[str, object]] = []
     without_coordinates: list[dict[str, object]] = []
@@ -738,10 +749,6 @@ async def search_map(
             continue
         listing = saved.get(key)
         result = found.get(key)
-        platform = next((name for name, identify in (
-            ('olx', olx_advert_id), ('krisha', normalize_krisha_listing_url), ('etagi', etagi.normalize_etagi_url),
-        ) if identify(key)), None)
-        cross_platform = listing is not None and listing.id in cross_platform_groups
         if listing is not None:
             actual_market = listing.market_type or (result.market_type if result is not None else None)
             if city_slug(listing.city) != selected_city or not matches_market_type(selected_market, actual_market):
@@ -758,7 +765,7 @@ async def search_map(
                 continue
             if settings.exclude_pledged and listing.is_pledged is True:
                 continue
-            if not conditions_for_listing(listing)['matches_hard']:
+            if not conditions_for_listing(listing, conditions)['matches_hard']:
                 continue
             role = listing.seller_type
             if (not role or not role.strip() or role.strip() == OWNER_FROM_DESCRIPTION) and result is not None:
@@ -774,10 +781,10 @@ async def search_map(
                 'market_type': actual_market,
                 'listing_id': listing.id, 'search_result_id': result.id if result else None,
                 'seller_category': category,
-                'platform': platform, 'cross_platform': cross_platform,
+                'platform': _map_platform(key), 'cross_platform': listing.id in cross_platform_groups,
             }
             if not is_city_coordinate_pair(listing.city, listing.latitude, listing.longitude):
-                if (bank == 'all' and platform == 'olx' and is_city_coordinate_pair(
+                if (bank == 'all' and entry['platform'] == 'olx' and is_city_coordinate_pair(
                         listing.city, listing.approximate_latitude, listing.approximate_longitude)):
                     items.append({**entry, 'latitude': listing.approximate_latitude,
                                   'longitude': listing.approximate_longitude,
@@ -793,7 +800,7 @@ async def search_map(
         elif result is not None:
             if not city_matches(selected_city, result.city) or not _row_matches_target(result):
                 continue
-            if not conditions_for_result(result)['matches_hard']:
+            if not conditions_for_result(result, conditions=conditions)['matches_hard']:
                 continue
             if not matches_market_type(selected_market, result.market_type):
                 continue
@@ -801,7 +808,7 @@ async def search_map(
                 continue
             without_coordinates.append({
                 'source_url': key, 'title': result.title,
-                'platform': platform, 'cross_platform': False,
+                'platform': _map_platform(key), 'cross_platform': False,
             })
     exact_groups = {cross_platform_groups[item['listing_id']] for item in items
                     if item['cross_platform'] and not item.get('approximate_location')}
@@ -810,6 +817,16 @@ async def search_map(
     return {'city': selected_city, 'market_type': selected_market, 'items': items,
             'without_coordinates': len(without_coordinates),
             'without_coordinates_items': without_coordinates}
+
+
+def _map_platform(url: str) -> str | None:
+    if olx_advert_id(url):
+        return 'olx'
+    if normalize_krisha_listing_url(url):
+        return 'krisha'
+    if etagi.normalize_etagi_url(url):
+        return 'etagi'
+    return None
 
 
 @app.get("/api/v1/search/results")
@@ -1076,7 +1093,7 @@ async def list_listings(
     market_type: MarketFilter = "all",
 ) -> list[ListingResponse]:
     async with SessionLocal() as session:
-        query = select(Listing).options(selectinload(Listing.prices)).order_by(Listing.created_at.desc())
+        query = select(Listing).options(selectinload(Listing.prices), raiseload(Listing.checks)).order_by(Listing.created_at.desc())
         if market_type != "all":
             query = query.where(Listing.market_type == market_type)
         rows = (

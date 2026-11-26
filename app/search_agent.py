@@ -119,12 +119,12 @@ def _with_quality_conditions(result, conditions, listing=None, row=None):
         item['latitude'] = item['longitude'] = None
     if not item['description'] and row is not None:
         item['description'] = getattr(row, 'snippet', None)
-    if item['price_is_lower_bound'] is None and row is not None:
+    if spec.quality.exclude_lower_bound and item['price_is_lower_bound'] is None and row is not None:
         from app.search_analysis import _parse_price
         parsed_price, lower_bound = _parse_price(f"{getattr(row, 'title', '') or ''} {getattr(row, 'snippet', '') or ''}")
         if parsed_price is not None:
             item['price_is_lower_bound'] = lower_bound
-    if item['cash_only'] is None:
+    if spec.quality.exclude_cash_only and item['cash_only'] is None:
         from app.mortgage import _CASH_ONLY, parse_mortgage_claim
         claim = parse_mortgage_claim(item['description'], title=item['title'])
         if claim and claim[0] is False and _CASH_ONLY.search(claim[1]):
@@ -688,6 +688,7 @@ async def get_search_status() -> dict[str, object]:
     now = datetime.now(UTC)
     hour_ago = now - timedelta(hours=1)
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    conditions = SearchConditions.model_validate(settings.search_conditions or {})
 
     async with SessionLocal() as session:
         unavailable = await unavailable_urls(session)
@@ -698,7 +699,6 @@ async def get_search_status() -> dict[str, object]:
                 select(Listing.id, Listing.city, Listing.latitude, Listing.longitude, Listing.floor,
                        Listing.floors_total, Listing.building_year, Listing.property_details, Listing.market_type)
             )).all()
-        locations = {value.id: listing_river_bank(value.city, value.latitude, value.longitude) for value in location_rows}
         linked = {value.id: value for value in location_rows}
         matching_rows = await session.stream_scalars(select(SearchResult))
         async for row in matching_rows:
@@ -707,17 +707,21 @@ async def get_search_status() -> dict[str, object]:
                 continue
             if not matches_market_type(settings.market_type, (card.market_type if card and card.market_type else getattr(row, 'market_type', None))):
                 continue
-            if not conditions_for_result(row, card)['matches_hard']:
+            if not conditions_for_result(row, card, conditions)['matches_hard']:
                 continue
             if availability_key(row.url) in unavailable:
                 continue
             if _row_hidden_by_pledge(row):
                 pledged_hidden += int(_row_matches_basic(row, include_pledged=True))
                 continue
-            if settings.min_bathrooms and _row_matches_basic(row) and bathrooms_for_row(row) is None:
-                bathrooms_unconfirmed += 1
-            if not _row_matches_target(row):
+            if not _row_matches_basic(row):
                 continue
+            if settings.min_bathrooms:
+                count = bathrooms_for_row(row)
+                if count is None:
+                    bathrooms_unconfirmed += 1
+                if count is None or count < settings.min_bathrooms:
+                    continue
             total += 1
             is_new = row.status.startswith("new:")
             new_total += int(is_new)
@@ -725,9 +729,10 @@ async def get_search_status() -> dict[str, object]:
             first_seen = row.first_seen if row.first_seen.tzinfo else row.first_seen.replace(tzinfo=UTC)
             found_hour += int(first_seen >= hour_ago)
             found_today += int(first_seen >= day_start)
-            urgent += int(is_new and _priority(row.title or "", row.snippet, getattr(row, "mortgage_supported", None),
-                                              getattr(row, "is_pledged", None),
-                                              locations.get(getattr(row, "imported_listing_id", None), "unknown")) == "urgent")
+            if is_new:
+                bank = listing_river_bank(card.city, card.latitude, card.longitude) if card else "unknown"
+                urgent += int(_priority(row.title or "", row.snippet, getattr(row, "mortgage_supported", None),
+                                        getattr(row, "is_pledged", None), bank) == "urgent")
             engine_counts[row.search_engine] = engine_counts.get(row.search_engine, 0) + 1
         history_filter = ((SearchHistory.city == "astana") | SearchHistory.city.is_(None)) if settings.search_city == "astana" else SearchHistory.city == settings.search_city
         last_run = await session.scalar(select(func.max(SearchHistory.searched_at)).where(history_filter))
