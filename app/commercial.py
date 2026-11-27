@@ -14,7 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import SessionLocal
+from app.etagi import _get as get_etagi_page, _state as etagi_state
 from app.import_observability import SourceCoolingDown, observed_fetch
+from app.importer import ListingImportError
 from app.krisha_search import (
     KrishaSearchBlocked, KrishaSearchItem, _security_text, normalize_krisha_listing_url,
     parse_krisha_search_page,
@@ -45,6 +47,7 @@ KRISHA_PRICE = re.compile(
     re.I,
 )
 OLX_ROUTES = {'rent': ('arenda', 11), 'sale': ('prodazha', 14)}
+ETAGI_CATALOG = 'https://ekibastuz.etagi.com/commerce/'
 KRISHA_COOLDOWN_SECONDS = 60 * 60
 PHOTO_BATCH_SIZE = 3
 PHOTO_RETRY_DELAY = timedelta(hours=6)
@@ -111,12 +114,17 @@ async def commercial_monitor_status(settings) -> dict:
         tracking_started_at = preference.tracking_started_at if preference else None
         scans = (await session.scalars(select(CommercialScan).where(CommercialScan.initialized))).all()
         sources = {}
-        for source, prefix in (('krisha', 'https://krisha.kz/'), ('olx', 'olx:')):
+        for source, prefix in (('krisha', 'https://krisha.kz/'), ('olx', 'olx:'),
+                               ('etagi', ETAGI_CATALOG)):
             count, last_seen = (await session.execute(
                 select(func.count(), func.max(CommercialListing.seen_at))
                 .where(CommercialListing.url.startswith(prefix))
             )).one()
-            source_scans = [scan for scan in scans if scan.deal_type.startswith('olx-') == (source == 'olx')]
+            source_scans = [scan for scan in scans if (
+                scan.deal_type.startswith('olx-') if source == 'olx' else
+                scan.deal_type.startswith('etagi-') if source == 'etagi' else
+                not scan.deal_type.startswith(('olx-', 'etagi-'))
+            )]
             last_check = _latest(scan.last_checked_at for scan in source_scans)
             if last_check is None and source_scans:
                 # Older releases only recorded the first scan and when listings were seen.
@@ -141,6 +149,16 @@ class OlxCommercialItem:
 
 
 @dataclass(slots=True)
+class EtagiCommercialItem:
+    title: str
+    url: str
+    snippet: str | None
+    area: float
+    published_at: datetime | None = None
+    photo_url: str | None = None
+
+
+@dataclass(slots=True)
 class KrishaCommercialItem(KrishaSearchItem):
     photo_urls: list[str] = field(default_factory=list)
 
@@ -158,7 +176,7 @@ def krisha_gallery(item) -> list[str]:
 
 
 def eligible(item, section='property'):
-    if isinstance(item, OlxCommercialItem):
+    if isinstance(item, (OlxCommercialItem, EtagiCommercialItem)):
         return (item.area, item.snippet) if item.area >= 100 else None
     if section == 'industry':
         match = BUILDING_AREA.search(item.title) or BUILDING_AREA.search(item.description or '')
@@ -289,11 +307,47 @@ async def fetch_olx_catalog(deal):
     return list(rows.values())
 
 
+async def fetch_etagi_catalog(deal):
+    """Read the public commercial catalog and exclude its suggested adverts."""
+    items = {}
+    action = 'sale' if deal == 'sale' else 'lease'
+    for page in range(1, 21):
+        url = f'{ETAGI_CATALOG}?action_sl={action}&page={page}'
+        state = etagi_state(await get_etagi_page(url))
+        filters = state.get('filters', {}).get('commerce', {})
+        rows = state.get('lists', {}).get('commerce')
+        count, limit = filters.get('count'), filters.get('limit')
+        if (not isinstance(rows, list) or not isinstance(count, int) or isinstance(count, bool)
+                or not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0 or count < 0):
+            raise RuntimeError('Не удалось прочитать каталог коммерции «Этажей»')
+        remaining = max(0, count - (page - 1) * limit)
+        for raw in rows[:min(remaining, limit)]:
+            if not isinstance(raw, dict):
+                continue
+            identifier, area, price = raw.get('object_id'), raw.get('square'), raw.get('price')
+            meta = raw.get('meta') if isinstance(raw.get('meta'), dict) else {}
+            if (not isinstance(identifier, int) or isinstance(identifier, bool) or identifier <= 0
+                    or raw.get('class') != 'offices' or raw.get('status') != 'active'
+                    or raw.get('action_sl') != action or meta.get('city') != 'Экибастуз'
+                    or isinstance(area, bool) or not isinstance(area, (int, float)) or not 100 <= area <= 1_000_000):
+                continue
+            address = ' '.join(str(value).strip() for value in (meta.get('street'), raw.get('house_num')) if value)
+            title = f'Коммерческое помещение · {area:g} м²' + (f' · {address}' if address else '')
+            price_text = f'{int(price):,} ₸'.replace(',', ' ') if str(price).isdigit() and int(price) > 0 else None
+            if price_text and deal == 'rent':
+                price_text += ' за месяц'
+            link = f'{ETAGI_CATALOG}{identifier}/'
+            items[link] = EtagiCommercialItem(title, link, price_text, area, photo_url=raw.get('main_photo'))
+        if remaining <= limit:
+            return list(items.values())
+    raise RuntimeError('Каталог «Этажей» превышает предел страниц за проверку')
+
+
 def event_message(item, deal, area, price, old_price=None, *, section='property', detected_at=None):
     kind = 'Аренда' if deal == 'rent' else 'Продажа'
     header = 'Цена изменилась' if old_price else 'Впервые найдено' if detected_at else 'Новое объявление'
     price_line = f'{escape(old_price)} → {escape(price)}' if old_price and price else escape(price or 'не указана')
-    source = 'OLX' if isinstance(item, OlxCommercialItem) else 'Krisha'
+    source = 'OLX' if isinstance(item, OlxCommercialItem) else 'Этажи' if isinstance(item, EtagiCommercialItem) else 'Krisha'
     detected = f'Обнаружено {_local_time(detected_at, telegram_timezone(get_settings()))}\n' if detected_at else ''
     return (f'🏢 <b>{SECTION_LABELS[section]} · {kind}</b>\n{header} · {source} · Экибастуз\n{escape(item.title)}\n'
             f'Площадь: {area:g} м²\nЦена: {price_line}\n{detected}'
@@ -306,7 +360,7 @@ def _commercial_message(message: str, sent_at: str) -> str:
     match = re.fullmatch(
         r'(?P<header>🏢 <b>[^\n]+</b>)\n'
         r'(?P<notice>Впервые найдено|Новое объявление|Цена изменилась) · '
-        r'(?P<source>Krisha|OLX) · Экибастуз\n'
+        r'(?P<source>Krisha|OLX|Этажи) · Экибастуз\n'
         r'(?P<title>.*?)\nПлощадь: (?P<area>[^\n]+)\nЦена: (?P<price>[^\n]+)\n'
         r'(?:(?P<detected>Обнаружено \d{2}\.\d{2}\.\d{4} \d{2}:\d{2})\n)?'
         r'(?P<link><a href="[^\n]+">Открыть объявление</a>)',
@@ -316,7 +370,7 @@ def _commercial_message(message: str, sent_at: str) -> str:
     if match is None:
         return f'{message}\nОтправлено {sent_at}'
     parts = match.groupdict()
-    source = '🟨 <b>Krisha.kz</b>' if parts['source'] == 'Krisha' else '🟩 <b>OLX.kz</b>'
+    source = {'Krisha':'🟨 <b>Krisha.kz</b>', 'OLX':'🟩 <b>OLX.kz</b>', 'Этажи':'🟥 <b>Этажи</b>'}[parts['source']]
     detected = f"\n{parts['detected']}" if parts['detected'] else ''
     return (
         f"{parts['header']}\nЦена: <b>{parts['price']}</b>\n"
@@ -328,7 +382,7 @@ def _commercial_message(message: str, sent_at: str) -> str:
 async def save_scan(deal, items, *, source='krisha', section='property', checked_at=None,
                     require_enabled=False, complete=True, photo_attempts=()):
     # Keep the original scan keys for property and OLX so deployment does not reset their baselines.
-    scan_id = f'olx-{deal}' if source == 'olx' else (deal if section == 'property' else f'{section}-{deal}')
+    scan_id = f'{source}-{deal}' if source in {'olx', 'etagi'} else (deal if section == 'property' else f'{section}-{deal}')
     checked_at = _utc(checked_at) if checked_at else datetime.now(UTC)
     async with scan_lock, SessionLocal() as session:
         preference = await session.get(CommercialMonitorPreference, 1)
@@ -417,7 +471,8 @@ def commercial_telegram_topics(settings) -> dict[str | None, int]:
 
 async def _commercial_event_listing(session, event):
     olx_id = olx_advert_id(event.url)
-    key = f'olx:{olx_id}' if olx_id else normalize_krisha_listing_url(event.url)
+    key = f'olx:{olx_id}' if olx_id else normalize_krisha_listing_url(event.url) or (
+        event.url if re.fullmatch(r'https://ekibastuz\.etagi\.com/commerce/[1-9][0-9]{0,19}/', event.url) else None)
     return await session.get(CommercialListing, key) if key else None
 
 
@@ -425,7 +480,7 @@ async def _post_commercial_event(client, settings, event, *, thread_id=None):
     endpoint = f'https://api.telegram.org/bot{settings.telegram_bot_token}'
     target = {'chat_id': settings.telegram_chat_id, 'message_thread_id': thread_id or settings.telegram_business_thread_id,
               'parse_mode': 'HTML'}
-    source = 'olx' if normalize_olx_listing_url(event.url) else 'krisha'
+    source = 'olx' if normalize_olx_listing_url(event.url) else 'etagi' if event.url.startswith(ETAGI_CATALOG) else 'krisha'
     photo = public_listing_photo(event.photo_url, source)
     sent_at = _local_time(datetime.now(UTC), telegram_timezone(settings))
     message = _commercial_message(event.message, sent_at)
@@ -515,6 +570,17 @@ async def run_once(settings, *, krisha_retry_at):
     if not await commercial_monitor_enabled(settings):
         return krisha_retry_at
     delivery_ready = await send_commercial_events(settings)
+    for deal in ('sale', 'rent'):
+        if not await commercial_monitor_enabled(settings):
+            return krisha_retry_at
+        try:
+            items = await observed_fetch('etagi', ETAGI_CATALOG, 'search', fetch_etagi_catalog, deal)
+            await save_scan(deal, items, source='etagi', require_enabled=True)
+        except (RuntimeError, ListingImportError, SourceCoolingDown):
+            log.warning('Commercial Etagi search unavailable for %s', deal, exc_info=True)
+        else:
+            if delivery_ready:
+                delivery_ready = await send_commercial_events(settings)
     for deal in OLX_ROUTES:
         if not await commercial_monitor_enabled(settings):
             return krisha_retry_at

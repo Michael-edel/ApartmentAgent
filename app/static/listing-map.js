@@ -130,7 +130,28 @@
       }
       return entry;
     };
-    const showAlert = message => { alert.textContent = message; alert.hidden = false; };
+    let alertKind = null;
+    const showAlert = (message, kind) => { alert.textContent = message; alert.hidden = false; alertKind = kind; };
+    let map = null;
+    if (window.L) {
+      map = L.map(canvas, {zoomAnimation:false}).setView(cityCenters[options.city] || cityCenters.astana, 11);
+      state.map = map;
+      let tileErrors = 0, tileSucceeded = false;
+      const tiles = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom:19, attribution:'&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors'
+      });
+      tiles.on('tileerror', () => {
+        if (++tileErrors >= 4 && !tileSucceeded && !alertKind) {
+          showAlert('Не удалось загрузить подложку карты. Проверьте интернет; квартиры доступны в списке ниже.', 'tiles');
+        }
+      });
+      tiles.on('tileload', () => {
+        tileSucceeded = true;
+        if (alertKind === 'tiles') { alert.hidden = true; alertKind = null; }
+      });
+      tiles.addTo(map);
+      requestAnimationFrame(() => { if (active === state && dialog.open) map.invalidateSize(); });
+    }
     const params = new URLSearchParams({seller: options.seller || 'all', bank: options.bank || 'all'});
     fetch(`/api/v1/search/map?${params}`, {signal:controller.signal})
       .then(response => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); })
@@ -156,24 +177,15 @@
           if (!visible.length) listItems.append(node('p', items.length ? 'В этой области квартир нет.' : 'У выбранных объявлений нет меток на карте.'));
         };
         sourceSelect.disabled = false;
-        if (!window.L) {
+        if (!map) {
           canvas.hidden = true; list.open = true;
-          showAlert('Не удалось загрузить модуль карты. Квартиры с координатами доступны в списке.');
+          showAlert('Не удалось загрузить модуль карты. Квартиры с координатами доступны в списке.', 'map');
           const applyFilter = () => { filterItems(); updateList(items); };
           state.refreshUnavailable = applyFilter;
           sourceSelect.addEventListener('change', applyFilter);
           applyFilter();
           return;
         }
-        // Closing the dialog can remove the map during a zoom transition.
-        const map = L.map(canvas, {zoomAnimation:false}).setView(cityCenter, 11); state.map = map;
-        let tileErrors = 0, tileSucceeded = false;
-        const tiles = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-          maxZoom:19, attribution:'&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors'
-        });
-        tiles.on('tileerror', () => { if (++tileErrors >= 4 && !tileSucceeded) showAlert('Не удалось загрузить подложку карты. Проверьте интернет; квартиры доступны в списке ниже.'); });
-        tiles.on('tileload', () => { tileSucceeded = true; if (!alert.hidden) alert.hidden = true; });
-        tiles.addTo(map);
         const markers = L.layerGroup().addTo(map);
         let positions = [];
         const renderMarkers = () => {
@@ -226,7 +238,7 @@
         if (active !== state || !dialog.open || (error.name === 'AbortError' && !timedOut)) return;
         status.textContent = 'Не удалось получить квартиры для карты.';
         canvas.hidden = true; list.hidden = true;
-        showAlert(timedOut ? 'Приложение не ответило за 10 секунд. Откройте карту ещё раз.' : 'Проверьте работу приложения и откройте карту ещё раз.');
+        showAlert(timedOut ? 'Приложение не ответило за 10 секунд. Откройте карту ещё раз.' : 'Проверьте работу приложения и откройте карту ещё раз.', 'data');
       })
       .finally(() => window.clearTimeout(timeout));
   }

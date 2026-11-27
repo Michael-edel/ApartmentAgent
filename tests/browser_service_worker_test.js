@@ -59,6 +59,6 @@ function fixture() {
   const waits=[];
   env.handlers.activate({waitUntil(promise) {waits.push(promise);}});
   await Promise.all(waits);
-  assert.deepEqual(env.removed,['apartment-agent-v1','apartment-agent-v78','apartment-agent-v79','apartment-agent-v80','apartment-agent-v81','apartment-agent-v82','apartment-agent-v83']);
+  assert.deepEqual(env.removed,['apartment-agent-v1','apartment-agent-v78','apartment-agent-v79','apartment-agent-v80','apartment-agent-v81','apartment-agent-v82','apartment-agent-v83','apartment-agent-v84']);
   console.log('Panel service worker checks passed');
 })().catch(error => {console.error(error); process.exitCode=1;});

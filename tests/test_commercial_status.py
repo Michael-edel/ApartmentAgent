@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import UTC, datetime
 from secrets import token_hex
 from types import SimpleNamespace
@@ -339,6 +340,10 @@ async def test_failed_olx_fetch_leaves_the_last_success_unchanged(monitor, monke
     assert datetime.fromisoformat(status["sources"]["olx"]["last_checked_at"]) == checked
     fetch = AsyncMock(side_effect=RuntimeError("OLX catalog unavailable"))
     monkeypatch.setattr(commercial, "fetch_olx_catalog", fetch)
+    monkeypatch.setattr(commercial, "fetch_etagi_catalog", AsyncMock(side_effect=RuntimeError("not requested")))
+    async def observed(source, url, method, fetcher, *args):
+        return await fetcher(*args)
+    monkeypatch.setattr(commercial, "observed_fetch", observed)
 
     await commercial.run_once(settings, krisha_retry_at=asyncio.get_running_loop().time() + 300)
 
@@ -346,8 +351,50 @@ async def test_failed_olx_fetch_leaves_the_last_success_unchanged(monitor, monke
     assert (await client.get(STATUS_URL)).json() == status
 
 
+async def test_etagi_baseline_and_price_change_are_tracked_in_correct_topic(monitor):
+    client, sessions, settings = monitor
+    item = commercial.EtagiCommercialItem(
+        'Помещение · 120 м²', 'https://ekibastuz.etagi.com/commerce/123/',
+        '20 000 000 ₸', 120, photo_url='https://cdn.esoft.digital/content/offer.jpg',
+    )
+    first = datetime(2026, 11, 27, 6, 0, tzinfo=UTC)
+    await commercial.save_scan('sale', [item], source='etagi', checked_at=first)
+    async with sessions() as session:
+        assert await session.scalar(select(CommercialEvent.id)) is None
+    item.snippet = '19 000 000 ₸'
+    await commercial.save_scan('sale', [item], source='etagi', checked_at=first)
+    async with sessions() as session:
+        event = await session.scalar(select(CommercialEvent))
+        assert event.deal_type == 'sale'
+        assert '20 000 000' in event.message and '19 000 000' in event.message
+        assert 'Этажи' in commercial._commercial_message(event.message, '27.11.2026 11:00')
+        assert (await commercial._commercial_event_listing(session, event)).url == item.url
+    status = (await client.get(STATUS_URL)).json()
+    assert status['sources']['etagi']['count'] == 1
+    assert datetime.fromisoformat(status['sources']['etagi']['last_checked_at']) == first
+    assert status['sources']['krisha']['count'] == 0
+
+
+async def test_etagi_catalog_excludes_recommendations_and_other_deals(monitor, monkeypatch):
+    state = {'filters': {'commerce': {'count': 1, 'limit': 30}}, 'lists': {'commerce': [
+        {'object_id': 1, 'class': 'offices', 'status': 'active', 'action_sl': 'sale',
+         'square': 120, 'price': '20000000', 'meta': {'city': 'Экибастуз', 'street': 'Абая'}},
+        {'object_id': 2, 'class': 'offices', 'status': 'active', 'action_sl': 'sale',
+         'square': 120, 'price': '30000000', 'meta': {'city': 'Экибастуз'}},
+    ]}}
+    monkeypatch.setattr(commercial, 'get_etagi_page',
+                        AsyncMock(return_value='<script>var data=' + json.dumps(state) + '</script>'))
+    found = await commercial.fetch_etagi_catalog('sale')
+    assert [row.url for row in found] == ['https://ekibastuz.etagi.com/commerce/1/']
+    assert found[0].snippet == '20 000 000 ₸'
+
+
 async def test_disabling_during_an_olx_fetch_discards_its_result(monitor, monkeypatch):
     client, _, settings = monitor
+    monkeypatch.setattr(commercial, "fetch_etagi_catalog", AsyncMock(side_effect=RuntimeError("not requested")))
+    async def observed(source, url, method, fetcher, *args):
+        return await fetcher(*args)
+    monkeypatch.setattr(commercial, "observed_fetch", observed)
     ad = commercial.OlxCommercialItem(
         "Склад", "https://www.olx.kz/d/obyavlenie/sklad-IDabc.html", "100 000 ₸", 120, None,
     )

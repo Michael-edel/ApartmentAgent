@@ -18,11 +18,12 @@ class Element {
 (async () => {
   const body = new Element('body');
   const document = {body, createElement: tag => new Element(tag), createTextNode: text => ({textContent:text})};
-  let requests = 0, fits = 0, layers = [];
+  let requests = 0, fits = 0, layers = [], tilesAdded = 0, resolveFirst;
+  let mode = 'delayed', tileListeners = {};
   const map = {setView() { fits++; return this; }, fitBounds() { fits++; return this; },
     getBounds() { return {contains:() => true}; }, on() {}, remove() {}, invalidateSize() {}};
   const group = {addTo() { return this; }, clearLayers() { layers = []; }};
-  const L = {map:() => map, tileLayer:() => ({on() {}, addTo() {}}), layerGroup:() => group,
+  const L = {map:() => map, tileLayer:() => ({on(name, fn) {tileListeners[name] = fn;}, addTo() {tilesAdded++;}}), layerGroup:() => group,
     divIcon: value => value, marker: (_position, options) => ({bindPopup(popup) {this.popup = popup; return this;},
       addTo() {layers.push({title:options.title, icon:options.icon, popup:this.popup}); return this;}})};
   const response = {city:'astana', items:[
@@ -32,9 +33,17 @@ class Element {
   const window = {L, setTimeout, clearTimeout};
   vm.runInNewContext(fs.readFileSync('app/static/listing-map.js','utf8'), {
     window, document, L, URL, URLSearchParams, AbortController, Intl, Number, Set, Map,
-    requestAnimationFrame() {}, fetch:async () => { requests++; return {ok:true,json:async () => response}; },
+    requestAnimationFrame() {}, fetch:async () => {
+      requests++;
+      if (mode === 'delayed') await new Promise(resolve => {resolveFirst = resolve;});
+      return {ok:mode !== 'failure', status:500, json:async () => response};
+    },
   });
   window.ApartmentAgentMap.open();
+  assert.equal(tilesAdded, 1, 'base map begins loading before the data response');
+  assert.equal(layers.length, 0, 'markers wait for the data response');
+  mode = 'normal';
+  resolveFirst();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(requests, 1);
   assert.equal(layers.length, 2);
@@ -74,5 +83,34 @@ class Element {
   sourceSelect.value = 'cross';
   sourceSelect.listeners.change();
   assert.deepEqual(layers.map(x => x.title), ['Дубль Krisha и OLX']);
+
+  mode = 'failure';
+  window.ApartmentAgentMap.open();
+  await new Promise(resolve => setImmediate(resolve));
+  const failedDialog = body.children.at(-1);
+  const alert = all(failedDialog).find(node => node.className === 'listing-map-alert');
+  assert.equal(alert.hidden, false);
+  assert.match(alert.textContent, /Проверьте работу приложения/);
+  tileListeners.tileload();
+  assert.equal(alert.hidden, false, 'a late tile response cannot hide a data error');
+
+  mode = 'delayed';
+  window.ApartmentAgentMap.open();
+  const delayedDialog = body.children.at(-1);
+  const tileAlert = all(delayedDialog).find(node => node.className === 'listing-map-alert');
+  for (let index = 0; index < 4; index++) tileListeners.tileerror();
+  assert.match(tileAlert.textContent, /подложку карты/);
+  tileListeners.tileload();
+  assert.equal(tileAlert.hidden, true, 'tile warning clears after a successful tile');
+  const resolveOldRequest = resolveFirst;
+  delayedDialog.close();
+  mode = 'normal';
+  window.ApartmentAgentMap.open();
+  await new Promise(resolve => setImmediate(resolve));
+  const titlesAfterReopen = layers.map(layer => layer.title);
+  resolveOldRequest();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(layers.map(layer => layer.title), titlesAfterReopen,
+    'a closed map cannot alter the reopened map after its request finishes');
   console.log('Map availability checks passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
